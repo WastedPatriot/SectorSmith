@@ -13,11 +13,13 @@ import shutil
 import socket
 import sys
 import threading
+import time
 import zlib
 
+from .. import offline
 from ..device import Device, list_disks, open_image, volume_letters_for
 from ..partitions import read_partition_table
-from ..util import APP_VERSION, get_logger, is_admin
+from ..util import APP_VERSION, Cancelled, cancel_scope, check_cancel, current_check, get_logger, is_admin
 from .proto import Conn, LinkError, RemoteError, local_ips
 
 log = get_logger()
@@ -35,7 +37,14 @@ SKIP_APPDATA_FILES = {"lock", "cookies", "cookies-journal", "singletonlock", "si
 OPS = {"info", "list_disks", "list_profiles", "scan_tree", "dir_size", "read_file", "read_files", "write_file",
        "write_files", "mkdirs", "free_space", "path_exists", "disk_open", "disk_read", "disk_write", "disk_close",
        "ping", "list_dir", "disk_fix_gpt", "disk_plan", "make_folder",
-       "installed_software", "put_file", "run_command", "run_script", "file_version", "remove_path", "deploy_dir"}
+       "installed_software", "put_file", "run_command", "run_script", "file_version", "remove_path", "deploy_dir",
+       "list_volumes", "offline_profiles", "apps_on_disk"}
+# ops that can take a while: inside a cancel_scope a controller runs these as background jobs on the agent,
+# polls them and can cancel them (see Session)
+LONG_OPS = {"scan_tree", "dir_size", "run_command", "run_script", "disk_open", "disk_plan", "installed_software",
+            "offline_profiles", "list_disks", "apps_on_disk"}
+DEV_FIELDS = ("path", "name", "size", "sector_size", "model", "bus", "serial", "is_image", "is_system", "removable",
+              "disk_number", "data_size")
 
 
 def _long(p: str) -> str:
@@ -60,6 +69,29 @@ def _skip_file(name: str, in_appdata: bool = False) -> bool:
     return any(fnmatch.fnmatch(n, pat) for pat in SKIP_FILES)
 
 
+def _read_only(root: str):
+    if offline.is_raw(root):
+        raise LinkError("That disk is read directly (no drive letter), so nothing can be written to it.")
+
+
+def _kill_tree(p):
+    """Stop a command and everything it started (an installer often runs a child that does the real work)."""
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True,
+                           timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            import signal
+            os.killpg(p.pid, signal.SIGKILL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+
+
 def _clear_attrs(p: str):
     """Windows refuses to overwrite hidden/system/read-only files ("Permission denied") — clear those first."""
     if sys.platform == "win32" and os.path.exists(p):
@@ -74,6 +106,7 @@ class LocalEndpoint:
         self._devs: dict[str, Device] = {}
         self._open: dict[str, Device] = {}
         self._snaps: dict = {}
+        self._raw: dict = {}
         self.extra_images = list(extra_images or [])
         self.label = label or "This PC"
         self.lock = threading.Lock()
@@ -131,18 +164,21 @@ class LocalEndpoint:
 
     def disk_open(self, path, writable=False, snapshot=False):
         d = self._dev(path)
-        dev = Device(**{f: getattr(d, f) for f in ("path", "name", "size", "sector_size", "model", "bus", "serial",
-                                                   "is_image", "is_system", "removable", "disk_number",
-                                                   "data_size")})
+        dev = Device(**{f: getattr(d, f) for f in DEV_FIELDS})
         dev.open(writable=writable)
         self._open[path] = dev
         info = {"usable": dev.usable_size, "sector_size": dev.sector_size, "snapshot": [], "notes": []}
-        if snapshot and not writable:
-            from ..vss import needs_snapshot, snapshot_disk
-            if needs_snapshot(dev):
-                snap = snapshot_disk(dev)
-                self._snaps[path] = snap
-                info["snapshot"], info["notes"] = snap.volumes, snap.notes
+        try:
+            if snapshot and not writable:
+                from ..vss import needs_snapshot, snapshot_disk
+                if needs_snapshot(dev):
+                    snap = snapshot_disk(dev)  # releases its own shadows if cancelled
+                    self._snaps[path] = snap
+                    info["snapshot"], info["notes"] = snap.volumes, snap.notes
+        except BaseException:
+            self._open.pop(path, None)
+            dev.close()
+            raise
         return info
 
     def disk_plan(self, path, start_lba=0, sectors=None, smart=True):
@@ -240,8 +276,79 @@ class LocalEndpoint:
                         res.append({"name": n, "path": p, "sid": ""})
         return res
 
+    def offline_profiles(self, raw=False):
+        """User folders on other drives: old Windows disks attached by USB, or this PC's own disk when it was
+        booted from the SectorSmith USB. raw=True also reads NTFS partitions that have no drive letter (slow)."""
+        mine = {p["path"] for p in self.list_profiles()}
+        out = offline.offline_profiles(exclude=mine)
+        if raw:
+            out += offline.raw_profiles(self.list_disks(), self._rawfs)
+        return out
+
+    def list_volumes(self):
+        return offline.volumes()
+
+    def apps_on_disk(self, profile):
+        """Apps of a Windows that isn't running (old disk, or raw NTFS), found by their Program Files folders."""
+        from .apps import apps_on_disk, volume_of
+        if offline.is_raw(profile):
+            def join(*p):
+                return "/".join(x.rstrip("/") for x in p)
+        else:
+            join = os.path.join
+        return apps_on_disk(self.list_dir, self.path_exists, join, volume_of(profile), profile)
+
+    def _rawfs(self, disk, start_lba):
+        key = (disk, int(start_lba))
+        fs = self._raw.get(key)
+        if fs is None:
+            d = self._dev(disk)
+            dev = Device(**{f: getattr(d, f) for f in DEV_FIELDS})
+            dev.open(writable=False)
+            try:
+                fs = offline.RawNTFS(dev, int(start_lba))
+            except BaseException:
+                dev.close()
+                raise
+            self._raw[key] = fs
+        return fs
+
+    def _raw_entry(self, root, rel=""):
+        disk, lba, inner = offline.parse_raw(root)
+        fs = self._rawfs(disk, lba)
+        r = rel.replace("\\", "/").strip("/")
+        if any(x == ".." for x in r.split("/")):
+            raise ValueError(f"Unsafe path: {rel}")
+        return fs, fs.find("/".join(x for x in (inner, r) if x)), r
+
+    def _raw_scan(self, root, rel):
+        fs, base, prefix = self._raw_entry(root, rel)
+        out = []
+        if base is None or not base.is_dir:
+            return {"files": out, "errors": 0}
+        stack, n = [(base, prefix)], 0
+        while stack:
+            e, rp = stack.pop()
+            in_appdata = rp.lower().split("/")[:1] == ["appdata"]
+            for c in fs.list(e):
+                n += 1
+                if n % 512 == 0:
+                    check_cancel()
+                if c.attrs & 0x400:  # junctions and cloud-only placeholders hold no data of their own
+                    continue
+                crel = f"{rp}/{c.name}" if rp else c.name
+                if c.is_dir:
+                    if c.name.lower() not in SKIP_DIRS:
+                        stack.append((c, crel))
+                elif not _skip_file(c.name, in_appdata):
+                    out.append([crel, c.size, fs.mtime(c)])
+        return {"files": out, "errors": 0}
+
     def list_dir(self, path):
         """Sub-folder names of path."""
+        if offline.is_raw(path):
+            fs, e, _ = self._raw_entry(path)
+            return sorted(c.name for c in fs.list(e) if c.is_dir and not c.attrs & 0x400) if e is not None else []
         try:
             with os.scandir(_long(path)) as it:
                 return sorted(e.name for e in it if e.is_dir(follow_symlinks=False))
@@ -249,9 +356,13 @@ class LocalEndpoint:
             return []
 
     def path_exists(self, path):
+        if offline.is_raw(path):
+            return self._raw_entry(path)[1] is not None
         return os.path.exists(_long(path))
 
     def free_space(self, path):
+        if offline.is_raw(path):
+            return None
         try:
             return shutil.disk_usage(path).free
         except OSError:
@@ -259,18 +370,24 @@ class LocalEndpoint:
 
     def scan_tree(self, root, rel=""):
         """All files under root/rel: [[relpath, size, mtime], ...] (relative to root). Skips caches/temp."""
+        if offline.is_raw(root):
+            return self._raw_scan(root, rel)
         base = os.path.join(root, _safe_rel(rel)) if rel else root
         out = []
         if not os.path.isdir(_long(base)):
             return {"files": [], "errors": 0}
         errors = 0
         stack = [base]
+        seen = 0
         while stack:
             d = stack.pop()
             in_appdata = "appdata" in os.path.relpath(d, root).lower().replace("\\", "/").split("/")[:1]
             try:
                 with os.scandir(_long(d)) as it:
                     for e in it:
+                        seen += 1
+                        if seen % 256 == 0:
+                            check_cancel()
                         try:
                             if e.is_symlink():
                                 continue
@@ -296,6 +413,12 @@ class LocalEndpoint:
         return {"bytes": sum(f[1] for f in t["files"]), "files": len(t["files"])}
 
     def read_file(self, root, rel, offset, size):
+        if offline.is_raw(root):
+            fs, e, _ = self._raw_entry(root, rel)
+            if e is None:
+                raise FileNotFoundError(rel)
+            data = fs.read(e, offset, size)
+            return {"n": len(data)}, data
         with open(_long(os.path.join(root, _safe_rel(rel))), "rb") as f:
             f.seek(offset)
             data = f.read(size)
@@ -303,10 +426,18 @@ class LocalEndpoint:
 
     def read_files(self, root, rels):
         sizes, buf, errs = [], bytearray(), {}
+        raw = offline.is_raw(root)
         for r in rels:
+            check_cancel()
             try:
-                with open(_long(os.path.join(root, _safe_rel(r))), "rb") as f:
-                    d = f.read()
+                if raw:
+                    fs, e, _ = self._raw_entry(root, r)
+                    if e is None:
+                        raise FileNotFoundError(2, "not found")
+                    d = fs.read(e, 0, e.size)
+                else:
+                    with open(_long(os.path.join(root, _safe_rel(r))), "rb") as f:
+                        d = f.read()
                 sizes.append(len(d))
                 buf += d
             except OSError as e:
@@ -316,17 +447,20 @@ class LocalEndpoint:
 
     def make_folder(self, path):
         """Create a new destination folder (e.g. a profile folder for a user who has no account here yet)."""
+        _read_only(path)
         p = _long(path)
         existed = os.path.isdir(p)
         os.makedirs(p, exist_ok=True)
         return {"path": path, "existed": existed, "free": self.free_space(path)}
 
     def mkdirs(self, root, rels):
+        _read_only(root)
         for r in rels:
             os.makedirs(_long(os.path.join(root, _safe_rel(r))), exist_ok=True)
         return True
 
     def write_file(self, root, rel, offset, total, mtime=None, blob=b""):
+        _read_only(root)
         p = _long(os.path.join(root, _safe_rel(rel)))
         os.makedirs(os.path.dirname(p), exist_ok=True)
         if not offset:
@@ -341,6 +475,7 @@ class LocalEndpoint:
         return True
 
     def write_files(self, root, items, blob=b""):
+        _read_only(root)
         pos = 0
         errs = {}
         for it in items:
@@ -441,18 +576,43 @@ class LocalEndpoint:
         return True
 
     def run_command(self, cmd, timeout=3600, cwd=None, env=None):
+        """Run a shell command. Cancel (or the timeout) stops it and everything it started."""
         import subprocess
-        import time as _t
-        t0 = _t.time()
-        try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout, cwd=cwd,  # nosec B602
-                               env={**os.environ, **env} if env else None,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            code, out, err = r.returncode, r.stdout, r.stderr
-        except subprocess.TimeoutExpired as e:
-            code, out, err = -1, e.stdout or b"", (e.stderr or b"") + b"\n[timed out]"
+        t0 = time.time()
+        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd,  # nosec B602
+                             env={**os.environ, **env} if env else None, start_new_session=sys.platform != "win32",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        timed_out = False
+        while True:
+            try:
+                out, err = p.communicate(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                stop = None
+                if time.time() - t0 > timeout:
+                    stop = "timeout"
+                else:
+                    try:
+                        check_cancel()
+                    except Cancelled:
+                        stop = "cancel"
+                if stop is None:
+                    continue
+                _kill_tree(p)
+                try:
+                    out, err = p.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    out, err = b"", b""
+                if stop == "cancel":
+                    log.info("Command stopped by Cancel: %s", cmd[:200])
+                    raise Cancelled("Stopped the running command")
+                timed_out = True
+                break
+        code = -1 if timed_out else p.returncode
+        if timed_out:
+            err = (err or b"") + b"\n[timed out]"
         dec = (lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or ""))
-        return {"code": code, "out": dec(out)[-6000:], "err": dec(err)[-3000:], "seconds": round(_t.time() - t0, 1)}
+        return {"code": code, "out": dec(out)[-6000:], "err": dec(err)[-3000:], "seconds": round(time.time() - t0, 1)}
 
     def run_script(self, script, language="powershell", timeout=1800, params=None):
         """language: powershell, cmd (Windows batch) or shell/sh. Params become variables at the top."""
@@ -526,6 +686,9 @@ class LocalEndpoint:
     def close(self):
         for p in list(self._open):
             self.disk_close(p)
+        for fs in self._raw.values():
+            fs.dev.close()
+        self._raw.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +710,61 @@ def dispatch(ep: LocalEndpoint, req: dict, blob: bytes | None):
             res, rblob = res
         return {"id": req.get("id"), "ok": True, "result": res}, rblob
     except Exception as e:  # noqa: BLE001
-        log.warning("Link op %s failed: %s", op, e)
+        if not isinstance(e, Cancelled):
+            log.warning("Link op %s failed: %s", op, e)
         return {"id": req.get("id"), "ok": False, "error": str(e), "kind": type(e).__name__}, None
+
+
+class Session:
+    """Agent side of one controller connection. Most ops run straight away; a long op sent with "async" runs in a
+    background job that the controller polls ("job_poll") and can stop ("job_cancel"), so Cancel on the
+    controller reaches a running installer, file scan or snapshot here."""
+
+    def __init__(self, ep: LocalEndpoint):
+        self.ep = ep
+        self.jobs: dict[int, dict] = {}
+        self._next = 0
+
+    def handle(self, req: dict, blob: bytes | None):
+        op, rid = req.get("op"), req.get("id")
+        args = req.get("args") or {}
+        if op in ("job_poll", "job_cancel"):
+            j = self.jobs.get(args.get("job"))
+            if j is None:
+                return {"id": rid, "ok": False, "error": "No such job", "kind": "LinkError"}, None
+            if op == "job_cancel":
+                j["cancel"].set()
+                return {"id": rid, "ok": True, "result": True}, None
+            if not j["done"].wait(min(float(args.get("wait", 0.3)), 5.0)):
+                return {"id": rid, "ok": True, "pending": True}, None
+            del self.jobs[args["job"]]
+            resp, rblob = j["resp"]
+            return dict(resp, id=rid), rblob
+        if req.get("async") and op in LONG_OPS:
+            self._next += 1
+            jid = self._next
+            j = {"cancel": threading.Event(), "done": threading.Event(), "resp": None}
+            self.jobs[jid] = j
+
+            def stop_if_cancelled(ev=j["cancel"]):
+                if ev.is_set():
+                    raise Cancelled("Cancelled by the controller")
+
+            def work():
+                with cancel_scope(stop_if_cancelled):
+                    j["resp"] = dispatch(self.ep, req, blob)
+                j["done"].set()
+            threading.Thread(target=work, daemon=True, name=f"link-job-{op}").start()
+            return {"id": rid, "ok": True, "pending": True, "job": jid}, None
+        return dispatch(self.ep, req, blob)
+
+    def close(self):
+        """Controller gone: stop whatever it left running here."""
+        for j in self.jobs.values():
+            j["cancel"].set()
+        for j in list(self.jobs.values()):
+            j["done"].wait(20)
+        self.jobs.clear()
 
 
 class RemoteEndpoint:
@@ -565,17 +781,41 @@ class RemoteEndpoint:
         self._id = 0
         self.alive = True
 
+    def _rpc(self, msg, blob=None):
+        self._id += 1
+        try:
+            self.conn.send(dict(msg, id=self._id), blob)
+            return self.conn.recv()
+        except (OSError, LinkError) as e:
+            self.alive = False
+            raise LinkError(f"Lost connection to {self.label}: {e}") from e
+
     def _call(self, op, blob=None, **args):
+        check = current_check()
+        cancelled = False
         with self.lock:
             if not self.alive:
                 raise LinkError(f"{self.label} is disconnected")
-            self._id += 1
-            try:
-                self.conn.send({"id": self._id, "op": op, "args": args}, blob)
-                res, rblob = self.conn.recv()
-            except (OSError, LinkError) as e:
-                self.alive = False
-                raise LinkError(f"Lost connection to {self.label}: {e}") from e
+            if check is None or op not in LONG_OPS:
+                res, rblob = self._rpc({"op": op, "args": args}, blob)
+            else:
+                # run it as a job on the agent and poll, so Cancel here can stop it there
+                res, rblob = self._rpc({"op": op, "args": args, "async": True}, blob)
+                jid, give_up = res.get("job"), None
+                while res.get("pending") and jid is not None:
+                    if not cancelled:
+                        try:
+                            check()
+                        except Cancelled:
+                            cancelled = True
+                            give_up = time.monotonic() + 30
+                            self._rpc({"op": "job_cancel", "args": {"job": jid}})
+                    elif time.monotonic() > give_up:
+                        log.warning("%s: %s didn't stop within 30 s of Cancel", self.label, op)
+                        break
+                    res, rblob = self._rpc({"op": "job_poll", "args": {"job": jid, "wait": 0.3}})
+        if cancelled or res.get("kind") == "Cancelled":
+            raise Cancelled(f"Stopped {op} on {self.label}")
         if not res.get("ok"):
             raise RemoteError(res.get("kind", "Error"), res.get("error", "?"))
         return (res["result"], rblob) if rblob is not None or op in ("disk_read", "read_file", "read_files") \

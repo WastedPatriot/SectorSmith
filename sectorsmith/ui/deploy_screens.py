@@ -42,9 +42,10 @@ LANGUAGES = {"powershell": "PowerShell", "shell": "Shell (sh)"}
 KIND_LABEL = {"msi": "MSI", "exe": "EXE", "msix": "MSIX", "winget": "winget", "script": "Script"}
 ACTION_LABEL = {"none": "Nothing to do", "install": "Install", "upgrade": "Update", "reinstall": "Roll back",
                 "uninstall": "Remove", "set": "Fix", "audit": "Report only"}
-STATUS_LABEL = {"compliant": "OK", "failed": "Failed", "pending": "Needs a change", "non-compliant": "Not OK"}
-WINGET_INSTALL = "winget install --id {winget_id} -e --silent --accept-package-agreements --accept-source-agreements"
-WINGET_UNINSTALL = "winget uninstall --id {winget_id} -e --silent"
+STATUS_LABEL = {"compliant": "OK", "failed": "Failed", "pending": "Needs a change", "non-compliant": "Not OK",
+                "cancelled": "Stopped"}
+WINGET_INSTALL = core.WINGET_INSTALL
+WINGET_UNINSTALL = core.WINGET_UNINSTALL
 
 
 def _key(mapping, label):
@@ -1320,7 +1321,9 @@ class RunWizard(Screen):
         self._draw_steps(1)
         self._live_list(body, machines)
         self.app.run_job("Deploy check", self._job(machines, "detect"), self._checked, panel,
-                         on_error=self._error, on_cancel=self._pcs)
+                         on_error=self._error, on_cancel=lambda info: self.cancelled_state(
+                             "Check stopped", ["Checking only reads, so nothing was changed on any PC."], step=1,
+                             secondary=("Back", self._pcs)))
 
     def _changes(self, sess):
         return [a for a in sess.get("actions", []) if a.get("action") not in ("none", "audit")]
@@ -1384,7 +1387,28 @@ class RunWizard(Screen):
         self._draw_steps(3)
         self._live_list(body, machines)
         self.app.run_job("Deploy", self._job(machines, "full"), self._done, panel, on_error=self._error,
-                         on_cancel=lambda: self.app.go(DeployScreen, tab="Sessions"))
+                         on_cancel=self._stopped)
+
+    def _stopped(self, info):
+        sess = info.get("session") or {}
+        lines = []
+        acts = sess.get("actions", [])
+        ran = [a for a in acts if a.get("status") in ("compliant", "failed")
+               and a.get("action") not in ("none", "audit")]
+        part = [a for a in acts if a.get("status") == "cancelled" and "part-way" in a.get("result", "")]
+        left = [a for a in acts if a.get("status") == "cancelled" and a not in part]
+        if sess:
+            lines.append(f"On {sess.get('machine', '?')}: {_plural(len(ran), 'change')} finished before you "
+                         "pressed Cancel.")
+        for a in part:
+            lines.append(f"{a['name']} was stopped while it ran, so it may be half done. Check it on that PC, or "
+                         "run maintenance again to finish it.")
+        if left:
+            lines.append(f"Not started: {', '.join(a['name'] for a in left[:6])}"
+                         + (" and more" if len(left) > 6 else ""))
+        lines.append("PCs after that one weren't touched. The session is saved on the Sessions tab.")
+        self.cancelled_state("Maintenance stopped", lines, step=3,
+                             primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")))
 
     def _done(self, results):
         acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in ("none", "audit")]

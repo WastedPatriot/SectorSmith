@@ -326,6 +326,36 @@ pump(.4)
 assert scr.out.get("1.0", "end").strip() != ""
 shot("session_view_dark")
 
+# --- Cancel while a fix hangs on a PC: Cancelling... then Stopped, and the session is kept ---------------
+from sectorsmith.deploy.core import Deployment, Task  # noqa: E402
+st = store()
+slow = st.upsert("tasks", Task(name="Slow fix", test="exit 1", set="sleep 60", language="shell"))
+slow_dep = st.upsert("deployments", Deployment("task", slow.id, "enforce"))
+n_sessions = len(st.sessions())
+app.go(D.RunWizard)
+pump(.5)
+scr = app.screen
+scr.checklist.cards[0][0].click()
+pump(.2)
+press("Check 1 PC")
+wait()
+press("Apply changes")
+type_confirm(f"APPLY ON {host.upper()}")
+press("Apply now")
+until(lambda: app.job is not None and app.job.label.startswith("Set: Slow fix"), 20)
+pump(.5)
+app.cancel_job()
+t0 = time.time()
+wait()
+assert time.time() - t0 < 6, "cancel took too long"
+shot("run_cancelled_dark")
+assert scr.title_lbl.cget("text") == "Stopped", scr.title_lbl.cget("text")
+last = st.sessions()[0]
+assert len(st.sessions()) == n_sessions + 2 and last.get("cancelled"), last.get("summary")  # check + apply
+assert {a["name"]: a["status"] for a in last["actions"]}["Slow fix"] == "cancelled"
+press("Back to Deploy")
+st.delete("tasks", slow.id)
+
 theme.set_mode("light")
 app.mode.set("Light")
 app.open_guide("deploy")

@@ -263,5 +263,102 @@ r = surface.image_copy(open_image(SRC), os.path.join(W, "smart.img"), Progress(1
 check(not verify_disk(os.path.join(W, "smart.img"), meta, None) and r["sha256"],
       "smart image file valid (unused space sparse) and hashed")
 
+# 10. Cancel stops every long job promptly and says what state it left -----------------------
+import threading  # noqa: E402
+from sectorsmith.link.endpoint import LocalEndpoint  # noqa: E402
+from sectorsmith.util import Cancelled, cancel_scope  # noqa: E402
+
+
+def run_cancel(fn, after=8 << 20, delay=None):
+    """Run fn(prog) in a thread like the UI does; press Cancel once `after` bytes are done (or after `delay`
+    seconds). Returns (exception or result, seconds from Cancel to the job ending)."""
+    pressed = []
+
+    class Prog(Progress):
+        def update(self, done):
+            super().update(done)
+            if delay is None and done >= after:
+                press()
+    prog = Prog(1)
+
+    def press():
+        if not pressed:
+            pressed.append(time.monotonic())
+            prog.cancel()
+    out = {}
+
+    def work():
+        try:
+            with cancel_scope(prog.check):
+                out["r"] = fn(prog)
+        except Exception as e:  # noqa: BLE001
+            out["r"] = e
+        out["t"] = time.monotonic()
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    if delay is not None:
+        time.sleep(delay)
+        press()
+    th.join(60)
+    if th.is_alive():
+        return "still running", 999
+    return out["r"], out["t"] - pressed[0] if pressed else -1
+
+
+p = fresh("cancel_wipe.img")
+r, dt = run_cancel(lambda prog: wipe.wipe_disk(open_image(p), wipe.METHODS["Gutmann (35 pass)"], prog))
+check(isinstance(r, Cancelled) and r.info["pass_no"] == 1 and 0 < r.info["overwritten"] < r.info["length"]
+      and dt < 3,
+      f"wipe: Cancel stops it in {dt:.2f}s and reports how much was overwritten "
+      f"({getattr(r, 'info', {}).get('overwritten', 0) >> 20} MiB, pass {getattr(r, 'info', {}).get('pass_no')})")
+out = os.path.join(W, "cancel_image.img")
+r, dt = run_cancel(lambda prog: surface.image_copy(open_image(SRC), out, prog))
+check(isinstance(r, Cancelled) and r.info["state"] == "removed" and not os.path.exists(out) and dt < 3,
+      f"image to file: Cancel stops it in {dt:.2f}s and deletes the unfinished image")
+tgt = os.path.join(W, "cancel_target.img")
+garbage_file(tgt, 256 * 1024 * 1024)
+r, dt = run_cancel(lambda prog: surface.image_copy(open_image(SRC), open_image(tgt), prog, smart=True))
+check(isinstance(r, Cancelled) and r.info["state"] == "part-written" and r.info["to_device"] and dt < 3,
+      f"clone to disk: Cancel stops it in {dt:.2f}s and says the target is part-written")
+r, dt = run_cancel(lambda prog: surface.surface_scan(open_image(SRC), prog, block_sectors=256), after=4 << 20)
+check(isinstance(r, Cancelled) and dt < 3, f"surface scan: Cancel stops it in {dt:.2f}s")
+r, dt = run_cancel(lambda prog: carver.carve(open_image(SRC), os.path.join(W, "cancel_carve"), prog),
+                   after=1 << 20)
+check(isinstance(r, Cancelled) and dt < 3, f"deep scan: Cancel stops it in {dt:.2f}s")
+r, dt = run_cancel(lambda prog: partscan.scan_partitions(open_image(SRC), prog, mode="full"), after=1 << 20)
+check(isinstance(r, Cancelled) and dt < 3, f"partition search: Cancel stops it in {dt:.2f}s")
+
+
+def cancelled_now():
+    raise Cancelled()
+
+
+try:
+    with cancel_scope(cancelled_now):
+        usedmap.copy_plan(open_image(SRC))
+    check(False, "used-space map honours Cancel")
+except Cancelled:
+    check(True, "used-space map honours Cancel (not mistaken for an unknown filesystem)")
+ep = LocalEndpoint()
+marker = os.path.join(W, "cancel_marker")
+if os.path.exists(marker):
+    os.remove(marker)
+r, dt = run_cancel(lambda prog: ep.run_command(f"(sleep 2; touch '{marker}') & sleep 30"), delay=0.5)
+time.sleep(2.5)
+check(isinstance(r, Cancelled) and dt < 2 and not os.path.exists(marker),
+      f"command: Cancel ends it and what it started in {dt:.2f}s")
+r = ep.run_command("sleep 5", timeout=1)
+check(r["code"] == -1 and "timed out" in r["err"] and r["seconds"] < 3, "command timeout still works")
+many = os.path.join(W, "cancel_tree")
+os.makedirs(many, exist_ok=True)
+for i in range(1500):
+    open(os.path.join(many, f"f{i}.txt"), "w").close()
+try:
+    with cancel_scope(cancelled_now):
+        ep.scan_tree(many)
+    check(False, "file scan honours Cancel")
+except Cancelled:
+    check(True, "file scan honours Cancel")
+
 print(f"\n{sum(OK)}/{len(OK)} checks passed")
 sys.exit(0 if all(OK) else 1)

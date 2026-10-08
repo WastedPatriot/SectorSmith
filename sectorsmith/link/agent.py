@@ -9,7 +9,7 @@ import threading
 import time
 
 from ..util import APP_VERSION, get_logger
-from .endpoint import LocalEndpoint, dispatch
+from .endpoint import LocalEndpoint, Session
 from .proto import DEFAULT_PORT, Conn, LinkError, client_context, local_ips, make_cert, new_code, \
     peer_fingerprint, server_context
 
@@ -38,12 +38,16 @@ class AgentState:
 
 
 def _serve(conn: Conn, ep: LocalEndpoint, state: AgentState):
-    while not state.stop.is_set():
-        req, blob = conn.recv()
-        if req.get("op") == "bye":
-            break
-        resp, rblob = dispatch(ep, req, blob)
-        conn.send(resp, rblob)
+    sess = Session(ep)
+    try:
+        while not state.stop.is_set():
+            req, blob = conn.recv()
+            if req.get("op") == "bye":
+                break
+            resp, rblob = sess.handle(req, blob)
+            conn.send(resp, rblob)
+    finally:
+        sess.close()  # stops anything the controller left running (it may have gone mid-install)
 
 
 def run_connect(host: str, port: int, token: str, pin: str, ep: LocalEndpoint, state: AgentState,
