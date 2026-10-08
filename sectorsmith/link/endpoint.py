@@ -25,12 +25,17 @@ log = get_logger()
 SKIP_DIRS = {"cache", "code cache", "gpucache", "cachestorage", "crashpad", "temp", "tmp", "shadercache",
              "grshadercache", "dawncache", "graphitedawncache", "component_crx_cache", "inetcache",
              "temporary internet files", "$recycle.bin", "system volume information", "crashdumps"}
-SKIP_FILES = ["*.tmp", "~$*", "thumbs.db", "ntuser.dat*", "usrclass.dat*", "*.lock", "lockfile", "parent.lock"]
+SKIP_FILES = ["*.tmp", "~$*", "thumbs.db", "ntuser.dat*", "usrclass.dat*", "*.lock", "lockfile", "parent.lock",
+              "desktop.ini"]  # desktop.ini: every PC has its own (hidden+system) copy for folder names/icons
+# app-data files that are either held open while the app runs or only work on the PC that made them
+# (browser cookies are encrypted with a key tied to that PC/user, so they can't be used on the new one)
+SKIP_APPDATA_FILES = {"lock", "cookies", "cookies-journal", "singletonlock", "singletoncookie", "singletonsocket"}
 
 # ops a remote controller may call on an agent
 OPS = {"info", "list_disks", "list_profiles", "scan_tree", "dir_size", "read_file", "read_files", "write_file",
        "write_files", "mkdirs", "free_space", "path_exists", "disk_open", "disk_read", "disk_write", "disk_close",
-       "ping", "list_dir", "disk_fix_gpt"}
+       "ping", "list_dir", "disk_fix_gpt", "disk_plan", "make_folder",
+       "installed_software", "put_file", "run_command", "run_script", "file_version", "remove_path", "deploy_dir"}
 
 
 def _long(p: str) -> str:
@@ -48,9 +53,18 @@ def _safe_rel(rel: str) -> str:
     return os.path.join(*parts) if parts else ""
 
 
-def _skip_file(name: str) -> bool:
+def _skip_file(name: str, in_appdata: bool = False) -> bool:
     n = name.lower()
+    if in_appdata and n in SKIP_APPDATA_FILES:
+        return True
     return any(fnmatch.fnmatch(n, pat) for pat in SKIP_FILES)
+
+
+def _clear_attrs(p: str):
+    """Windows refuses to overwrite hidden/system/read-only files ("Permission denied") — clear those first."""
+    if sys.platform == "win32" and os.path.exists(p):
+        import ctypes
+        ctypes.windll.kernel32.SetFileAttributesW(p, 0x80)  # FILE_ATTRIBUTE_NORMAL
 
 
 class LocalEndpoint:
@@ -130,6 +144,14 @@ class LocalEndpoint:
                 self._snaps[path] = snap
                 info["snapshot"], info["notes"] = snap.volumes, snap.notes
         return info
+
+    def disk_plan(self, path, start_lba=0, sectors=None, smart=True):
+        """Which byte ranges to copy (used space of known filesystems; everything else in full)."""
+        dev = self._open.get(path) or self._dev(path)
+        from ..usedmap import copy_plan
+        p = copy_plan(dev, start_lba, sectors, smart=smart)
+        return {"ranges": [list(r) for r in p["ranges"]], "copy": p["copy"], "total": p["total"],
+                "by_partition": p["by_partition"]}
 
     def disk_fix_gpt(self, path):
         dev = self._open.get(path)
@@ -245,6 +267,7 @@ class LocalEndpoint:
         stack = [base]
         while stack:
             d = stack.pop()
+            in_appdata = "appdata" in os.path.relpath(d, root).lower().replace("\\", "/").split("/")[:1]
             try:
                 with os.scandir(_long(d)) as it:
                     for e in it:
@@ -258,7 +281,7 @@ class LocalEndpoint:
                                 if sys.platform == "win32" and e.stat(follow_symlinks=False).st_file_attributes & 0x400:
                                     continue
                                 stack.append(os.path.join(d, e.name))
-                            elif not _skip_file(e.name):
+                            elif not _skip_file(e.name, in_appdata):
                                 st = e.stat(follow_symlinks=False)
                                 out.append([os.path.relpath(os.path.join(d, e.name), root).replace("\\", "/"),
                                             st.st_size, int(st.st_mtime)])
@@ -291,6 +314,13 @@ class LocalEndpoint:
                 errs[r] = e.strerror or str(e)
         return {"sizes": sizes, "errors": errs}, bytes(buf)
 
+    def make_folder(self, path):
+        """Create a new destination folder (e.g. a profile folder for a user who has no account here yet)."""
+        p = _long(path)
+        existed = os.path.isdir(p)
+        os.makedirs(p, exist_ok=True)
+        return {"path": path, "existed": existed, "free": self.free_space(path)}
+
     def mkdirs(self, root, rels):
         for r in rels:
             os.makedirs(_long(os.path.join(root, _safe_rel(r))), exist_ok=True)
@@ -299,6 +329,8 @@ class LocalEndpoint:
     def write_file(self, root, rel, offset, total, mtime=None, blob=b""):
         p = _long(os.path.join(root, _safe_rel(rel)))
         os.makedirs(os.path.dirname(p), exist_ok=True)
+        if not offset:
+            _clear_attrs(p)
         with open(p, "r+b" if offset and os.path.exists(p) else "wb") as f:
             f.seek(offset)
             f.write(blob)
@@ -321,13 +353,159 @@ class LocalEndpoint:
                 errs[it["rel"]] = e.strerror or str(e)
         return {"errors": errs}
 
+    # --- software deployment (SectorSmith Deploy) ---------------------------------------
+    def deploy_dir(self):
+        if sys.platform == "win32":
+            d = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "SectorSmith", "Deploy")
+        else:
+            d = os.path.join(os.path.expanduser("~"), ".local", "share", "SectorSmith", "deploy-cache")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def installed_software(self):
+        """Add/Remove Programs entries (all hives, 32+64-bit). On Linux: dpkg + optional test fixture."""
+        out = []
+        fake = os.environ.get("SECTORSMITH_FAKE_SOFTWARE")
+        if fake and os.path.exists(fake):
+            import json
+            return json.load(open(fake))
+        if sys.platform == "win32":
+            import winreg
+            roots = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "machine"),
+                     (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+                      "machine32")]
+            try:
+                with winreg.OpenKey(winreg.HKEY_USERS, "") as hku:
+                    i = 0
+                    while True:
+                        try:
+                            sid = winreg.EnumKey(hku, i)
+                        except OSError:
+                            break
+                        i += 1
+                        if sid.startswith("S-1-5-21") and not sid.endswith("_Classes"):
+                            roots.append((winreg.HKEY_USERS,
+                                          sid + r"\Software\Microsoft\Windows\CurrentVersion\Uninstall", sid))
+            except OSError:
+                pass
+            for hive, path, scope in roots:
+                try:
+                    k = winreg.OpenKey(hive, path)
+                except OSError:
+                    continue
+                with k:
+                    i = 0
+                    while True:
+                        try:
+                            name = winreg.EnumKey(k, i)
+                        except OSError:
+                            break
+                        i += 1
+                        try:
+                            with winreg.OpenKey(k, name) as sk:
+                                def val(v, sk=sk):
+                                    try:
+                                        return winreg.QueryValueEx(sk, v)[0]
+                                    except OSError:
+                                        return None
+                                dn = val("DisplayName")
+                                if not dn:
+                                    continue
+                                out.append({"key": name, "name": dn, "version": val("DisplayVersion") or "",
+                                            "publisher": val("Publisher") or "", "scope": scope,
+                                            "uninstall": val("UninstallString") or "",
+                                            "quiet_uninstall": val("QuietUninstallString") or "",
+                                            "system_component": bool(val("SystemComponent"))})
+                        except OSError:
+                            continue
+        else:
+            import subprocess
+            try:
+                r = subprocess.run(["dpkg-query", "-W", "-f=${Package}\t${Version}\n"], capture_output=True,
+                                   text=True, timeout=60)
+                for line in r.stdout.splitlines():
+                    n, _, v = line.partition("\t")
+                    out.append({"key": n, "name": n, "version": v, "publisher": "", "scope": "machine",
+                                "uninstall": "", "quiet_uninstall": "", "system_component": False})
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return out
+
+    def put_file(self, path, offset, total, blob=b""):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "r+b" if offset and os.path.exists(path) else "wb") as f:
+            f.seek(offset)
+            f.write(blob)
+            if offset + len(blob) >= total:
+                f.truncate(total)
+        return True
+
+    def run_command(self, cmd, timeout=3600, cwd=None):
+        import subprocess
+        import time as _t
+        t0 = _t.time()
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout, cwd=cwd,  # nosec B602
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            code, out, err = r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired as e:
+            code, out, err = -1, e.stdout or b"", (e.stderr or b"") + b"\n[timed out]"
+        dec = (lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or ""))
+        return {"code": code, "out": dec(out)[-6000:], "err": dec(err)[-3000:], "seconds": round(_t.time() - t0, 1)}
+
+    def run_script(self, script, language="powershell", timeout=1800, params=None):
+        import tempfile
+        params = params or {}
+        if language == "powershell":
+            head = "".join(f"${k} = '{str(v).replace(chr(39), chr(39) * 2)}'\n" for k, v in params.items())
+            fd, p = tempfile.mkstemp(suffix=".ps1", dir=self.deploy_dir())
+            with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+                f.write(head + script)
+            exe = "powershell.exe" if sys.platform == "win32" else "pwsh"
+            cmd = f'{exe} -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{p}"'
+        else:
+            import shlex
+            head = "".join(f"{k}={shlex.quote(str(v))}\n" for k, v in params.items())
+            fd, p = tempfile.mkstemp(suffix=".sh", dir=self.deploy_dir())
+            with os.fdopen(fd, "w") as f:
+                f.write(head + script)
+            cmd = f'sh "{p}"'
+        try:
+            return self.run_command(cmd, timeout=timeout)
+        finally:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def file_version(self, path):
+        if not os.path.exists(path):
+            return None
+        if path.lower().endswith((".exe", ".dll", ".sys")):
+            from ..deploy.analyze import clean_version, exe_info
+            e = exe_info(path)
+            return clean_version(e.get("FileVersion") or e.get("ProductVersion")) or "0"
+        try:
+            with open(path, "r", errors="replace") as f:
+                return (f.readline().strip() or "0")[:64]
+        except OSError:
+            return "0"
+
+    def remove_path(self, path):
+        import shutil as _sh
+        if os.path.isdir(path):
+            _sh.rmtree(path, ignore_errors=True)
+        elif os.path.exists(path):
+            os.remove(path)
+        return True
+
     def close(self):
         for p in list(self._open):
             self.disk_close(p)
 
 
 # ---------------------------------------------------------------------------
-BLOB_ARG_OPS = {"write_file", "write_files", "disk_write"}
+BLOB_ARG_OPS = {"write_file", "write_files", "disk_write", "put_file"}
 
 
 def dispatch(ep: LocalEndpoint, req: dict, blob: bytes | None):

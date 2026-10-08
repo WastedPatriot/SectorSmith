@@ -191,6 +191,15 @@ class NTFSVolume:
                 yield rec_idx, self.base + lcn * self.cluster, nbytes
             rec_idx += nbytes // self.rec_size
 
+    def read_record(self, recno: int) -> MFTEntry | None:
+        """Parse a single MFT record by number."""
+        for rec_start, dev_off, nbytes in self._mft_byte_ranges():
+            if rec_start <= recno < rec_start + nbytes // self.rec_size:
+                raw = self.dev.read(dev_off + (recno - rec_start) * self.rec_size, self.rec_size)
+                rec = self._fixup(raw)
+                return self._parse(recno, rec) if rec else None
+        return None
+
     def scan(self, prog: Progress, deleted_only: bool = False) -> list[MFTEntry]:
         prog.reset(self.n_records * self.rec_size, "Reading NTFS master file table")
         entries: dict[int, MFTEntry] = {}

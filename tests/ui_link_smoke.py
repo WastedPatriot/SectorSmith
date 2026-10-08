@@ -61,7 +61,7 @@ def shot(name):
 
 def press(text):
     for w in app.screen.footer.winfo_children():
-        if w.cget("text") == text:
+        if w.cget("text") == text or (w.cget("text").startswith(text + " (") and w.cget("state") != "disabled"):
             w.invoke()
             pump(.4)
             return
@@ -103,7 +103,11 @@ shot("migrate_from")
 press("Next")
 scr.mpick2.cards[1][0].click()
 until(lambda: getattr(scr, "profile_cards", None) and len(scr.profile_cards) == 2)
-scr.profile_cards[0][0].click()
+assert scr.new_folder_entry.get().endswith("alice"), scr.new_folder_entry.get()  # prefilled with the source user
+scr.new_folder_entry.delete(0, "end")
+scr.new_folder_entry.insert(0, os.path.join(new, "carol"))
+scr.new_folder_btn.invoke()
+until(lambda: scr.dst_root == os.path.join(new, "carol"))
 pump(.3)
 shot("migrate_to")
 press("Next")
@@ -113,7 +117,7 @@ shot("migrate_what")
 press("Start moving")
 wait()
 shot("migrate_done")
-assert os.path.exists(os.path.join(new, "alice", "Desktop", "big video.mp4")), os.listdir(os.path.join(new, "alice"))
+assert os.path.exists(os.path.join(new, "carol", "Desktop", "big video.mp4")), os.listdir(os.path.join(new, "carol"))
 
 # --- Clone a disk to another PC ------------------------------------------------------
 theme.set_mode("dark")

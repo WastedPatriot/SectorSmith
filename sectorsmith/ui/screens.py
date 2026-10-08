@@ -1007,8 +1007,9 @@ class CloneWizard(Screen, _PickMixin):
                                               "enclosure. Everything on it will be replaced.", "disk", grp,
                        icon="clone", tone="danger")
         c.pack(fill="x", pady=5)
-        dnet = OptionCard(body, "A disk on another PC", "Clone over the network to a linked machine (Connect a "
-                                                       "machine first).", "net", grp, icon="link", tone="violet")
+        dnet = OptionCard(body, "Several disks or another PC", "Clone to many disks at once — on this PC and/or "
+                                                              "linked PCs over the network.", "net", grp,
+                          icon="link", tone="violet")
         dnet.pack(fill="x", pady=5)
         self._dgrp = grp
         a.select()
@@ -1064,6 +1065,7 @@ class CloneWizard(Screen, _PickMixin):
                 lines.append(f"The new disk is {human_size(dst.usable_size - size)} bigger — that space will be "
                              f"unallocated; extend C: in Disk Management afterwards.")
             self.result_card(body, "clone", "danger", f"{src['dev'].name} → {dst.name}", lines)
+            self._smart_switch(body)
             go = self.buttons(primary=("Start cloning", lambda: self._go(src, start, count)))
             go.configure(state="disabled", fg_color=P["danger"])
             self.confirm_box(body, f"CLONE TO {dst.name.upper()}",
@@ -1074,8 +1076,15 @@ class CloneWizard(Screen, _PickMixin):
             if self._live(src["dev"]):
                 lines.append("Windows is using this disk — a snapshot is taken first so the copy is consistent.")
             self.result_card(body, "image", "violet", os.path.basename(self.dest), lines)
+            self._smart_switch(body)
             self.buttons(primary=("Start backup", lambda: self._go(src, start, count)),
                          secondary=("Back", self._after_pick))
+
+    def _smart_switch(self, body):
+        self.smart = tk.BooleanVar(value=True)
+        ctk.CTkSwitch(body, text="Copy used space only — much faster (NTFS, FAT, exFAT, ext). Other filesystems and "
+                                 "OSes are copied sector by sector.", variable=self.smart,
+                      progress_color=P["accent"], font=theme.font(12)).pack(anchor="w", pady=(4, 4))
 
     @staticmethod
     def _live(dev):
@@ -1088,6 +1097,7 @@ class CloneWizard(Screen, _PickMixin):
     def _go(self, src, start, count):
         sdev = self.app.clone(src["dev"])
         snap = self._live(src["dev"])
+        smart = self.smart.get() if hasattr(self, "smart") else False
         if self.kind == "disk":
             dst = self.app.clone(self.dest_target["dev"])
             fmt = "raw"
@@ -1101,7 +1111,9 @@ class CloneWizard(Screen, _PickMixin):
             body = self.step(3, "Copy complete", "")
             ok = res["bad_sectors"] == 0
             self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "sick")
-            lines = [f"{human_size(res['bytes'])} copied", f"Unreadable sectors: {res['bad_sectors']}"]
+            lines = [f"{human_size(res.get('copied_bytes', res['bytes']))} copied"
+                     + (f" (used space of {human_size(res['bytes'])})" if res.get("copied_bytes", 0) < res["bytes"]
+                        else ""), f"Unreadable sectors: {res['bad_sectors']}"]
             if res.get("snapshot"):
                 lines.append(f"Copied from a snapshot of {', '.join(res['snapshot'])}")
             if res.get("grown"):
@@ -1112,5 +1124,5 @@ class CloneWizard(Screen, _PickMixin):
                              "Backup finished" if ok else "Finished — some sectors were unreadable", lines)
             self.done_actions(os.path.dirname(self.dest) if self.kind != "disk" else None)
         self.app.run_job("Copy", lambda prog: surface.image_copy(sdev, dst, prog, start_lba=start, sectors=count,
-                                                                 fmt=fmt, snapshot=snap), done, panel,
+                                                                 fmt=fmt, snapshot=snap, smart=smart), done, panel,
                          on_cancel=self.app.home)

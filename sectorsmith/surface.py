@@ -125,7 +125,8 @@ def vhd_footer(size: int) -> bytes:
 
 
 def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: int | None = None,
-               fmt: str = "raw", fill_bad: bytes = b"\x00", do_hash: bool = True, snapshot: bool = False) -> dict:
+               fmt: str = "raw", fill_bad: bytes = b"\x00", do_hash: bool = True, snapshot: bool = False,
+               smart: bool = False) -> dict:
     """Copy sectors from ``src`` to ``dst`` (a file path for an image, or a Device for clone/restore).
 
     Two passes like ddrescue: pass 1 copies in 4 MiB chunks and skips any chunk that errors;
@@ -155,38 +156,51 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
     else:
         out_path = dst
         fh = open(dst, "wb")
+        fh.truncate(length)  # unused areas of a smart copy stay as (sparse) zeros
 
         def write(off, data):
             fh.seek(off)
             fh.write(data)
 
-    hasher = hashlib.sha256() if do_hash else None
-    retry: list[int] = []
+    # what to copy: everything, or only the used parts of understood filesystems
+    base = start_lba * ss
+    plan_info = None
+    if smart:
+        from .usedmap import copy_plan
+        prog.set_label("Mapping used space…")
+        plan_info = copy_plan(src, start_lba, sectors, smart=True)
+        ranges = [(o - base, n) for o, n in plan_info["ranges"]]
+    else:
+        ranges = [(0, length)]
+    from .usedmap import pieces
+    todo = list(pieces(ranges, chunk))
+    to_copy = sum(n for _, n in todo)
+    linear = not smart
+    hasher = hashlib.sha256() if (do_hash and linear) else None
+    retry: list[tuple[int, int]] = []
     bad: list[int] = []
-    prog.reset(length, "Imaging — pass 1 (fast copy)")
+    prog.reset(to_copy, "Imaging — pass 1 (fast copy)" + (" · used space only" if smart else ""))
     try:
-        pos = 0
-        while pos < length:
+        done = 0
+        for pos, n in todo:
             prog.check()
-            n = min(chunk, length - pos)
             try:
-                data = src.read(start_lba * ss + pos, n)
+                data = src.read(base + pos, n)
                 if len(data) != n:
                     raise OSError("short read")
             except OSError:
-                retry.append(pos)
+                retry.append((pos, n))
                 data = (fill_bad * (n // len(fill_bad) + 1))[:n]
                 prog.set_detail(f"Read error near LBA {start_lba + pos // ss} — will retry")
             write(pos, data)
             if hasher is not None and not retry:
                 hasher.update(data)
-            pos += n
-            prog.update(pos)
+            done += n
+            prog.update(done)
 
         if retry:
             prog.reset(len(retry) * chunk, f"Imaging — pass 2 (retrying {len(retry)} block(s) per sector)")
-            for i, cpos in enumerate(retry):
-                n = min(chunk, length - cpos)
+            for i, (cpos, n) in enumerate(retry):
                 for s in range(0, n, ss):
                     prog.check()
                     off = start_lba * ss + cpos + s
@@ -224,8 +238,8 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
         src.close()
 
     digest = None
-    if hasher is not None:
-        if retry:  # re-hash the finished image so the hash matches what is on disk
+    if do_hash:
+        if retry or hasher is None:  # re-hash the finished image so the hash matches what is on disk
             if to_device:
                 digest = None
             else:
@@ -245,7 +259,8 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
             digest = hasher.hexdigest()
 
     res = {"bytes": length, "bad_sectors": len(bad), "bad_lbas": bad[:5000], "sha256": digest, "dest": out_path,
-           "grown": grown, "snapshot": snap.volumes if snap else [], "snapshot_notes": snap.notes if snap else []}
+           "grown": grown, "snapshot": snap.volumes if snap else [], "snapshot_notes": snap.notes if snap else [],
+           "copied_bytes": to_copy, "plan": plan_info["by_partition"] if plan_info else []}
     if not to_device:
         with open(str(out_path) + ".log.txt", "w", encoding="utf-8") as lf:
             lf.write(f"SectorSmith image log\nSource: {src.describe()}\nStart LBA: {start_lba}\n"

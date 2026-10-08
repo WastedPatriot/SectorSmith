@@ -184,9 +184,34 @@ def run(plan: Plan, prog: Progress) -> dict:
 
     res = {"copied": copied, "bytes": total, "skipped_unchanged": skipped, "failed": failed,
            "scan_errors": scan_errors, "seconds": round(time.time() - t0, 1)}
+    res["hints"] = explain_failures(failed, plan.src.label)
     res["report"] = write_report(plan, res)
     log.info("Migration done: %s", {k: v for k, v in res.items() if k != "failed"})
     return res
+
+
+APPS_IN_USE = [("/microsoft/edge/", "Microsoft Edge"), ("/google/chrome/", "Google Chrome"),
+               ("/mozilla/firefox/", "Firefox"), ("/microsoft/outlook/", "Outlook"),
+               ("/microsoft/teams/", "Teams"), ("/onenote/", "OneNote")]
+
+
+def explain_failures(failed: list[str], src_label: str) -> list[str]:
+    """Plain-English hints for the usual causes, so the report says what to do next."""
+    apps, denied = set(), 0
+    for f in failed:
+        low = f.lower().replace("\\", "/")
+        if "permission denied" in low or "being used by another process" in low or "access is denied" in low:
+            denied += 1
+            for key, app in APPS_IN_USE:
+                if key in low:
+                    apps.add(app)
+    hints = []
+    if apps:
+        hints.append(f"{', '.join(sorted(apps))} was still open on {src_label}, so some of its files were locked. "
+                     "Close it there (check the system tray too) and click 'Run again' — only the missing files copy.")
+    if denied and not apps:
+        hints.append("Some files were locked or protected. Close open programs on both PCs and run again.")
+    return hints
 
 
 def write_report(plan: Plan, res: dict) -> str:
@@ -206,6 +231,7 @@ def write_report(plan: Plan, res: dict) -> str:
         f"Failed:      {len(res['failed'])}",
         f"Duration:    {res['seconds']} s",
         "",
-    ] + [f"  FAILED {f}" for f in res["failed"]]
+    ] + [f"  TIP: {h}" for h in res.get("hints", [])] + ([""] if res.get("hints") else []) \
+      + [f"  FAILED {f}" for f in res["failed"]]
     path.write_text("\n".join(lines), encoding="utf-8")
     return str(path)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tkinter as tk
 
 import customtkinter as ctk
@@ -62,9 +63,12 @@ class MachinePicker(ctk.CTkFrame):
 
 
 class EndpointDiskPicker(ctk.CTkScrollableFrame):
-    def __init__(self, master, disks, on_select, writes=False, exclude_path=None, height=300):
+    def __init__(self, master, disks, on_select, writes=False, exclude_path=None, height=300, multi=False,
+                 preselected=()):
         super().__init__(master, fg_color="transparent", height=height)
         self.rows = []
+        self.multi = multi
+        self.sel = set(preselected)
         if not disks:
             ctk.CTkLabel(self, text="No disks visible on this machine (is it running as administrator?)",
                          font=theme.font(13), text_color=P["muted"]).pack(pady=20)
@@ -100,15 +104,26 @@ class EndpointDiskPicker(ctk.CTkScrollableFrame):
                 continue
             self.rows.append((card, b, d))
 
+            def paint(card, b, on):
+                card.configure(border_color=P["accent"] if on else P["card"],
+                               fg_color=P["accent_soft"] if on else P["card"])
+                b.set_bg(theme.c("accent_soft") if on else theme.c("card"))
+
             def click(_e=None, card=card, b=b, d=d):
+                if self.multi:
+                    on = d["path"] not in self.sel
+                    (self.sel.add if on else self.sel.discard)(d["path"])
+                    paint(card, b, on)
+                    on_select(d, on)
+                    return
                 for c2, b2, _d in self.rows:
-                    c2.configure(border_color=P["card"], fg_color=P["card"])
-                    b2.set_bg(theme.c("card"))
-                card.configure(border_color=P["accent"], fg_color=P["accent_soft"])
-                b.set_bg(theme.c("accent_soft"))
+                    paint(c2, b2, False)
+                paint(card, b, True)
                 on_select(d)
             card.click = click
             bind_all(card, "<Button-1>", click)
+            if d["path"] in self.sel:
+                paint(card, b, True)
 
 
 def _files(b, n):
@@ -312,17 +327,52 @@ class MigrateWizard(Screen):
             if not profs:
                 ctk.CTkLabel(lst, text="No user profiles found.", text_color=P["muted"]).pack(pady=10)
             if allow_custom:
-                row = ctk.CTkFrame(holder, fg_color="transparent")
-                row.pack(fill="x", pady=(8, 0))
-                ctk.CTkLabel(row, text="…or a folder on that PC:", font=theme.font(12, "bold"),
-                             text_color=P["text"]).pack(side="left")
-                ent = ctk.CTkEntry(row, width=360, height=34, corner_radius=12,
-                                   placeholder_text=r"C:\Users\alice  (user hasn't signed in yet? sign in once first)")
-                ent.pack(side="left", padx=8)
-                ghost_button(row, "Use this folder", lambda: on_pick(ent.get().strip()) if ent.get().strip() else None,
-                             width=150).pack(side="left")
+                self._new_folder_row(holder, ep, profs, on_pick)
             self.profile_cards = rows
         self.app.background(lambda: ep.list_profiles(), show, lambda e: lbl.configure(text=f"Error: {e}"))
+
+    def _new_folder_row(self, holder, ep, profs, on_pick):
+        """'New folder' on the destination PC — prefilled with <profiles folder>\\<source user name>."""
+        info = getattr(ep, "info_cache", None) or {"os": sys.platform}
+        win = str(info.get("os", "")).lower().startswith("win")
+        sep = "\\" if (profs and "\\" in profs[0]["path"]) or win else "/"
+        if profs:
+            parent = profs[0]["path"].rstrip("\\/").rsplit(sep, 1)[0]
+        else:
+            parent = "C:\\Users" if sep == "\\" else "/home"
+        user = os.path.basename(self.src_root.rstrip("\\/").replace("\\", "/")) if self.src_root else "user"
+        box = ctk.CTkFrame(holder, corner_radius=14, fg_color=P["card"])
+        box.pack(fill="x", pady=(10, 0), padx=(0, 6))
+        top = ctk.CTkFrame(box, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(top, text="+ New folder", font=theme.font(14, "bold"), text_color=P["text"]).pack(side="left")
+        ctk.CTkLabel(top, text="or type an existing folder", font=theme.font(11),
+                     text_color=P["muted"]).pack(side="left", padx=10)
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", padx=12)
+        ent = ctk.CTkEntry(row, height=34, corner_radius=12)
+        ent.insert(0, f"{parent}{sep}{user}")
+        ent.pack(side="left", fill="x", expand=True)
+        self.new_folder_entry = ent
+
+        def create():
+            path = ent.get().strip().rstrip("\\/")
+            if not path:
+                return
+
+            def done(r):
+                self.app.toast(("Using existing folder " if r["existed"] else "Created ") + r["path"])
+                on_pick(r["path"])
+            self.app.background(lambda: ep.make_folder(path=path), done,
+                                lambda e: self.app.toast(f"Couldn't create that folder: {e}", "error"))
+        self.new_folder_btn = ghost_button(row, "Create & use", create, width=140)
+        self.new_folder_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(box, justify="left", wraplength=640, font=theme.font(11), text_color=P["muted"],
+                     text=("Heads-up: if this user has never signed in to this PC, Windows makes its own profile "
+                           "folder at first sign-in (e.g. " + user + ".DOMAIN) and won't use this one. Best: sign in "
+                           "once first, then pick their profile above. Copying to a holding folder "
+                           "(e.g. C:\\Migration\\" + user + ") and moving it later works too.")
+                     ).pack(anchor="w", padx=12, pady=(6, 10))
 
     def _from(self):
         body = self.step(0, "Move a user to a new PC", "Which PC and which user are we moving from?")
@@ -468,8 +518,9 @@ class MigrateWizard(Screen):
         lines = [f"{res['copied']:,} files copied ({human_size(res['bytes'])}) in {human_time(res['seconds'])}",
                  f"{res['skipped_unchanged']:,} already up to date"]
         if res["failed"]:
-            lines.append(f"{len(res['failed'])} couldn't be copied — often files open on the old PC. "
-                         f"Close apps / sign the user out, then Run again.")
+            lines.append(f"{len(res['failed'])} couldn't be copied.")
+            lines += res.get("hints") or ["Usually files open on the old PC — close apps / sign the user out, "
+                                          "then Run again."]
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          f"{os.path.basename(self.src_root.rstrip(chr(92) + '/'))} is on {self.dst.label}", lines)
         self.note(body, "Run again any time before the switch-over: only new or changed files are copied.",
@@ -481,18 +532,20 @@ class MigrateWizard(Screen):
 
 # ---------------------------------------------------------------------------
 class NetCloneWizard(Screen):
+    """Clone one disk to one or many disks — on this PC and/or linked PCs, any OS, full or used-space only."""
     guide_topic = "netclone"
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Clone a disk to another PC", steps=["Source", "Destination", "Confirm", "Clone"])
+        super().__init__(master, app, "Clone disks", steps=["Source", "Destinations", "Confirm", "Clone"])
+        self.targets = {}  # (id(machine), path) -> (machine, disk)
         self._source()
 
-    def _disk_step(self, idx, title, sub, writes, on_done, exclude=None):
-        body = self.step(idx, title, sub)
+    def _source(self):
+        self.app.mascot.set_mood("idle", text="Which disk are we copying?")
+        body = self.step(0, "Clone disks", "Pick the machine and the disk to copy from.")
         area = ctk.CTkFrame(body, fg_color="transparent")
-        nb = None
         chosen = {}
-
+        nb = None
         self.disk_picker = None
 
         def pick_machine(m):
@@ -505,76 +558,122 @@ class NetCloneWizard(Screen):
 
             def show(disks):
                 lbl.destroy()
-                ex = exclude[1] if exclude and exclude[0] is m else None
 
                 def pick_disk(d):
                     chosen["d"] = d
                     nb.configure(state="normal")
-                self.disk_picker = EndpointDiskPicker(area, disks, pick_disk, writes=writes, exclude_path=ex,
-                                                      height=330)
+                self.disk_picker = EndpointDiskPicker(area, disks, pick_disk, height=330)
                 self.disk_picker.pack(fill="both", expand=True, pady=(10, 0))
             self.app.background(lambda: m.list_disks(), show, lambda e: lbl.configure(text=f"Error: {e}"))
         MachinePicker(body, self.app, pick_machine).pack(anchor="w")
         area.pack(fill="both", expand=True)
-        nb = self.buttons(primary=("Next", lambda: on_done(chosen["m"], chosen["d"])))
+        nb = self.buttons(primary=("Next", lambda: self._dests(chosen["m"], chosen["d"])))
         nb.configure(state="disabled")
-        return body
 
-    def _source(self):
-        self.app.mascot.set_mood("idle", text="Which disk are we copying?")
-        self._disk_step(0, "Clone a disk to another PC", "Pick the machine and disk to copy from.", False,
-                        self._picked_source)
+    def _dests(self, m=None, d=None):
+        if m is not None:
+            self.src, self.src_disk = m, d
+            self.targets = {}
+        m, d = self.src, self.src_disk
+        body = self.step(1, "Copy it onto…", f"From {m.label}: {d['name']} · {human_size(d['size'])}  ·  "
+                                             "pick one or more disks, on any machine")
+        area = ctk.CTkFrame(body, fg_color="transparent")
+        summary = ctk.CTkLabel(body, text="", font=theme.font(13, "bold"), text_color=P["accent"], anchor="w")
+        nb = None
+        self.disk_picker = None
 
-    def _picked_source(self, m, d):
-        self.src, self.src_disk = m, d
-        body = self._disk_step(1, "Copy it onto…", f"From {m.label}: {d['name']} · {human_size(d['size'])}", True,
-                               self._picked_dest, exclude=(m, d["path"]))
-        self.note(body, "Tip: a new SSD/NVMe in a USB enclosure plugged into either PC shows up here (marked USB) — "
-                        "clone onto it, then fit it in the new PC. To overwrite a PC's own Windows disk instead, "
-                        "boot that PC from the SectorSmith USB stick and link it with 'PC booted from USB'.",
-                  "violet").pack(anchor="w", pady=(8, 0))
+        def refresh_summary():
+            n = len(self.targets)
+            summary.configure(text=("Selected: " + ", ".join(f"{mm.label} · {dd['name']}"
+                                                            for mm, dd in self.targets.values())) if n else
+                              "Nothing selected yet — click disks to select (you can pick several, on any PC).")
+            nb.configure(state="normal" if n else "disabled",
+                         text=f"Next ({n} disk{'s' if n != 1 else ''})" if n else "Next")
 
-    def _picked_dest(self, m, d):
-        self.dst, self.dst_disk = m, d
+        def pick_machine(mm):
+            for w in area.winfo_children():
+                w.destroy()
+            lbl = _loading(area)
+
+            def show(disks):
+                lbl.destroy()
+                ex = d["path"] if mm is m else None
+                pre = [p for (mid, p) in self.targets if mid == id(mm)]
+
+                def toggle(dd, on):
+                    key = (id(mm), dd["path"])
+                    if on:
+                        self.targets[key] = (mm, dd)
+                    else:
+                        self.targets.pop(key, None)
+                    refresh_summary()
+                self.disk_picker = EndpointDiskPicker(area, disks, toggle, writes=True, exclude_path=ex,
+                                                      height=290, multi=True, preselected=pre)
+                self.disk_picker.pack(fill="both", expand=True, pady=(10, 0))
+            self.app.background(lambda: mm.list_disks(), show, lambda e: lbl.configure(text=f"Error: {e}"))
+        self.dest_machines = MachinePicker(body, self.app, pick_machine)
+        self.dest_machines.pack(anchor="w")
+        area.pack(fill="both", expand=True)
+        summary.pack(fill="x", pady=(6, 0))
+        self.note(body, "USB-attached SSD/NVMe drives are marked USB. To overwrite a PC's own Windows disk, boot "
+                        "that PC from the SectorSmith USB stick and link it with 'PC booted from USB'.",
+                  "violet").pack(anchor="w", pady=(4, 0))
+        nb = self.buttons(primary=("Next", self._confirm), secondary=("Back", self._source))
+        refresh_summary()
+
+    def _confirm(self):
         need = self.src_disk["usable"]
-        body = self.step(2, "Last check", "Everything on the destination disk will be replaced.")
-        if d["usable"] < need:
-            self.result_card(body, "warn", "danger", "Destination is too small",
-                             [f"Need {human_size(need)}, it has {human_size(d['usable'])}."])
-            self.buttons(primary=("Back", self._source))
+        body = self.step(2, "Last check", "Everything on the selected destination disks will be replaced.")
+        small = [(m, d) for m, d in self.targets.values() if d["usable"] < need]
+        if small:
+            self.result_card(body, "warn", "danger", "Some destinations are too small",
+                             [f"{m.label} · {d['name']}: {human_size(d['usable'])} (need {human_size(need)})"
+                              for m, d in small])
+            self.buttons(primary=("Back", self._dests))
             return
         self.app.mascot.set_mood("warn", "confirm")
-        lines = [f"Copy {self.src_disk['name']} ({human_size(need)}) onto {d['name']} · {d['model']}",
-                 "Every sector is copied; empty areas are skipped on the wire and the copy is verified."]
+        lines = [f"{m.label} · {d['name']} · {d['model'] or 'Disk'} · {human_size(d['size'])}"
+                 + ("  (bigger — extend C: afterwards)" if d["usable"] > need else "")
+                 for m, d in self.targets.values()]
         if self.src_disk["is_system"] or any(p["mount"] for p in self.src_disk["partitions"]):
             lines.append("The source is in use — a snapshot (VSS) is taken first so the copy is consistent.")
-        if d["usable"] > need:
-            lines.append(f"The destination is {human_size(d['usable'] - need)} bigger — extend C: afterwards.")
-        lines.append("If the destination PC has different hardware, Windows may need drivers on first boot.")
-        self.result_card(body, "clone", "danger", f"{self.src.label} → {m.label}", lines)
-        phrase = f"CLONE TO {m.label.upper()}"
-        go = self.buttons(primary=("Start cloning", self._go))
+        n = len(self.targets)
+        self.result_card(body, "clone", "danger",
+                         f"{self.src.label} · {self.src_disk['name']}  →  {n} disk{'s' if n != 1 else ''}", lines)
+        self.smart = tk.BooleanVar(value=True)
+        ctk.CTkSwitch(body, text="Copy used space only — much faster. Works for NTFS, FAT, exFAT and ext; any other "
+                                 "filesystem or OS is copied sector by sector.", variable=self.smart,
+                      progress_color=P["accent"], font=theme.font(12)).pack(anchor="w", pady=(0, 4))
+        only = next(iter(self.targets.values()))[0]
+        phrase = f"CLONE TO {only.label.upper()}" if n == 1 else f"CLONE TO {n} DISKS"
+        go = self.buttons(primary=("Start cloning", self._go), secondary=("Back", self._dests))
         go.configure(state="disabled", fg_color=P["danger"])
         self.confirm_box(body, phrase, lambda ok: go.configure(state="normal" if ok else "disabled"))
 
     def _go(self):
-        src, dst, sp, dp = self.src, self.dst, self.src_disk["path"], self.dst_disk["path"]
-        _, panel = self.progress("Cloning over the network…", f"{src.label} → {dst.label}")
+        src, sp = self.src, self.src_disk["path"]
+        targets = [(m, d["path"]) for m, d in self.targets.values()]
+        smart = self.smart.get()
+        _, panel = self.progress("Cloning…", f"{src.label} → {len(targets)} disk(s)"
+                                             + (" · used space only" if smart else ""))
         self._draw_steps(3)
 
         def done(res):
-            ok = res["verify_mismatches"] == 0 and res["bad_sectors"] == 0
+            ok = all(t["ok"] for t in res["targets"]) and res["bad_sectors"] == 0
             body = self.step(3, "Clone complete" if ok else "Clone finished with problems", "")
             self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "sick")
+            lines = [f"Copied {human_size(res['copied_bytes'])} of {human_size(res['bytes'])} "
+                     f"({'used space only' if res['copied_bytes'] < res['bytes'] else 'every sector'}) "
+                     f"in {human_time(res['seconds'])}",
+                     f"Sent {human_size(res['sent_bytes'])} after skipping empty blocks and compressing",
+                     f"Unreadable source sectors: {res['bad_sectors']}"]
+            if res.get("snapshot"):
+                lines.append(f"Copied from a snapshot of {', '.join(res['snapshot'])}")
+            for t in res["targets"]:
+                state = "✓ verified" if t["ok"] else f"✗ {t['error'] or str(t['verify_mismatches']) + ' block(s) differ'}"
+                lines.append(f"{t['machine']} · {t['path']}: {state}" + (f" — {t['grown']}" if t.get("grown") else ""))
             self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
-                             f"{human_size(res['bytes'])} cloned to {dst.label}",
-                             [f"Sent {human_size(res['sent_bytes'])} over the network "
-                              f"({res['sent_bytes'] / max(1, res['bytes']):.0%} of the disk)",
-                              f"Verified: {'every block matched' if not res['verify_mismatches'] else str(res['verify_mismatches']) + ' block(s) differ'}",
-                              f"Unreadable source sectors: {res['bad_sectors']}",
-                              f"Took {human_time(res['seconds'])}"]
-                             + ([f"Copied from a snapshot of {', '.join(res['snapshot'])}"] if res.get("snapshot")
-                                else []) + ([res["grown"]] if res.get("grown") else []))
+                             f"{len(res['targets'])} disk(s) cloned from {src.label}", lines)
             self.buttons(primary=("Back to home", self.app.home))
-        self.app.run_job("Network clone", lambda prog: netclone.clone(src, sp, dst, dp, prog), done, panel,
-                         on_cancel=self.app.home)
+        self.app.run_job("Clone", lambda prog: netclone.clone_many(src, sp, targets, prog, smart=smart), done,
+                         panel, on_cancel=self.app.home)

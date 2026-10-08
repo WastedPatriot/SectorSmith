@@ -3,6 +3,7 @@
 Usage: python tests/test_link.py <workdir-from-build_test_disk.py>
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -57,6 +58,11 @@ files = {
     "NTUSER.DAT": os.urandom(1000),                                                      # skipped (hive)
     "Documents/~$locked.docx": b"owner file",                                            # skipped (temp)
     "OneDrive - Contoso/Shared.docx": b"cloud",
+    "Desktop/desktop.ini": b"[.ShellClassInfo]",                                         # skipped (per-PC)
+    "AppData/Local/Microsoft/Edge/User Data/Default/Network/Cookies": b"x",              # skipped (PC-bound)
+    "AppData/Local/Microsoft/Edge/User Data/Default/LOCK": b"",                          # skipped (lock)
+    "AppData/Local/Microsoft/Edge/User Data/Default/Bookmarks": b"{}",
+    "Documents/Recipes/Cookies": b"chocolate chip",                                     # kept (not app data)
 }
 for rel, data in files.items():
     p = os.path.join(A, rel)
@@ -123,7 +129,7 @@ plan = migrate.Plan(local, src_root, remote, dst_root, sel)
 r = migrate.run(plan, Progress(1))
 print("migration:", {k: v for k, v in r.items() if k != "failed"}, r["failed"][:3])
 want = {k: v for k, v in tree(A).items() if not k.startswith(("OneDrive", "NTUSER")) and "Cache" not in k
-        and "~$" not in k}
+        and "~$" not in k and not k.endswith(("desktop.ini", "Network/Cookies", "Default/LOCK"))}
 got = tree(os.path.join(new, "alice"))
 check(got == want, f"remote profile matches source ({len(got)} files, byte-exact)")
 check(r["skipped_unchanged"] == 1 and not r["failed"], "identical existing file skipped, nothing failed")
@@ -135,6 +141,16 @@ open(os.path.join(A, "Desktop", "new.txt"), "w").write("added later")
 r3 = migrate.run(plan, Progress(1))
 check(r3["copied"] == 1, "delta run copies just the new file")
 check(os.path.exists(r3["report"]), "migration report written")
+check("Documents/Recipes/Cookies" in got and "Desktop/desktop.ini" not in got,
+      "desktop.ini + browser lock/cookie files skipped, user files with the same names kept")
+h = migrate.explain_failures(["AppData/Local/Microsoft/Edge/User Data/Default/x: Permission denied"], "OLDPC")
+check(h and "Microsoft Edge" in h[0] and "OLDPC" in h[0], "report explains locked files (close Edge on OLDPC)")
+nf = os.path.join(new, "bob")
+mk = remote.make_folder(path=nf)
+check(os.path.isdir(nf) and not mk["existed"] and remote.make_folder(path=nf)["existed"],
+      "new destination folder created on the linked PC")
+r4 = migrate.run(migrate.Plan(local, src_root, remote, nf, sel), Progress(1))
+check(not r4["failed"] and tree(nf) == tree(os.path.join(new, "alice")), "migration into a brand-new folder")
 
 # --- network disk clone, both directions -----------------------------------------------------
 src_img = os.path.join(W, "disk.img")
@@ -150,6 +166,20 @@ with open(back, "wb") as f:
 local2 = LocalEndpoint(extra_images=[back])
 res = netclone.clone(remote, target_img, local2, back, Progress(1))
 check(sha(back) == sha(src_img), "remote → local clone identical")
+# one source -> many targets (local + remote), used-space only, onto random junk
+sys.path.insert(0, os.path.dirname(__file__))
+from fscheck import garbage_file, verify_disk  # noqa: E402
+junk_l = os.path.join(W, "many_local.img")
+garbage_file(junk_l, 256 * 1024 * 1024)
+garbage_file(target_img, 256 * 1024 * 1024)
+lmany = LocalEndpoint(extra_images=[src_img, junk_l])
+res = netclone.clone_many(lmany, src_img, [(lmany, junk_l), (remote, target_img)], Progress(1), smart=True)
+print("clone_many:", {k: v for k, v in res.items() if k not in ("plan",)})
+check(all(t["ok"] for t in res["targets"]) and len(res["targets"]) == 2, "one → two clone finished, both verified")
+check(not verify_disk(junk_l, json.load(open(os.path.join(W, "meta.json"))), None) and
+      not verify_disk(target_img, json.load(open(os.path.join(W, "meta.json"))), None),
+      "both clones have clean filesystems with intact files")
+check(res["copied_bytes"] < res["bytes"] * .5, f"only used space copied ({res['copied_bytes'] >> 20} MiB)")
 big_r = os.path.join(W, "remote_bigger.img")
 with open(big_r, "wb") as f:
     f.truncate(400 * 1024 * 1024)

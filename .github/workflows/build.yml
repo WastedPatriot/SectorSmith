@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
       - name: Install disk tools
         run: sudo apt-get update && sudo apt-get install -y gdisk fdisk dosfstools mtools ntfs-3g e2fsprogs qemu-utils
-      - run: pip install pillow cryptography
+      - run: pip install pillow cryptography olefile
       - name: Build test disk (GPT with FAT32 + NTFS + ext4)
         run: python tests/build_test_disk.py "$RUNNER_TEMP/sstest"
       - name: Run engine tests

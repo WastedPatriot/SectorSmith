@@ -24,7 +24,7 @@ OK = []
 
 def check(cond, msg):
     print(("PASS " if cond else "FAIL ") + msg)
-    OK.append(cond)
+    OK.append(bool(cond))
 
 
 def sha(path):
@@ -244,6 +244,24 @@ check("No problems found" in v, "bigger target passes sgdisk -v (backup GPT move
 ptb = partitions.read_partition_table(open_image(big))
 check([(x.start_lba, x.fs) for x in ptb.partitions] == [(2048, "FAT32"), (83968, "NTFS"), (247808, "ext4")]
       and not ptb.notes, "partitions intact on the bigger disk")
+
+# 9. smart (used-space) imaging onto junk ----------------------------------------
+sys.path.insert(0, os.path.dirname(__file__))
+from fscheck import garbage_file, verify_disk  # noqa: E402
+from sectorsmith import usedmap  # noqa: E402
+plan = usedmap.copy_plan(open_image(SRC))
+check(plan["copy"] < plan["total"] * .5 and all(p["mode"] == "used" for p in plan["by_partition"]),
+      f"used-space plan understands FAT32/NTFS/ext4 ({plan['copy'] >> 20} of {plan['total'] >> 20} MiB)")
+junk = os.path.join(W, "junk_target.img")
+garbage_file(junk, 256 * 1024 * 1024)
+r = surface.image_copy(open_image(SRC), open_image(junk), Progress(1), smart=True)
+check(r["copied_bytes"] == plan["copy"], "smart clone copied only the planned bytes")
+probs = verify_disk(junk, meta, os.path.join(W, "samples"))
+check(not probs, f"smart clone onto random junk: every filesystem checks clean, files intact {probs[:3]}")
+check(verify_disk(SRC, meta, os.path.join(W, "samples")) == [], "verifier sanity check on the source")
+r = surface.image_copy(open_image(SRC), os.path.join(W, "smart.img"), Progress(1), smart=True)
+check(not verify_disk(os.path.join(W, "smart.img"), meta, None) and r["sha256"],
+      "smart image file valid (unused space sparse) and hashed")
 
 print(f"\n{sum(OK)}/{len(OK)} checks passed")
 sys.exit(0 if all(OK) else 1)
