@@ -1,0 +1,34 @@
+{
+ "w": 56,
+ "h": 46,
+ "anims": {
+  "idle": {
+   "frames": 16,
+   "fps": 7
+  },
+  "sweep": {
+   "frames": 6,
+   "fps": 12
+  },
+  "happy": {
+   "frames": 10,
+   "fps": 12
+  },
+  "walk": {
+   "frames": 6,
+   "fps": 10
+  },
+  "sad": {
+   "frames": 6,
+   "fps": 6
+  },
+  "warn": {
+   "frames": 4,
+   "fps": 6
+  }
+ },
+ "body": [
+  6,
+  36
+ ]
+}

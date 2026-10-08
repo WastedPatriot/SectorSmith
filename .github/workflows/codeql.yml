@@ -1,0 +1,16 @@
+name: CodeQL security scan
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule: [{ cron: "23 4 * * 1" }]
+jobs:
+  analyze:
+    # Code scanning is free for public repos (private repos need GitHub Code Security).
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    permissions: { security-events: write, contents: read, actions: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with: { languages: python, queries: security-and-quality }
+      - uses: github/codeql-action/analyze@v3

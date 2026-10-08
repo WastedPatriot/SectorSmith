@@ -1,0 +1,14 @@
+name: ✨ Feature request
+description: Suggest an idea for SectorSmith
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like SectorSmith to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why / when would you use it?

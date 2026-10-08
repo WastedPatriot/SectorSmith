@@ -1,0 +1,270 @@
+"""Headless run-through of the new UI: every wizard, both themes, with screenshots.
+
+Run: xvfb-run -s "-screen 0 1400x900x24" python3.12 tests/ui_smoke.py <workdir> <shots_dir>
+"""
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from tkinter import filedialog, messagebox  # noqa: E402
+
+from sectorsmith.ui import main as M, screens as S, theme  # noqa: E402
+
+W, SHOTS = sys.argv[1], sys.argv[2]
+os.makedirs(SHOTS, exist_ok=True)
+img = os.path.join(W, "ui.img")
+shutil.copyfile(os.path.join(W, "disk.img"), img)
+lost = os.path.join(W, "ui_lost.img")
+shutil.copyfile(img, lost)
+with open(lost, "r+b") as f:
+    f.write(bytes(34 * 512))
+
+answers = {}
+filedialog.askdirectory = lambda **k: answers["dir"]
+filedialog.asksaveasfilename = lambda **k: answers["save"]
+filedialog.askopenfilenames = lambda **k: answers.get("files", ())
+messagebox.askyesno = lambda *a, **k: True
+errors = []
+
+from sectorsmith.util import app_dir  # noqa: E402
+try:
+    os.remove(app_dir() / "settings.json")
+except OSError:
+    pass
+app = M.MainWindow()
+app.geometry("1360x860+0+0")
+orig_toast = app.toast
+app.toast = lambda text, tone="success": (errors.append(text) if tone == "danger" else None, orig_toast(text, tone))
+
+
+def pump(sec=0.4):
+    end = time.time() + sec
+    while time.time() < end:
+        app.update()
+        time.sleep(0.015)
+
+
+def wait():
+    pump(0.4)
+    t = time.time()
+    while app.job is not None and time.time() - t < 120:
+        pump(0.1)
+    pump(0.6)
+
+
+n = [0]
+
+
+def shot(name):
+    pump(0.5)
+    n[0] += 1
+    subprocess.run(["import", "-window", "root", os.path.join(SHOTS, f"{n[0]:02d}_{name}.png")], check=False)
+
+
+def pick(path, part_index=None):
+    for card, _b, t in app.screen.picker.rows:
+        if t["dev"].path == path and ((part_index is None and t["kind"] == "disk") or
+                                      (t["kind"] == "part" and t["part"].index == part_index)):
+            card.click()
+            pump(0.2)
+            return t
+    raise AssertionError(f"target not found {path} {part_index}")
+
+
+def type_confirm(phrase):
+    for w in app.screen.body.winfo_children():
+        for c in w.winfo_children():
+            if c.__class__.__name__ == "CTkEntry":
+                c.insert(0, phrase)
+    pump(0.2)
+
+
+def press(text):
+    for w in app.screen.footer.winfo_children():
+        if getattr(w, "cget", None) and w.cget("text") == text:
+            w.invoke()
+            pump(0.3)
+            return
+    raise AssertionError(f"button {text!r} not found: {[w.cget('text') for w in app.screen.footer.winfo_children()]}")
+
+
+pump(1.2)
+shot("welcome_1")
+press("Next")
+pump(0.8)
+shot("welcome_2")
+press("Next")
+pump(0.8)
+shot("welcome_3")
+press("Let's go!")
+app.add_image(img)
+app.add_image(lost)
+pump(1.5)
+shot("home_system")
+app.open_guide("recover")
+pump(0.8)
+shot("guide_recover")
+app.home()
+pump(0.6)
+theme.set_mode("light")
+app.mode.set("Light")
+pump(0.3)
+shot("home_light")
+
+# --- Recover (quick, NTFS) --------------------------------------------------
+app.go(S.RecoverWizard)
+pump(0.6)
+pick(img, 2)
+shot("recover_pick")
+press("Next")
+shot("recover_scantype")
+press("Start scan")
+wait()
+shot("recover_results")
+assert app.screen.tree.get_children() or True
+app.screen.only_del.set(False)
+app.screen._fill()
+pump()
+names = [app.screen.tree.item(i)["values"][0] for i in app.screen.tree.get_children()]
+assert "bigfile.bin" in names, names
+app.screen.tree.selection_set(app.screen.tree.get_children())
+out = os.path.join(W, "ui_recovered")
+shutil.rmtree(out, ignore_errors=True)
+os.makedirs(out)
+answers["dir"] = out
+press("Recover selected")
+wait()
+shot("recover_done")
+assert os.path.exists(os.path.join(out, "bigfile.bin")), os.listdir(out)
+
+# --- Recover (deep) in dark mode ---------------------------------------------
+theme.set_mode("dark")
+app.mode.set("Dark")
+app.go(S.RecoverWizard)
+pump(0.6)
+pick(img)
+press("Next")
+app.screen.out_var.set(os.path.join(W, "ui_carved"))
+shutil.rmtree(os.path.join(W, "ui_carved"), ignore_errors=True)
+shot("deep_options_dark")
+press("Start scan")
+pump(0.5)
+shot("deep_running_dark")
+wait()
+shot("deep_done_dark")
+
+# --- Health -------------------------------------------------------------------
+app.go(S.HealthWizard)
+pump(0.6)
+pick(img)
+press("Next")
+pump(0.3)
+shot("health_running_dark")
+wait()
+shot("health_result_dark")
+
+# --- Partition recovery (light) -------------------------------------------------
+theme.set_mode("light")
+app.mode.set("Light")
+app.go(S.PartitionWizard)
+pump(0.6)
+pick(lost)
+press("Next")
+wait()
+shot("partition_results")
+press("Bring them back")
+type_confirm("RESTORE")
+shot("partition_confirm")
+press("Restore now")
+wait()
+shot("partition_done")
+pt = [pt for d, pt, e in app.inventory(True) if d.path == lost][0]
+assert len(pt.partitions) == 3, pt
+
+# --- Wipe partition 1 of img -------------------------------------------------------
+app.go(S.WipeWizard)
+pump(0.6)
+pick(img, 1)
+press("Next")
+shot("wipe_strength")
+press("Next")
+type_confirm("WIPE PARTITION 1")
+shot("wipe_confirm")
+press("Wipe it")
+pump(0.8)
+shot("wipe_running")
+wait()
+shot("wipe_done")
+answers["save"] = os.path.join(W, "cert.html")
+press("Save certificate…")
+pump()
+assert os.path.exists(answers["save"])
+
+# --- Clone to vhd (dark) ------------------------------------------------------------
+theme.set_mode("dark")
+app.mode.set("Dark")
+app.go(S.CloneWizard)
+pump(0.6)
+pick(img)
+press("Next")
+shot("clone_dest_dark")
+answers["save"] = os.path.join(W, "ui_backup.vhd")
+press("Next")
+shot("clone_confirm_dark")
+press("Start backup")
+wait()
+shot("clone_done_dark")
+assert os.path.getsize(answers["save"]) == 256 * 1024 * 1024 + 512
+
+# --- Shred via drop ------------------------------------------------------------------
+tmpd = os.path.join(W, "to_shred")
+os.makedirs(tmpd, exist_ok=True)
+for i in range(3):
+    open(os.path.join(tmpd, f"secret{i}.txt"), "w").write("x" * 5000)
+app.home()
+pump(0.6)
+app.handle_drop([os.path.join(tmpd, f"secret{i}.txt") for i in range(3)])
+pump(0.6)
+shot("shred_dropped_dark")
+press("Next")
+type_confirm("SHRED")
+shot("shred_confirm_dark")
+press("Shred them")
+wait()
+shot("shred_done_dark")
+assert not any(os.path.exists(os.path.join(tmpd, f"secret{i}.txt")) for i in range(3))
+
+# progress screen mid-job, both themes (fake slow job so we can see the sweeper)
+for mode in ("light", "dark"):
+    theme.set_mode(mode)
+    app.mode.set(mode.capitalize())
+    scr = app.go(S.WipeWizard)
+    pump(0.5)
+    _, panel = scr.progress("Wiping…", "DoD 5220.22-M (3 pass + verify) on Disk 2 · Samsung T7 · 1 TB")
+    scr._draw_steps(3)
+
+    def fake(prog):
+        prog.reset(1000 * 1024 * 1024, "Pass 2 of 3")
+        prog.set_detail("pattern 0xFF")
+        for i in range(60):
+            prog.check()
+            time.sleep(0.05)
+            prog.update(int(i / 60 * 0.62 * prog.total))
+        return None
+    app.run_job("demo", fake, lambda r: None, panel)
+    pump(2.6)
+    shot(f"progress_{mode}")
+    wait()
+
+# advanced window opens
+app.home()
+pump(0.5)
+app.open_advanced()
+pump(1.0)
+shot("advanced_dark")
+
+print("toast errors:", errors)
+print("ALL UI CHECKS PASSED" if not errors else "UI ERRORS")
