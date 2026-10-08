@@ -71,16 +71,22 @@ GUIDES = {
         "steps": [
             ("Pick the target", "A whole disk, or a single partition if the rest must be kept. The system disk "
                                 "can't be selected."),
+            ("Use the drive's own erase", "For a whole SATA or NVMe drive, SectorSmith asks the drive what it "
+                                          "supports (ATA Secure Erase, NVMe Sanitize or Format). Leave it on: it "
+                                          "counts as NIST 800-88 Purge. If it isn't offered, the overwrite runs."),
             ("Choose how thorough", "Quick = one pass of zeros. Recommended = NIST 800-88 with verification. "
                                     "Thorough = DoD 3-pass with verification. More standards are in the "
                                     "dropdown."),
             ("Type to confirm", "Type the exact phrase shown (for example WIPE DISK 2). This stops accidents."),
-            ("Save the certificate", "When it finishes, save the HTML certificate — drive model, serial, "
-                                     "method, verification result and times — for your records."),
+            ("Save the certificate", "When it finishes, save the certificate and print it to PDF. It carries your "
+                                     "company name and logo (Settings, Branding), client, ticket, drive, method, "
+                                     "NIST category, verification and a QR code with its ID and hash."),
         ],
         "tips": ["One verified pass is enough for modern hard drives. Extra passes mostly add time.",
-                 "SSDs and USB flash keep spare cells the computer can't reach. For flash leaving the "
-                 "business, also use the manufacturer's Secure Erase or destroy it physically.",
+                 ("A frozen drive refuses its own erase until it is power-cycled: sleep the PC and wake it, or "
+                  "unplug the drive and plug it back in, then try again."),
+                 ("USB enclosures and RAID controllers usually block the drive's own erase. Connect the drive "
+                  "directly, or overwrite it and destroy it if it leaves the business."),
                  "Volumes on the target disk are locked and dismounted while the wipe runs."],
     },
     "shred": {

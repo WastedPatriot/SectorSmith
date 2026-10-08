@@ -640,3 +640,116 @@ def mounted_partitions_linux(dev: Device) -> list[str]:
     except OSError:
         pass
     return res
+
+
+# ---------------------------------------------------------------------------
+# Hardware erase pass-through: ATA commands for SATA drives, NVMe identify and sanitize/format
+# ---------------------------------------------------------------------------
+ATA_IDENTIFY = 0xEC
+ATA_SECURITY_SET_PASSWORD = 0xF1
+ATA_SECURITY_ERASE_PREPARE = 0xF3
+ATA_SECURITY_ERASE_UNIT = 0xF4
+ATA_SECURITY_DISABLE_PASSWORD = 0xF6
+
+# what Windows' IOCTL_STORAGE_REINITIALIZE_MEDIA takes as SanitizeMethod (STORAGE_SANITIZE_METHOD)
+NVME_SANITIZE_METHODS = {"format": 0, "block": 1, "crypto": 2}
+
+
+class PassThrough:
+    """The few commands a hardware erase needs. WinPassThrough sends them to a real drive; tests use a fake."""
+
+    def ata_command(self, command: int, features: int = 0, count: int = 0, data_out: bytes | None = None,
+                    data_in: int = 0, timeout: int = 30) -> bytes:
+        raise NotImplementedError
+
+    def ata_identify(self) -> bytes:
+        return self.ata_command(ATA_IDENTIFY, data_in=512)
+
+    def nvme_identify_controller(self) -> bytes:
+        raise NotImplementedError
+
+    def nvme_sanitize(self, method: str, timeout: int) -> None:
+        """method: "crypto" or "block" (NVMe Sanitize) or "format" (Format NVM with secure erase)."""
+        raise NotImplementedError
+
+    def close(self):
+        pass
+
+
+if is_windows():
+    IOCTL_ATA_PASS_THROUGH = 0x0004D02C
+    IOCTL_STORAGE_REINITIALIZE_MEDIA = 0x002D9640
+    ATA_FLAGS_DRDY_REQUIRED = 1
+    ATA_FLAGS_DATA_IN = 2
+    ATA_FLAGS_DATA_OUT = 4
+
+    class _AtaPassThroughEx(ctypes.Structure):
+        _fields_ = [("Length", ctypes.c_ushort), ("AtaFlags", ctypes.c_ushort), ("PathId", ctypes.c_ubyte),
+                    ("TargetId", ctypes.c_ubyte), ("Lun", ctypes.c_ubyte), ("ReservedAsUchar", ctypes.c_ubyte),
+                    ("DataTransferLength", wintypes.ULONG), ("TimeOutValue", wintypes.ULONG),
+                    ("ReservedAsUlong", wintypes.ULONG), ("DataBufferOffset", ctypes.c_size_t),
+                    ("PreviousTaskFile", ctypes.c_ubyte * 8), ("CurrentTaskFile", ctypes.c_ubyte * 8)]
+
+    class WinPassThrough(PassThrough):
+        """IOCTL_ATA_PASS_THROUGH for SATA; IOCTL_STORAGE_QUERY_PROPERTY and IOCTL_STORAGE_REINITIALIZE_MEDIA
+        for NVMe (Windows only lets vendor commands through its NVMe protocol pass-through)."""
+
+        def __init__(self, path: str):
+            self.h = _open_handle(path, GENERIC_READ | GENERIC_WRITE)
+
+        def ata_command(self, command, features=0, count=0, data_out=None, data_in=0, timeout=30):
+            n = len(data_out) if data_out else data_in
+            hdr = ctypes.sizeof(_AtaPassThroughEx)
+            buf = ctypes.create_string_buffer(hdr + n)
+            apt = _AtaPassThroughEx.from_buffer(buf)
+            apt.Length = hdr
+            apt.AtaFlags = ATA_FLAGS_DRDY_REQUIRED | (ATA_FLAGS_DATA_OUT if data_out else
+                                                      ATA_FLAGS_DATA_IN if data_in else 0)
+            apt.DataTransferLength = n
+            apt.TimeOutValue = max(1, int(timeout))
+            apt.DataBufferOffset = hdr if n else 0
+            # task file: features, sector count, LBA low, mid, high, device, command, reserved
+            for i, v in enumerate((features, count, 0, 0, 0, 0xA0, command, 0)):
+                apt.CurrentTaskFile[i] = v
+            if data_out:
+                ctypes.memmove(ctypes.addressof(buf) + hdr, data_out, n)
+            ret = wintypes.DWORD(0)
+            ok = _k32.DeviceIoControl(self.h, IOCTL_ATA_PASS_THROUGH, buf, hdr + n, buf, hdr + n,
+                                      ctypes.byref(ret), None)
+            if not ok:
+                raise _win_err(f"ATA command 0x{command:02X}")
+            status, error = apt.CurrentTaskFile[6], apt.CurrentTaskFile[0]
+            if status & 0x01:  # ERR bit: the drive refused the command
+                raise OSError(5, f"Drive refused ATA command 0x{command:02X} (status 0x{status:02X}, "
+                                 f"error 0x{error:02X})")
+            return buf.raw[hdr:hdr + n] if data_in else b""
+
+        def nvme_identify_controller(self):
+            # STORAGE_PROPERTY_QUERY (StorageAdapterProtocolSpecificProperty, standard query) followed by
+            # STORAGE_PROTOCOL_SPECIFIC_DATA (NVMe, identify, CNS 1 = controller, data right after it)
+            query = struct.pack("<II", 49, 0) + struct.pack("<10I", 3, 1, 1, 0, 40, 4096, 0, 0, 0, 0)
+            out = _ioctl(self.h, IOCTL_STORAGE_QUERY_PROPERTY, query + bytes(4096), outsize=len(query) + 4096)
+            off, length = struct.unpack_from("<II", out, 8 + 16)
+            data = out[8 + off: 8 + off + min(length, 4096)]
+            if len(data) < 4096:
+                raise OSError(0, "NVMe identify returned too little data")
+            return data
+
+        def nvme_sanitize(self, method, timeout):
+            # STORAGE_REINITIALIZE_MEDIA: Version, Size, TimeoutInSeconds, SanitizeOption (method in bits 0-3)
+            body = struct.pack("<IIII", 16, 16, max(1, int(timeout)), NVME_SANITIZE_METHODS[method] & 0xF)
+            _ioctl(self.h, IOCTL_STORAGE_REINITIALIZE_MEDIA, body, outsize=0)
+
+        def close(self):
+            if self.h:
+                _k32.CloseHandle(self.h)
+                self.h = None
+
+
+def open_passthrough(dev: Device) -> PassThrough:
+    """Command channel to a physical drive for the hardware erase (Windows only)."""
+    if dev.is_image:
+        raise DeviceError("Image files have no hardware erase.")
+    if not is_windows():
+        raise DeviceError("The drive's built-in erase is only sent from Windows.")
+    return WinPassThrough(dev.path)
