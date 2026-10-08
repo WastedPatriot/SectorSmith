@@ -186,6 +186,16 @@ pt = [pt for d, pt, e in app.inventory(True) if d.path == lost][0]
 assert len(pt.partitions) == 3, pt
 
 # --- Wipe partition 1 of img -------------------------------------------------------
+from sectorsmith.ui.guide import save_settings  # noqa: E402
+save_settings(brand_company="Example IT Services Ltd")
+
+
+def _walk(w):
+    yield w
+    for c in w.winfo_children():
+        yield from _walk(c)
+
+
 app.go(S.WipeWizard)
 pump(0.6)
 pick(img, 1)
@@ -203,6 +213,53 @@ answers["save"] = os.path.join(W, "cert.html")
 press("Save certificate…")
 pump()
 assert os.path.exists(answers["save"])
+cert = open(answers["save"], encoding="utf-8").read()
+assert "Example IT Services Ltd" in cert and "NIST SP 800-88" in cert and "Software overwrite" in cert, "branded cert"
+assert "mossbit" not in cert.lower() and "<svg" in cert
+
+# --- Erase a whole drive: the built-in erase card, frozen drive, fall back to overwrite ----------------
+from sectorsmith import wipe as WP  # noqa: E402
+app.go(S.WipeWizard)
+pump(0.6)
+pick(img)
+press("Next")
+pump(0.8)
+scr = app.screen
+assert "Image files" in scr.hw_status.cget("text"), scr.hw_status.cget("text")
+assert not scr._hardware_chosen()
+scr._hw_ready(WP.HardwarePlan(True, "nvme", "crypto", "NVMe Sanitize (crypto erase)"))
+assert scr._hardware_chosen()
+shot("wipe_hardware_supported")
+scr._hw_ready(WP.HardwarePlan(False, "ata", frozen=True, reason=WP.FROZEN_ADVICE))
+shot("wipe_hardware_frozen")
+press("Next")
+assert "Purge" in str([w.cget("text") for w in _walk(scr.body) if isinstance(w, M.ctk.CTkLabel)])
+scr._error(WP.DriveFrozen(WP.FROZEN_ADVICE))
+pump()
+shot("wipe_frozen_result")
+assert scr.title_lbl.cget("text") == "Drive is frozen"
+press("Use overwrite instead")
+pump()
+assert not scr._hardware_chosen() and scr.title_lbl.cget("text") == "Confirm the erase"
+shot("wipe_frozen_overwrite_confirm")
+
+# Settings: Branding card saves the company name and a copy of the logo
+from sectorsmith.ui import settings as ST  # noqa: E402
+from sectorsmith.ui.guide import load_settings  # noqa: E402
+st = app.go(ST.SettingsScreen)
+pump(0.5)
+logo_src = os.path.join(W, "logo.svg")
+open(logo_src, "w").write('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" '
+                          'height="10"/></svg>')
+filedialog.askopenfilename = lambda **k: logo_src
+st._pick_logo()
+st.company.set("Example IT Services Ltd")
+st._save_brand()
+pump()
+saved = load_settings()
+assert saved["brand_company"] == "Example IT Services Ltd" and saved["brand_logo"].endswith("brand_logo.svg")
+assert os.path.exists(saved["brand_logo"]) and st.logo_lbl.cget("text") == "brand_logo.svg"
+shot("settings_branding")
 
 # --- Clone to vhd (dark) ------------------------------------------------------------
 theme.set_mode("dark")

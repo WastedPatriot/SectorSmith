@@ -3,9 +3,10 @@
 Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Proprietary from 1.4.0, see LICENSE.
 
 ## Layout
-- `sectorsmith/` engine: device.py (raw I/O), partitions.py (MBR/GPT, fix_gpt_after_grow), wipe.py, surface.py
+- `sectorsmith/` engine: device.py (raw I/O, ATA/NVMe pass-through), partitions.py (MBR/GPT, fix_gpt_after_grow),
+  wipe.py (overwrite plus the drive's own erase: capability check, ATA Secure Erase, NVMe Sanitize/Format), surface.py
   (scan and imaging, smart/used-space copy), usedmap.py (NTFS/FAT/exFAT/ext used-space maps), ntfs.py, carver.py,
-  vss.py (Windows shadow copies), report.py
+  vss.py (Windows shadow copies), report.py (branded wipe certificate), qr.py (QR encoder for it)
 - `sectorsmith/link/` SectorSmith Link: TLS with a pinned cert and token, PowerShell one-liner connector, listen mode
   (USB/WinPE). endpoint.py holds the ops a linked PC exposes. migrate.py moves a user to a new PC.
   netclone.py clones one disk to one or many disks across PCs.
@@ -18,6 +19,7 @@ Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Prop
   Machines and Jobs pages; settings.py has Settings (Personality Full/Subtle/Off, presentation mode)
 - `tools/` make_sprites.py, make_docs.py (README screenshots and GIFs), make_usb.ps1 (WinPE stick)
 - `tests/` test_core.py, test_link.py and test_deploy.py (run `python tests/build_test_disk.py <dir>` first),
+  test_sanitize.py (hardware erase on fake drives, certificate and QR; no fixture needed, qr_decode.py reads codes back),
   test_windows.py (CI only), ui_smoke.py, ui_link_smoke.py and ui_deploy_smoke.py (need a display, use xvfb on Linux)
 
 ## Rules

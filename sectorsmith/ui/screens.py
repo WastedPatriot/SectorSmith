@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import platform
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -13,7 +14,7 @@ from .. import carver, ntfs, partitions, partscan, surface, wipe
 from ..report import wipe_certificate
 from ..util import get_logger, human_size, human_time, is_admin
 from . import theme
-from .shell import machine_status, technician
+from .shell import branding, machine_status, technician
 from .widgets import AutoScroll, Card, DrivePicker, DropZone, EmptyState, Icon, IconBadge, OptionCard, Pill, \
     Popover, \
     ProgressPanel, QuickAction, StatusPill, StatusTile, TypedConfirm, caption, divider, ghost_button, \
@@ -949,8 +950,9 @@ class _StrengthMixin:
                                        font=theme.font_style("body"), dropdown_font=theme.font_style("body"),
                                        command=lambda v: self._pick_more(v, grp))
         self._more.pack(side="left", padx=10)
-        self.note(parent, "SSDs: overwriting can't reach spare flash cells. For SSDs leaving the business, also use "
-                          "the manufacturer's Secure Erase, or physically destroy them.", "warn").pack(
+        self.note(parent, "SSDs: overwriting can't reach spare flash cells. For SSDs leaving the business, erase the "
+                          "whole drive with its built-in erase (Erase and certify), or physically destroy them.",
+                  "warn").pack(
             anchor="w", pady=(14, 0))
         grp[1].select()
         self._sgrp = grp
@@ -987,26 +989,80 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
 
     def _after_pick(self):
         body = self.step(1, "Choose a method", f"Erasing {self.target_name()}")
+        self.hw_plan = None
+        self.use_hw = tk.BooleanVar(value=False)
+        if self.target["kind"] == "disk":
+            self._hw_card(body)
         self.strength_picker(body)
         self.buttons(primary=("Next", self._confirm))
 
-    def _confirm(self):
-        self.method = self.chosen_method()
+    def _hw_card(self, body):
+        """The drive's own erase (ATA Secure Erase or NVMe Sanitize): what it supports, checked in the background."""
+        card = Card(body, "Drive's built-in erase", pad=16)
+        card.pack(fill="x", pady=(0, 12))
+        self.hw_switch = ctk.CTkSwitch(card.body, text="Use the drive's own erase first (best for SSD and NVMe)",
+                                       variable=self.use_hw, font=theme.font_style("body_strong"), state="disabled")
+        self.hw_switch.pack(anchor="w")
+        self.hw_status = ctk.CTkLabel(card.body, text="Checking what this drive supports\u2026",
+                                      font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                                      justify="left", wraplength=760)
+        self.hw_status.pack(fill="x", pady=(6, 0))
+        dev = self.app.clone(self.target["dev"])
+        target = self.target
+
+        def ready(plan):
+            if self.target is target and self.hw_status.winfo_exists():
+                self._hw_ready(plan)
+        self.app.background(lambda: wipe.hardware_plan(dev), ready,
+                            lambda e: ready(wipe.HardwarePlan(False, reason=f"Capability check failed: {e}")))
+
+    def _hw_ready(self, plan):
+        self.hw_plan = plan
+        if plan.available:
+            self.use_hw.set(True)
+            self.hw_switch.configure(state="normal")
+            self.hw_status.configure(text=f"Supported: {plan.name}. NIST SP 800-88 Purge. It reaches spare cells an "
+                                          "overwrite can't, and takes seconds to minutes. If the drive refuses it, the "
+                                          "overwrite below runs instead.", text_color=P["text_2"])
+        elif plan.frozen:
+            self.use_hw.set(True)
+            self.hw_switch.configure(state="normal")
+            self.hw_status.configure(text=plan.reason, text_color=P["warn"])
+        else:
+            self.use_hw.set(False)
+            self.hw_switch.configure(state="disabled")
+            self.hw_status.configure(text=f"Not available: {plan.reason} The overwrite below is used (NIST SP 800-88 "
+                                          "Clear).", text_color=P["muted"])
+
+    def _hardware_chosen(self):
+        p = self.hw_plan
+        return bool(self.target["kind"] == "disk" and p is not None and (p.available or p.frozen) and self.use_hw.get())
+
+    def _confirm(self, use_hw=None):
+        if use_hw is not None:
+            self.use_hw.set(use_hw)
+        if getattr(self, "_more", None) is not None and self._more.winfo_exists():
+            self.method = self.chosen_method()  # else: back from a result screen, keep the method chosen before
         t = self.target
         dev = t["dev"]
         start, count = self.target_range()
+        hw = self._hardware_chosen()
         body = self.step(2, "Confirm the erase", "Everything on this target is destroyed. This cannot be undone.")
         self.app.mascot.set_mood("warn", "confirm")
         ctx = self.app.context
         flash = dev.bus == "NVMe" or "SSD" in (dev.model or "").upper()
+        method = (f"{self.hw_plan.name or 'Built-in erase'} (Purge), else {self.method.name}" if hw
+                  else self.method.name + ("" if "Clear" in self.method.name else " (NIST Clear)"))
         self.summary(body, "wipe", "danger", self.target_name(),
-                     f"{dev.bus}  \u00b7  {human_size(count * dev.sector_size)} will be overwritten",
-                     [("Serial", theme.mask(dev.serial) if dev.serial else "-"), ("Method", self.method.name),
+                     f"{dev.bus}  \u00b7  {human_size(count * dev.sector_size)} will be erased",
+                     [("Serial", theme.mask(dev.serial) if dev.serial else "-"), ("Method", method),
                       ("Client", ctx.get("client") or "Not set"),
                       ("Ticket", f"#{ctx['ticket']}" if ctx.get("ticket") else "Not set"),
                       ("Certificate", "Saved from the last step"), ("Technician", technician() or "-")],
-                     note="This looks like flash storage. Overwriting cannot reach spare cells, so also use the "
-                          "maker's Secure Erase or physically destroy it." if flash else None)
+                     note="The drive erases itself and this can't be stopped once it starts. Sample sectors are "
+                          "marked first and checked afterwards." if hw else
+                     "This looks like flash storage. Overwriting cannot reach spare cells, so use the drive's "
+                     "built-in erase where it is supported, or physically destroy it." if flash else None)
         go = self.buttons(primary=("Erase and certify", self._go), secondary=("Back", self._after_pick))
         go.configure(state="disabled", fg_color=P["danger"], hover_color=P["danger_hover"])
         self.confirm_box(body, erase_phrase(t), lambda ok: go.configure(state="normal" if ok else "disabled"))
@@ -1016,11 +1072,30 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         wdev = self.app.clone(dev)
         start, count = self.target_range()
         method = self.method
-        _, panel = self.progress("Erasing\u2026", f"{method.name} on {self.target_name()}")
+        hw = self._hardware_chosen()
+        what = self.hw_plan.name if hw and self.hw_plan.name else method.name
+        _, panel = self.progress("Erasing\u2026", f"{what} on {self.target_name()}")
         self._draw_steps(3)
         self.t_start = time.time()
-        self.app.run_job("Wipe", lambda prog: wipe.wipe_disk(wdev, method, prog, start_lba=start, sectors=count),
-                         self._done, panel, on_cancel=self._stopped)
+        self.app.run_job("Wipe", lambda prog: wipe.erase_disk(wdev, method, prog, start_lba=start, sectors=count,
+                                                              hardware=hw),
+                         self._done, panel, on_error=self._error, on_cancel=self._stopped)
+        self.record = dict(self.app.job_record or {})  # client, ticket and technician this job was stamped with
+
+    def _error(self, e):
+        self.app._inventory = None
+        if isinstance(e, wipe.DriveFrozen):
+            body = self.step(3, "Drive is frozen", "")
+            self.result_card(body, "warn", "warn", "The drive refused its built-in erase for now",
+                             [str(e), "Nothing has been erased."])
+            self.buttons(primary=("Try again", self._after_pick),
+                         secondary=("Use overwrite instead", lambda: self._confirm(use_hw=False)))
+            return
+        body = self.step(3, "Erase failed", "")
+        self.result_card(body, "warn", "danger", "The erase didn't finish",
+                         [str(e), "Don't reuse or hand on this drive until an erase completes.",
+                          "No wipe certificate was made."])
+        self.buttons(primary=("Back to home", self.app.home), secondary=("Try again", self._confirm))
 
     def _stopped(self, info):
         self.app._inventory = None
@@ -1045,27 +1120,47 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         ok = res["write_errors"] == 0 and res["verify_mismatched_blocks"] == 0
         body = self.step(3, "Erase complete" if ok else "Erase finished with problems", "")
         self.app.mascot.set_mood("happy" if ok else "sad", "wiped" if ok else "sick")
-        lines = [f"{human_size(res['bytes'])} overwritten · {res['passes']} pass(es)",
-                 "Verified by reading it back" if res["verified"] else "Not verified (method has no verify pass)",
-                 f"Took {human_time(self.res['end'] - self.t_start)}"]
-        if not ok:
-            lines.append(f"Unwritable sectors: {res['write_errors']} · verify mismatches: "
-                         f"{res['verify_mismatched_blocks']}. This drive may be failing.")
+        took = f"Took {human_time(self.res['end'] - self.t_start)}"
+        if res.get("hardware"):
+            lines = [f"{res['method']} · NIST SP 800-88 Purge", f"Check: {res['verification']}", took]
+            if not ok:
+                lines.append(f"{res['verify_mismatched_blocks']} marked sector(s) still readable. The drive said it "
+                             "erased but didn't. Overwrite it or destroy it.")
+        else:
+            lines = [f"{human_size(res['bytes'])} overwritten · {res['passes']} pass(es) · NIST SP 800-88 Clear",
+                     "Verified by reading it back" if res["verified"] else "Not verified (method has no verify pass)",
+                     took]
+            if res.get("fallback_reason") and res["fallback_reason"] != "Overwrite chosen.":
+                lines.insert(0, res["fallback_reason"])
+            if not ok:
+                lines.append(f"Unwritable sectors: {res['write_errors']} · verify mismatches: "
+                             f"{res['verify_mismatched_blocks']}. This drive may be failing.")
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          "Drive is clean" if ok else "Some sectors couldn't be wiped", lines)
-        self.buttons(primary=("Back to home", self.app.home), secondary=("Save certificate…", self._cert))
+        self.buttons(primary=("Save certificate…", self._cert), secondary=("Back to home", self.app.home))
+
+    def certificate_info(self) -> dict:
+        """Everything the certificate states: the result, the drive, and the job's client, ticket and technician."""
+        dev = self.target["dev"]
+        rec = getattr(self, "record", None) or {}
+        machine = rec.get("machine") or ""
+        if machine in ("", "This PC"):
+            machine = platform.node()
+        return dict(self.res, target=dev.path, model=dev.model, serial=dev.serial, size=dev.size, bus=dev.bus,
+                    method=self.res.get("method") or self.method.name, start=self.t_start, scope=self.target_name(),
+                    client=rec.get("client") or self.app.context.get("client") or "",
+                    ticket=rec.get("ticket") or self.app.context.get("ticket") or "",
+                    technician=rec.get("technician") or technician(), machine=machine)
 
     def _cert(self):
         dev = self.target["dev"]
         name = f"Wipe certificate - {dev.model or dev.name} - {time.strftime('%Y-%m-%d')}.html".replace("/", "-")
         p = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name,
-                                         filetypes=[("Web page", "*.html")])
+                                         filetypes=[("Web page (print to PDF)", "*.html")])
         if not p:
             return
-        info = dict(self.res, target=dev.path, model=dev.model, serial=dev.serial, size=dev.size, bus=dev.bus,
-                    method=self.method.name, start=self.t_start, scope=self.target_name())
-        cid = wipe_certificate(p, info)
-        self.app.toast(f"Certificate {cid} saved")
+        cid = wipe_certificate(p, self.certificate_info(), branding())
+        self.app.toast(f"Certificate {cid} saved. Open it and print to PDF.")
         self.app.open_folder(p)
 
 

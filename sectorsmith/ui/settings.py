@@ -1,15 +1,19 @@
-"""Settings: appearance, Mossbit personality, presentation mode, technician name, shortcuts and About."""
+"""Settings: appearance, Mossbit personality, presentation mode, technician name, branding, shortcuts and About."""
 from __future__ import annotations
 
+import os
+import shutil
 import tkinter as tk
+from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ..util import APP_VERSION
+from ..report import LOGO_MAX, LOGO_TYPES
+from ..util import APP_VERSION, app_dir
 from . import theme
 from .guide import load_settings, save_settings
 from .screens import Screen
-from .shell import ProductMark, initials, technician
+from .shell import ProductMark, branding, initials, technician
 from .widgets import AutoScroll, Card, OptionCard, primary_button, secondary_button, segmented
 
 P = theme.PALETTE
@@ -94,6 +98,35 @@ class SettingsScreen(Screen):
         ctk.CTkLabel(card.body, text="Every job is stamped with this name, the client and the ticket.",
                      font=theme.font_style("small"), text_color=P["muted"], anchor="w").pack(fill="x", pady=(8, 0))
 
+        card = Card(col, "Branding")
+        card.pack(fill="x", pady=(0, 16))
+        brand = branding()
+        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Company name", font=theme.font_style("body_strong"), text_color=P["text"], width=140,
+                     anchor="w").pack(side="left")
+        self.company = tk.StringVar(value=brand["company"])
+        ctk.CTkEntry(row, textvariable=self.company, width=260, height=34,
+                     placeholder_text="Your MSP's name").pack(side="left")
+        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row.pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(row, text="Logo", font=theme.font_style("body_strong"), text_color=P["text"], width=140,
+                     anchor="w").pack(side="left")
+        self.logo = brand["logo"]
+        self.logo_lbl = ctk.CTkLabel(row, text="", font=theme.font_style("body"), text_color=P["text_2"], width=260,
+                                     anchor="w")
+        self.logo_lbl.pack(side="left")
+        secondary_button(row, "Choose…", self._pick_logo, width=90, height=34).pack(side="left", padx=(10, 0))
+        secondary_button(row, "Remove", self._clear_logo, width=80, height=34).pack(side="left", padx=(8, 0))
+        self._show_logo()
+        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row.pack(fill="x", pady=(10, 0))
+        primary_button(row, "Save", self._save_brand, width=80, height=34).pack(side="left", padx=(140, 0))
+        ctk.CTkLabel(card.body, text="Printed at the top of wipe certificates. PNG, JPG or SVG, up to 3 MB. The "
+                                     "certificate stays plain black and white, with no SectorSmith colours or mascot.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
+                     wraplength=640).pack(fill="x", pady=(8, 0))
+
         card = Card(col, "Keyboard")
         card.pack(fill="x", pady=(0, 16))
         for keys, what in SHORTCUTS:
@@ -116,6 +149,41 @@ class SettingsScreen(Screen):
         ctk.CTkLabel(t, text=theme.TAGLINE, font=theme.font_style("body"), text_color=P["muted"], anchor="w").pack(
             fill="x")
         secondary_button(row, "How to use", lambda: app.open_guide(), width=120).pack(side="right")
+
+    def _show_logo(self):
+        self.logo_lbl.configure(text=os.path.basename(self.logo) if self.logo else "No logo")
+
+    def _pick_logo(self):
+        p = filedialog.askopenfilename(title="Choose your logo", filetypes=[
+            ("Images", " ".join("*" + e for e in LOGO_TYPES)), ("All files", "*.*")])
+        if not p:
+            return
+        ext = os.path.splitext(p)[1].lower()
+        if ext not in LOGO_TYPES or os.path.getsize(p) > LOGO_MAX:
+            self.app.toast("Use a PNG, JPG, GIF, WebP or SVG image up to 3 MB.", "warn")
+            return
+        self.logo = p
+        self._show_logo()
+
+    def _clear_logo(self):
+        self.logo = ""
+        self._show_logo()
+
+    def _save_brand(self):
+        logo = self.logo
+        if logo and os.path.isfile(logo):
+            # keep a copy next to the settings, so certificates still get it when the original moves
+            keep = app_dir() / f"brand_logo{os.path.splitext(logo)[1].lower()}"
+            if os.path.abspath(logo) != os.path.abspath(keep):
+                try:
+                    shutil.copyfile(logo, keep)
+                    logo = str(keep)
+                except OSError:
+                    pass
+        self.logo = logo
+        save_settings(brand_company=self.company.get().strip(), brand_logo=logo)
+        self._show_logo()
+        self.app.toast("Saved. New wipe certificates carry this name and logo.")
 
     def _save_tech(self):
         name = self.tech.get().strip()

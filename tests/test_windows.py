@@ -94,6 +94,35 @@ except Exception as e:  # noqa: BLE001
     check("system disk" in str(e).lower(), "system disk write refused")
 sysd.close()
 
+# --- hardware erase: capability detection only. Sends IDENTIFY, never an erase or a password command ----------
+import ctypes  # noqa: E402
+
+from sectorsmith import device as D  # noqa: E402
+check(ctypes.sizeof(D._AtaPassThroughEx) == (48 if ctypes.sizeof(ctypes.c_void_p) == 8 else 40),
+      "ATA_PASS_THROUGH_EX matches the Windows SDK layout")
+p = wipe.hardware_plan(sysd)
+check(not p.available and not p.frozen and "system disk" in p.reason, "system disk: no hardware erase offered")
+for d in disks:
+    p = wipe.hardware_plan(d)  # read-only; refuses the system disk without sending anything
+    check(isinstance(p, wipe.HardwarePlan) and (p.available or p.frozen or p.reason),
+          f"capability check on {d.name} ({d.bus}): {p.name or p.reason[:90]}")
+    print("    ", {k: v for k, v in p.info.items() if k not in ("serial",)})
+# talk to the system disk's controller directly: IDENTIFY only, to exercise the IOCTL plumbing
+pt = None
+try:
+    pt = D.WinPassThrough(sysd.path)
+    if sysd.bus == "NVMe":
+        ident = wipe.parse_nvme_identify(pt.nvme_identify_controller())
+        check(bool(ident["model"]), f"NVMe identify via IOCTL_STORAGE_QUERY_PROPERTY: {ident['model']}")
+    else:
+        ident = wipe.parse_ata_identify(pt.ata_identify())
+        check(ident["checksum_ok"], f"ATA IDENTIFY via IOCTL_ATA_PASS_THROUGH: {ident['model']}")
+except OSError as e:  # cloud VMs often sit behind a controller that doesn't pass these through
+    print(f"INFO identify not passed through on {sysd.bus}: {e}")
+finally:
+    if pt is not None:
+        pt.close()
+
 # --- attach a virtual disk ----------------------------------------------------------------
 if os.path.exists(vhd):
     diskpart(f'select vdisk file="{vhd}"\ndetach vdisk noerr\n')
@@ -117,6 +146,8 @@ try:
     dev = next(d for d in list_disks() if any(root in m for ms in volume_letters_for(d).values() for m in ms))
     print("test disk:", dev.describe(), dev.bus)
     check(not dev.is_system and abs(dev.size - 256 * 1024 * 1024) < 4 * 1024 * 1024, "virtual disk enumerated")
+    hp = wipe.hardware_plan(dev)
+    check(not hp.available and not hp.frozen and hp.reason, f"virtual disk: overwrite only ({hp.reason[:80]})")
     pt = partitions.read_partition_table(dev)
     print(partitions.describe(pt, dev.sector_size))
     data_part = next(p for p in pt.partitions if p.fs == "NTFS")

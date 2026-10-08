@@ -176,7 +176,8 @@ Use this when a drive suddenly shows as unallocated, RAW or "needs formatting", 
 Securely erase a whole disk or a single partition before it's reused, returned or disposed of.
 
 1. **Pick the target.** The disk Windows runs from can't be selected.
-2. **Choose how thorough:**
+2. **Use the drive's own erase.** For a whole SATA or NVMe drive, SectorSmith asks the drive what it supports and offers ATA Secure Erase, NVMe Sanitize (crypto or block erase) or NVMe Format. That counts as NIST 800-88 **Purge** and reaches spare cells an overwrite can't. A frozen drive is reported (sleep the PC or replug the drive, then try again). If the drive can't do it, the overwrite below runs and the certificate says so.
+3. **Choose how thorough** (the overwrite, NIST 800-88 **Clear**):
 
    | Option | Method | When |
    |---|---|---|
@@ -185,13 +186,13 @@ Securely erase a whole disk or a single partition before it's reused, returned o
    | **Thorough** | DoD 5220.22-M 3-pass + verify | Policy requires multi-pass |
    | *More…* | HMG IS5, DoD 7-pass, Schneier, Gutmann 35, custom pattern | Special requirements |
 
-3. **Type to confirm**, e.g. `WIPE DISK 2`.
-4. **Save the certificate.** It's a printable HTML page with the drive model, serial number, method, passes, verification result, operator, workstation and times.
+4. **Type to confirm**, e.g. `WIPE DISK 2`.
+5. **Save the certificate.** A sober A4 page (print it to PDF) with your company name and logo (Settings, Branding), client, ticket, technician, machine, drive model, serial and capacity, method, hardware or software erase, NIST category, verification result, times, a certificate ID and a QR code holding the ID and a SHA-256 of the record.
 
 <img src="docs/images/wipe_strength.png" width="49%"> <img src="docs/images/wipe_confirm.png" width="49%">
 
 > [!WARNING]
-> SSDs and USB flash keep spare cells the computer can't reach. For flash media leaving the business, also run the manufacturer's **Secure Erase / Sanitize**, or destroy the drive physically.
+> SSDs and USB flash keep spare cells the computer can't reach. Use the drive's own erase (step 2) on a whole drive connected by SATA or NVMe. USB enclosures and RAID controllers usually block it: connect the drive directly, or destroy it physically.
 
 </details>
 
@@ -385,9 +386,10 @@ sectorsmith/
 ├─ partscan.py     lost-partition search (NTFS/FAT/exFAT/ext, backup boot sectors)
 ├─ ntfs.py         MFT parser for undelete with names, folders and dates
 ├─ carver.py       signature carving for 25+ file types with structural length detection
-├─ wipe.py         wipe methods, verification, free-space wipe, file shredding
+├─ wipe.py         drive's own erase (ATA Secure Erase, NVMe Sanitize), wipe methods, verification, shredding
 ├─ surface.py      surface scan, ddrescue-style imaging/cloning, fixed VHD writer
-├─ report.py       wipe certificates
+├─ report.py       branded wipe certificates (A4 HTML)
+├─ qr.py           small QR encoder for the certificate
 ├─ link/           SectorSmith Link: TLS pairing, agent, user migration, network clone
 ├─ app.py          classic expert UI (Advanced tools)
 └─ ui/             new UI: wizards, Mossbit, sweep bar, guides, themes
@@ -404,6 +406,7 @@ tests/             engine tests, real-Windows integration test, headless UI test
 Every push runs [GitHub Actions](.github/workflows/build.yml):
 
 * **Engine tests (Linux):** builds a real GPT disk image with FAT32 + NTFS + ext4 partitions, then checks partition search and restore (validated with `sgdisk`/`sfdisk`), byte-exact NTFS undelete, carving, wipe verification, VHD output (validated with `qemu-img`), and simulated bad sectors.
+* **Hardware erase tests:** fake SATA and NVMe drives check IDENTIFY parsing, method choice, frozen drives, the system-disk refusal, fallback to overwrite and verification by sampling; the certificate's QR code is decoded back.
 * **Link tests:** a controller and real agent processes over TLS. They check certificate pinning, token rejection, migrating a profile byte-for-byte (including delta re-runs), clones in both directions, and USB/listen-mode pairing.
 * **Lint & security:** `ruff` and `bandit` on every push. CodeQL also runs once the repo is public, and Dependabot watches dependencies.
 * **Windows integration:** creates and attaches a real virtual disk with `diskpart`, then exercises raw I/O, volume locking, partition restore that Windows re-mounts, NTFS undelete on a live volume, and wipes.
@@ -420,7 +423,7 @@ Every push runs [GitHub Actions](.github/workflows/build.yml):
 - [ ] Volume Shadow Copy for copying files that are open on the old PC
 - [ ] FAT/exFAT undelete with names
 - [ ] BitLocker unlock, ext4 write, LVM, RAID reconstruction
-- [ ] ATA Secure Erase / NVMe Sanitize passthrough
+- [x] ATA Secure Erase / NVMe Sanitize passthrough
 
 ---
 

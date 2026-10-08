@@ -37,6 +37,8 @@ jobs:
         run: python tests/build_test_disk.py "$RUNNER_TEMP/sstest"
       - name: Run engine tests
         run: python tests/test_core.py "$RUNNER_TEMP/sstest"
+      - name: Run hardware erase and certificate tests (fake drives, QR round trip)
+        run: python tests/test_sanitize.py "$RUNNER_TEMP/sssanitize"
       - name: Run Link tests (encrypted pairing, user migration, network clone)
         run: python tests/test_link.py "$RUNNER_TEMP/sstest"
       - name: Run Deploy tests (installer analysis, maintenance sessions, script export)

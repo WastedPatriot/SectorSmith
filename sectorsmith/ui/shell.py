@@ -21,6 +21,13 @@ def technician() -> str:
     return name if name.lower() not in ("root", "admin", "administrator") else ""
 
 
+def branding() -> dict:
+    """The MSP's name and logo for wipe certificates (Settings, Branding)."""
+    from .guide import load_settings
+    s = load_settings()
+    return {"company": s.get("brand_company") or "", "logo": s.get("brand_logo") or ""}
+
+
 def initials(name: str) -> str:
     parts = [p for p in name.replace(".", " ").replace("_", " ").split() if p]
     return ("".join(p[0] for p in parts[:2]) or "?").upper()
