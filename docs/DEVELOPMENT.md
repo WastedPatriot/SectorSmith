@@ -12,7 +12,10 @@ Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Prop
 - `sectorsmith/deploy/` SectorSmith Deploy (desired-state software deployment):
   analyze.py (MSI/EXE to silent switches and detection), core.py (Store, Package/Task/Client/Deployment,
   detect, execute, re-check sessions, export of Install/Uninstall/Detect.ps1)
-- `sectorsmith/ui/` UI (main.py, screens.py, link_screens.py, deploy_screens.py, guide.py, mascot.py for Mossbit)
+- `sectorsmith/ui/` UI (main.py, screens.py, link_screens.py, deploy_screens.py, guide.py, mascot.py for Mossbit).
+  theme.py holds the design tokens; nav.py is the route table behind the rail, sub-nav, breadcrumbs and
+  Ctrl+K palette (palette.py); shell.py draws the rail, sub-nav and context bar; workspace.py has the Drives,
+  Machines and Jobs pages; settings.py has Settings (Personality Full/Subtle/Off, presentation mode)
 - `tools/` make_sprites.py, make_docs.py (README screenshots and GIFs), make_usb.ps1 (WinPE stick)
 - `tests/` test_core.py, test_link.py and test_deploy.py (run `python tests/build_test_disk.py <dir>` first),
   test_windows.py (CI only), ui_smoke.py, ui_link_smoke.py and ui_deploy_smoke.py (need a display, use xvfb on Linux)

@@ -63,10 +63,10 @@ GUIDES = {
         ],
         "tips": ["Afterwards, Windows may need a rescan: Disk Management → Action → Rescan Disks.",
                  "Not sure? Use 'Recover files → Deep scan' on the disk to copy data off first.",
-                 "The backup (first and last 1 MiB of the disk) can be restored from Advanced tools → Overview."],
+                 "The backup (first and last 1 MiB of the disk) can be restored from Expert tools → Overview."],
     },
     "wipe": {
-        "title": "Wipe a drive", "icon": "wipe", "tone": "danger", "task": "WipeWizard",
+        "title": "Erase and certify", "icon": "wipe", "tone": "danger", "task": "WipeWizard",
         "intro": "Securely erase a whole disk or one partition before it's reused, returned or disposed of.",
         "steps": [
             ("Pick the target", "A whole disk, or a single partition if the rest must be kept. The system disk "
@@ -98,7 +98,7 @@ GUIDES = {
                  "On SSDs, file-level shredding is best-effort. Wipe the whole drive when disposing of it."],
     },
     "health": {
-        "title": "Check drive health", "icon": "health", "tone": "success", "task": "HealthWizard",
+        "title": "Health check", "icon": "health", "tone": "success", "task": "HealthWizard",
         "intro": "Read every sector and get a plain-English verdict. Nothing is changed during a normal test.",
         "steps": [
             ("Pick a drive or partition", "Testing a partition is quicker when you only care about one area."),
@@ -106,12 +106,12 @@ GUIDES = {
                               "red is unreadable."),
             ("Read the verdict", "Healthy, slow in places, or bad sectors found — with what to do next."),
         ],
-        "tips": ["Bad sectors? Back the drive up straight away with Back up / clone, then replace it.",
+        "tips": ["Bad sectors? Back the drive up straight away with Image and clone, then replace it.",
                  "'Try repairing' rewrites unreadable sectors so the drive swaps them for spares. Whatever was "
                  "in them is already lost."],
     },
     "clone": {
-        "title": "Back up & clone", "icon": "clone", "tone": "violet", "task": "CloneWizard",
+        "title": "Image and clone", "icon": "clone", "tone": "violet", "task": "CloneWizard",
         "intro": "Make an exact sector-by-sector copy of a drive or partition — into a file, or onto another "
                  "drive.",
         "steps": [
@@ -130,7 +130,7 @@ GUIDES = {
         "steps": [
             ("Plug in the new drive", "Put the new SSD/NVMe in a USB enclosure and plug it into the PC (or into a "
                                       "linked PC). It shows up marked USB."),
-            ("Back up / clone → Another drive", "Pick the disk Windows runs from as the source and the USB drive "
+            ("Image and clone → Another drive", "Pick the disk Windows runs from as the source and the USB drive "
                                                  "as the destination. Over the network? Use Clone a disk to another "
                                                  "PC instead."),
             ("Let it snapshot and copy", "Windows keeps running: SectorSmith takes a Volume Shadow Copy snapshot "
@@ -138,7 +138,7 @@ GUIDES = {
             ("Swap the drives", "Fit the new drive inside the PC and boot from it."),
             ("Use the extra space", "A bigger drive's extra space appears as unallocated. In Disk Management "
                                     "extend C: (if a Recovery partition sits in the way, extend into the space "
-                                    "after it or move it with Advanced tools)."),
+                                    "after it or move it with Expert tools)."),
         ],
         "tips": ["The partition table is fitted to the bigger disk automatically.",
                  "The new drive must be at least as big as the old one (sector-for-sector copy).",
@@ -154,8 +154,8 @@ GUIDES = {
             ("Run it on the other PC", "Remote in (or use your RMM's PowerShell shell), open PowerShell as "
                                        "administrator, paste, Enter. It downloads SectorSmith from this PC, "
                                        "checks its SHA-256, and links up."),
-            ("Work with both", "The PC appears in the sidebar under MACHINES. Use it in Move a user or Clone a "
-                               "disk."),
+            ("Work with both", "The PC appears under Machines and in the Working on panel. Use it in Migrate "
+                               "user or Network clone."),
         ],
         "tips": ["The link is TLS-encrypted with a one-time certificate pinned in the command, plus a random token. "
                  "A different PC can't impersonate this one.",
@@ -164,7 +164,7 @@ GUIDES = {
                  "The other PC disconnects automatically when you close SectorSmith or press Disconnect."],
     },
     "migrate": {
-        "title": "Move a user to a new PC", "icon": "migrate", "tone": "success", "task": "MigrateWizard",
+        "title": "Migrate user", "icon": "migrate", "tone": "success", "task": "MigrateWizard",
         "intro": "Copy a user's folders and app data from their old PC to their new one — no USB drives, no "
                  "reboots.",
         "steps": [
@@ -201,7 +201,7 @@ GUIDES = {
         ],
         "tips": ["For data disks (not the Windows disk) both PCs can stay running — just link with the command.",
                  "Cloning Windows onto different hardware can need driver updates on first boot. For a new PC, "
-                 "Move a user is usually the better choice.",
+                 "Migrate user is usually the better choice.",
                  "Make the USB stick with tools/make_usb.ps1 (needs the free Windows ADK + WinPE add-on)."],
     },
     "deploy": {
@@ -230,7 +230,7 @@ GUIDES = {
                   "another PC.")],
     },
     "advanced": {
-        "title": "Advanced tools", "icon": "advanced", "tone": "violet",
+        "title": "Expert tools", "icon": "advanced", "tone": "violet",
         "intro": "The classic tabbed interface for experienced technicians — opens in its own window.",
         "steps": [
             ("Sector editor", "View any sector in hex, decode values in the data inspector, search the disk, and "
@@ -333,7 +333,7 @@ class GuideScreen(Screen):
             mod = next((m for m in (link_screens, deploy_screens) if hasattr(m, g["task"])), screens)
             self.buttons(primary=(f"Start: {g['title']}", lambda: self.app.go(getattr(mod, g["task"]))))
         elif key == "advanced":
-            self.buttons(primary=("Open Advanced tools", self.app.open_advanced))
+            self.buttons(primary=("Open Expert tools", self.app.open_advanced))
 
 
 WELCOME = [
@@ -361,10 +361,15 @@ class WelcomeScreen(Screen):
         import tkinter as tk
         frames, fps, w, h = Sprites.get(self, {"happy": "happy", "sweep": "sweep", "warn": "warn"}[mood], 5)
         cv = tk.Canvas(card, width=w, height=h, highlightthickness=0, bd=0, background=theme.c("card"))
+        if theme.effective_personality() == "Off":
+            from .shell import ProductMark
+            cv, frames = ProductMark(card, 96, bg="surface"), None
         cv.pack(pady=(30, 4))
         start = [0]
 
         def anim():
+            if not frames:
+                return
             try:
                 cv.delete("all")
                 cv.create_image(0, 0, anchor="nw", image=frames[start[0] % len(frames)])

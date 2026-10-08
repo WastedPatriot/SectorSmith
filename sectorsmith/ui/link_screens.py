@@ -276,7 +276,7 @@ class ConnectScreen(Screen):
                          text_color=P["muted"]).pack(anchor="w")
             ghost_button(card, "Disconnect", lambda m=m: (m.close(), self.app._machine_event(m, False)),
                          width=120).pack(side="right", padx=12)
-        self.buttons(primary=("Move a user to a new PC", lambda: self.app.go(MigrateWizard)),
+        self.buttons(primary=("Migrate user", lambda: self.app.go(MigrateWizard)),
                      secondary=("Clone a disk", lambda: self.app.go(NetCloneWizard)))
 
 
@@ -285,7 +285,7 @@ class MigrateWizard(Screen):
     guide_topic = "migrate"
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Move a user to a new PC", steps=["From", "To", "What", "Copy"])
+        super().__init__(master, app, "Migrate user", steps=["From", "To", "What", "Copy"])
         self.src = self.dst = None
         self.src_root = self.dst_root = None
         self._from()
@@ -375,7 +375,7 @@ class MigrateWizard(Screen):
                      ).pack(anchor="w", padx=12, pady=(6, 10))
 
     def _from(self):
-        body = self.step(0, "Move a user to a new PC", "Which PC and which user are we moving from?")
+        body = self.step(0, "Migrate user", "Move a user to a new PC. Which PC and which user are we moving from?")
         self.app.mascot.set_mood("idle", text="Moving day! Who are we moving?")
         nb = None
         area = ctk.CTkFrame(body, fg_color="transparent")
@@ -536,7 +536,7 @@ class NetCloneWizard(Screen):
     guide_topic = "netclone"
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Clone disks", steps=["Source", "Destinations", "Confirm", "Clone"])
+        super().__init__(master, app, "Network clone", steps=["Source", "Destinations", "Confirm", "Clone"])
         self.targets = {}  # (id(machine), path) -> (machine, disk)
         self._source()
 
