@@ -247,8 +247,11 @@ check(r["code"] == 0 and "hi" in r["out"], "remote commands still work after Can
 cf = os.path.join(new, "cancelled_move")
 plan_c = migrate.Plan(local, src_root, remote, cf, sel)
 r, dt = run_cancel(lambda prog: migrate.run(plan_c, prog), after=1)
-check(isinstance(r, Cancelled) and dt < 3 and r.info.get("cancelled") and os.path.exists(r.info["report"])
-      and "STOPPED" in open(r.info["report"]).read(),
+rep_c = ""
+if isinstance(r, Cancelled) and os.path.exists(r.info.get("report", "")):
+    with open(r.info["report"]) as fh:
+        rep_c = fh.read()
+check(isinstance(r, Cancelled) and dt < 3 and r.info.get("cancelled") and "STOPPED" in rep_c,
       f"migration: Cancel stops it in {dt:.2f}s and writes a report ({getattr(r, 'info', {}).get('copied')} "
       "files copied before)")
 r2 = migrate.run(plan_c, Progress(1))
@@ -270,7 +273,8 @@ bob = os.path.join(vol, "Users", "bob")
 for rel, data in {"Desktop/note.txt": b"from the old disk", "Documents/cv.docx": os.urandom(70_000),
                   "AppData/Roaming/Mozilla/Firefox/profiles.ini": b"[General]", "NTUSER.DAT": b"hive"}.items():
     os.makedirs(os.path.dirname(os.path.join(bob, rel)), exist_ok=True)
-    open(os.path.join(bob, rel), "wb").write(data)
+    with open(os.path.join(bob, rel), "wb") as fh:
+        fh.write(data)
 os.makedirs(os.path.join(vol, "Users", "Public", "Documents"))
 for d in ("Program Files/Mozilla Firefox", "Program Files/7-Zip", "Program Files (x86)/Acme Payroll",
           "Program Files/Common Files", "Users/bob/AppData/Local/Programs/Microsoft VS Code"):
@@ -295,8 +299,9 @@ shutil.rmtree(os.path.dirname(drive_dst), ignore_errors=True)
 mk = usb.make_folder(path=drive_dst)
 r = migrate.run(migrate.Plan(usb, bob, remote, os.path.join(new, "bob_from_usb"), sel, apps=rows,
                              install_apps=False), Progress(1))
-check(not r["failed"] and open(os.path.join(new, "bob_from_usb", "Desktop", "note.txt"), "rb").read()
-      == b"from the old disk", "old disk -> linked PC migration")
+with open(os.path.join(new, "bob_from_usb", "Desktop", "note.txt"), "rb") as fh:
+    note = fh.read()
+check(not r["failed"] and note == b"from the old disk", "old disk -> linked PC migration")
 r = migrate.run(migrate.Plan(usb, bob, usb, drive_dst, sel, apps=rows, install_apps=False), Progress(1))
 check(not r["failed"] and os.path.exists(os.path.join(drive_dst, "Documents", "cv.docx"))
       and os.path.exists(os.path.join(drive_dst, "SectorSmith - apps on the old PC.txt")),
@@ -323,7 +328,8 @@ try:
         for rel, data in raw_files.items():
             pth = os.path.join(mnt, "Users", "dave", rel)
             os.makedirs(os.path.dirname(pth), exist_ok=True)
-            open(pth, "wb").write(data)
+            with open(pth, "wb") as fh:
+                fh.write(data)
         os.makedirs(os.path.join(mnt, "Users", "Default", "Desktop"))
         os.makedirs(os.path.join(mnt, "Program Files", "Notepad++"))
     finally:

@@ -190,8 +190,8 @@ GUIDES = {
                  "OneDrive folders are off by default — they re-sync on their own when the user signs in.",
                  "A report of every run is saved in %LOCALAPPDATA%\\SectorSmith\\reports.",
                  "Cancel is safe: what was copied stays, and Run again carries on from there.",
-                 "A disk with no drive letter? 'Drives without a letter' reads its NTFS partition directly "
-                 "(read-only). BitLocker disks need unlocking in Windows first."],
+                 ("A disk with no drive letter? 'Drives without a letter' reads its NTFS partition directly "
+                  "(read-only). BitLocker disks need unlocking in Windows first.")],
     },
     "netclone": {
         "title": "Clone a disk to another PC", "icon": "clone", "tone": "violet", "task": "NetCloneWizard",

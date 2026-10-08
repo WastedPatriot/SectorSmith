@@ -85,11 +85,11 @@ def _kill_tree(p):
             import signal
             os.killpg(p.pid, signal.SIGKILL)
     except (OSError, ValueError, subprocess.SubprocessError):
-        pass
+        pass  # tree already gone; p.kill() below covers the parent
     try:
         p.kill()
     except OSError:
-        pass
+        pass  # already exited
 
 
 def _clear_attrs(p: str):

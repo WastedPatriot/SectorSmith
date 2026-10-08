@@ -153,7 +153,7 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
                         os.remove(p)
                         removed = True
                     except OSError:
-                        pass
+                        pass  # reported as incomplete below
                 c.info.update(dest=dst, to_device=False, written=done, state="removed" if removed else "incomplete")
             raise
 

@@ -623,7 +623,8 @@ check(got.get("Mozilla Firefox", {}).get("status") == "failed",
       "winget app tried (no winget here, so it fails and says so)")
 check(res["manual_apps"] == ["Acme Payroll"] and os.path.exists(os.path.join(mdst, "Desktop", "hello.txt")),
       "files still copied, and apps to install by hand listed")
-rep = open(res["report"]).read()
+with open(res["report"]) as fh:
+    rep = fh.read()
 check("Acme Payroll" in rep and "Bar Tool" in rep, "migration report lists the apps")
 remote.close()
 ag.wait(30)

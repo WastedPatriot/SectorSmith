@@ -161,7 +161,7 @@ def wipe_range(dev: Device, start: int, length: int, method: Method, prog: Progr
         try:
             dev.flush()
         except OSError:
-            pass
+            pass  # best effort; the stopped report already says part-erased
         # every pass starts at the beginning, so after pass 1 the whole range has been overwritten once
         c.info.update(pass_no=pi + 1, passes=npass, overwritten=min(length, done_work) if pi == 0 else length,
                       length=length, verified=False)

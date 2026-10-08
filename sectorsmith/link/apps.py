@@ -168,8 +168,8 @@ class MigrationStore(core.Store):
     Sessions are saved to the real library, so the install shows on the Deploy Sessions tab."""
 
     def __init__(self, base: core.Store, packages: list, deployments: list):
+        super().__init__(base.root)
         self.base = base
-        self.root = base.root
         self.data = {"packages": packages, "tasks": [], "clients": [], "deployments": deployments}
 
     def save(self, kind=None):

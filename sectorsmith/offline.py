@@ -91,7 +91,7 @@ def _posix_volumes() -> list[dict]:
                     if mnt.startswith(("/media/", "/mnt/", "/run/media/")):
                         roots.append(mnt)
         except OSError:
-            pass
+            pass  # no /proc/mounts (not Linux): nothing extra to scan
     out = []
     for r in roots:
         try:

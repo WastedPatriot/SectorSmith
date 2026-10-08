@@ -386,7 +386,7 @@ def recover_entries(vol: NTFSVolume, entries: list[MFTEntry], out_dir: str, prog
             try:
                 os.remove(target)  # half a file is worse than none: it looks recovered but isn't
             except OSError:
-                pass
+                pass  # nothing was written yet
             c.info.update(recovered=ok, total=len(files), out_dir=out_dir)
             raise
         except Exception as ex:  # noqa: BLE001

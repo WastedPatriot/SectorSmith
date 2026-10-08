@@ -747,10 +747,10 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         if done <= 0:
             lines = ["It stopped before anything was written. The drive is as it was."]
         else:
-            lines = [f"It stopped in {pas}. About {human_size(done)} of {human_size(total)} "
-                     f"({100 * done / total:.0f}%) has been overwritten at least once.",
-                     "The drive is now part-erased: its partitions are probably damaged, and data in the part not "
-                     "reached yet may still be readable.",
+            lines = [(f"It stopped in {pas}. About {human_size(done)} of {human_size(total)} "
+                      f"({100 * done / total:.0f}%) has been overwritten at least once."),
+                     ("The drive is now part-erased: its partitions are probably damaged, and data in the part not "
+                      "reached yet may still be readable."),
                      "Don't reuse or hand it on like this. Run the wipe again to finish it.",
                      "No wipe certificate was made."]
         self.cancelled_state("Wipe stopped part-way" if done > 0 else "Wipe stopped", lines, step=3,

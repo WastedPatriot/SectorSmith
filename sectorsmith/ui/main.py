@@ -396,7 +396,7 @@ class MainWindow(*_Base):
                 if self.job_panel is not None:
                     self.job_panel.set_cancelling()
             except tk.TclError:
-                pass
+                pass  # panel already gone; the cancel still goes through
             self.mascot.say(text="Stopping safely, one moment...")
 
     def _poll(self):
