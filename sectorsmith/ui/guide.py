@@ -204,6 +204,31 @@ GUIDES = {
                  "Move a user is usually the better choice.",
                  "Make the USB stick with tools/make_usb.ps1 (needs the free Windows ADK + WinPE add-on)."],
     },
+    "deploy": {
+        "title": "Deploy software", "icon": "deploy", "tone": "violet", "task": "DeployScreen",
+        "intro": "Keep your linked PCs in line: install and update apps, remove ones that shouldn't be there, and "
+                 "run upkeep tasks. Deploy is a preview, so try new packages on one PC first.",
+        "steps": [
+            ("Add a package", "Drop an MSI or EXE on the Library tab. SectorSmith reads it and suggests the silent "
+                              "install switches and how to tell it's installed. Check them, change anything, save. "
+                              "winget IDs and plain scripts work too."),
+            ("Say where it goes", "On Deployments, pick a package or task, then every PC, a client (a named group "
+                                  "of PCs) or one PC, and what you want: kept up to date, a set version, or removed."),
+            ("Add upkeep tasks", "A task is a check script (exit 0 means the PC is fine) and a fix script that "
+                                 "runs when the check fails. Use Check only to report without changing anything."),
+            ("Run maintenance", "Pick linked PCs. SectorSmith first checks what each one needs and shows you. "
+                                "Nothing changes until you type the confirmation, then it installs, fixes and "
+                                "checks again."),
+            ("Look back at sessions", "Every run is saved on the Sessions tab with what was found, what changed "
+                                      "and the installer output."),
+        ],
+        "tips": ["Export scripts writes Install.ps1, Uninstall.ps1 and Detect.ps1 (plus the installer) to a folder, "
+                 "ready for your RMM or for running by hand.",
+                 "Installer type not recognised? The /S switch is only a guess. Check the vendor's docs and test on "
+                 "one PC.",
+                 "The library lives in %LOCALAPPDATA%\\SectorSmith\\deploy. Copy that folder to take it to "
+                 "another PC."],
+    },
     "advanced": {
         "title": "Advanced tools", "icon": "advanced", "tone": "violet",
         "intro": "The classic tabbed interface for experienced technicians — opens in its own window.",
@@ -218,8 +243,7 @@ GUIDES = {
     },
 }
 ORDER = ["start", "recover", "partition", "wipe", "shred", "health", "clone", "upgrade", "connect", "migrate",
-         "netclone",
-         "advanced"]
+         "netclone", "deploy", "advanced"]
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +329,8 @@ class GuideScreen(Screen):
         for w in self.footer.winfo_children():
             w.destroy()
         if g.get("task"):
-            from . import link_screens, screens
-            mod = link_screens if hasattr(link_screens, g["task"]) else screens
+            from . import deploy_screens, link_screens, screens
+            mod = next((m for m in (link_screens, deploy_screens) if hasattr(m, g["task"])), screens)
             self.buttons(primary=(f"Start: {g['title']}", lambda: self.app.go(getattr(mod, g["task"]))))
         elif key == "advanced":
             self.buttons(primary=("Open Advanced tools", self.app.open_advanced))

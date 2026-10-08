@@ -300,16 +300,28 @@ class ProgressPanel(ctk.CTkFrame):
 
 
 class DropZone(ctk.CTkFrame):
-    def __init__(self, master, text="Drop files or folders here", sub="or use the buttons below", height=150):
+    def __init__(self, master, text="Drop files or folders here", sub="or use the buttons below", height=150,
+                 icon="shred", tone="accent", wide=False):
         super().__init__(master, corner_radius=22, fg_color=P["card"], border_width=3, border_color=P["border"],
                          height=height)
         self.pack_propagate(False)
-        self.badge = IconBadge(self, "shred", 54)
-        self.badge.pack(pady=(22, 6))
+        self.grid_propagate(False)
+        self.badge = IconBadge(self, icon, 54, tone)
         self.badge.set_bg(theme.c("card"))
         theme.on_theme_change(lambda: self.badge.set_bg(theme.c("card")))
-        ctk.CTkLabel(self, text=text, font=theme.font(16, "bold"), text_color=P["text"]).pack()
-        ctk.CTkLabel(self, text=sub, font=theme.font(12), text_color=P["muted"]).pack()
+        title = ctk.CTkLabel(self, text=text, font=theme.font(16, "bold"), text_color=P["text"])
+        subl = ctk.CTkLabel(self, text=sub, font=theme.font(12), text_color=P["muted"])
+        if wide:
+            # badge beside the text, so a short strip across the page doesn't clip the second line
+            self.grid_columnconfigure((0, 3), weight=1)
+            self.grid_rowconfigure((0, 1), weight=1)
+            self.badge.grid(row=0, column=1, rowspan=2, padx=(0, 16))
+            title.grid(row=0, column=2, sticky="sw")
+            subl.grid(row=1, column=2, sticky="nw")
+        else:
+            self.badge.pack(pady=(22, 6))
+            title.pack()
+            subl.pack()
 
     def hot(self, on: bool):
         self.configure(border_color=P["accent"] if on else P["border"],

@@ -141,8 +141,37 @@ def migrate(cv, x, y, s, col, bg):
                    arrowshape=(s * .14, s * .16, s * .07))
 
 
+def deploy(cv, x, y, s, col, bg):
+    w = _w(s)
+    # a box with an arrow dropping into it
+    rounded_rect(cv, x - s * .36, y - s * .02, x + s * .36, y + s * .4, s * .06, outline=col, width=w, fill="")
+    cv.create_line(x - s * .36, y + s * .12, x + s * .36, y + s * .12, fill=col, width=w * .8)
+    cv.create_line(x, y - s * .42, x, y + s * .06, fill=col, width=w, arrow="last",
+                   arrowshape=(s * .14, s * .16, s * .08))
+
+
+def task(cv, x, y, s, col, bg):
+    w = _w(s)
+    for i in range(3):
+        yy = y - s * .26 + i * s * .26
+        cv.create_line(x - s * .38, yy, x - s * .28, yy + s * .08, x - s * .14, yy - s * .08, fill=col,
+                       width=w * .9, capstyle="round", joinstyle="round")
+        cv.create_line(x - s * .04, yy, x + s * .38, yy, fill=col, width=w, capstyle="round")
+
+
+def client(cv, x, y, s, col, bg):
+    w = _w(s)
+    rounded_rect(cv, x - s * .34, y - s * .38, x + s * .12, y + s * .38, s * .04, outline=col, width=w, fill="")
+    rounded_rect(cv, x + s * .12, y - s * .08, x + s * .38, y + s * .38, s * .04, outline=col, width=w, fill="")
+    for r in range(3):
+        for c in range(2):
+            xx, yy = x - s * .22 + c * s * .2, y - s * .24 + r * s * .18
+            cv.create_rectangle(xx - s * .04, yy - s * .03, xx + s * .04, yy + s * .03, fill=col, outline="")
+
+
 ICONS = {"recover": recover, "partition": partition, "wipe": wipe, "shred": shred, "health": health,
-         "clone": clone, "advanced": advanced, "drive": drive, "image": image, "check": check, "warn": warn, "pc": pc, "link": link, "migrate": migrate}
+         "clone": clone, "advanced": advanced, "drive": drive, "image": image, "check": check, "warn": warn,
+         "pc": pc, "link": link, "migrate": migrate, "deploy": deploy, "task": task, "client": client}
 
 
 def draw_badge(cv, name, size, fg, bg, offset=0.0):
