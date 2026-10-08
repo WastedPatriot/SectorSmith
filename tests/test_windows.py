@@ -135,7 +135,10 @@ try:
     e = deleted["hello.bin"]
     r = ntfs.recover_entries(vol, [e], out, Progress(1), keep_paths=False)
     rec_path = os.path.join(out, "hello.bin")
-    got = open(rec_path, "rb").read() if os.path.exists(rec_path) else b""
+    got = b""
+    if os.path.exists(rec_path):
+        with open(rec_path, "rb") as fh:
+            got = fh.read()
     ok = got == payload
     if not ok:
         diff = first_diff(got, payload)

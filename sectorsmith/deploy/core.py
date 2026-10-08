@@ -1,4 +1,4 @@
-"""SectorSmith Deploy — software library, tasks, clients, deployments (desired state) and maintenance
+"""SectorSmith Deploy: software library, tasks, clients, deployments (desired state) and maintenance
 sessions that bring linked machines into line. Runs over SectorSmith Link (or on this PC)."""
 from __future__ import annotations
 
@@ -88,7 +88,10 @@ class Store:
         self.data = {}
         for k, cls in self.KINDS.items():
             p = os.path.join(self.root, f"{k}.json")
-            raw = json.load(open(p)) if os.path.exists(p) else []
+            raw = []
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    raw = json.load(f)
             names = {f.name for f in dataclasses.fields(cls)}
             self.data[k] = [cls(**{a: b for a, b in r.items() if a in names}) for r in raw]
 
@@ -96,7 +99,8 @@ class Store:
         for k in ([kind] if kind else self.KINDS):
             p = os.path.join(self.root, f"{k}.json")
             tmp = p + ".tmp"
-            json.dump([dataclasses.asdict(x) for x in self.data[k]], open(tmp, "w"), indent=1)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump([dataclasses.asdict(x) for x in self.data[k]], f, indent=1)
             os.replace(tmp, p)
 
     # convenience
@@ -141,6 +145,11 @@ class Store:
             self.data["deployments"] = [d for d in self.deployments if not (d.item_type == "task"
                                                                             and d.item_id == id_)]
             self.save("deployments")
+        if kind == "clients":
+            # a client-targeted deployment without its client would never match anything again
+            self.data["deployments"] = [d for d in self.deployments if not (d.target_kind == "client"
+                                                                            and d.target_value == id_)]
+            self.save("deployments")
         self.save(kind)
 
     def installer_path(self, pkg: Package) -> str | None:
@@ -170,35 +179,46 @@ class Store:
             os.remove(old)
         pkg.installer = s["installer"]
         pkg.version = s["version"] or pkg.version
+        pkg.kind = s["kind"]
         if s.get("product_code"):
             pkg.product_code = s["product_code"]
+        if s.get("upgrade_code"):
+            pkg.upgrade_code = s["upgrade_code"]
         dest = os.path.join(self.root, "files", pkg.id)
         os.makedirs(dest, exist_ok=True)
         shutil.copy2(path, os.path.join(dest, pkg.installer))
         return self.upsert("packages", pkg)
 
     def client_of(self, hostname: str) -> Client | None:
+        return next(iter(self.clients_of(hostname)), None)
+
+    def clients_of(self, hostname: str) -> list[Client]:
         h = hostname.lower()
-        return next((c for c in self.clients if h in [m.lower() for m in c.machines]), None)
+        return [c for c in self.clients if h in [m.lower() for m in c.machines]]
 
     # ------------------------------------------------------------------ export / import
     def export_package(self, pkg: Package, folder: str) -> str:
         """Writes package.json, the installer and ready-to-use PowerShell scripts (Install, Uninstall,
-        Detect) — usable in SectorSmith, other RMM/deployment tools, or by hand."""
+        Detect), usable in SectorSmith, other RMM/deployment tools, or by hand."""
         out = os.path.join(folder, re.sub(r"[^\w.-]+", "_", f"{pkg.name}_{pkg.version}").strip("_"))
         os.makedirs(out, exist_ok=True)
-        json.dump(dataclasses.asdict(pkg), open(os.path.join(out, "package.json"), "w"), indent=1)
+        with open(os.path.join(out, "package.json"), "w", encoding="utf-8") as f:
+            json.dump(dataclasses.asdict(pkg), f, indent=1)
         ip = self.installer_path(pkg)
         if ip and os.path.exists(ip):
             shutil.copy2(ip, os.path.join(out, pkg.installer))
         scripts = render_scripts(pkg)
         for name, body in scripts.items():
-            with open(os.path.join(out, name), "w", encoding="utf-8-sig") as f:
+            ps = name.endswith(".ps1")
+            # BOM so Windows PowerShell 5.1 reads non-ASCII names right; sh wants neither BOM nor CRLF
+            with open(os.path.join(out, name), "w", encoding="utf-8-sig" if ps else "utf-8",
+                      newline="\r\n" if name.endswith((".ps1", ".cmd")) else "\n") as f:
                 f.write(body)
         return out
 
     def import_package(self, folder: str) -> Package:
-        meta = json.load(open(os.path.join(folder, "package.json")))
+        with open(os.path.join(folder, "package.json"), encoding="utf-8") as f:
+            meta = json.load(f)
         names = {f.name for f in dataclasses.fields(Package)}
         pkg = Package(**{k: v for k, v in meta.items() if k in names})
         pkg.id = _id()
@@ -210,9 +230,13 @@ class Store:
 
     # ------------------------------------------------------------------ sessions
     def save_session(self, sess: dict) -> str:
-        name = f"{time.strftime('%Y%m%d-%H%M%S')}_{re.sub(r'[^\w-]+', '_', sess['machine'])}_{sess['id']}.json"
+        # milliseconds in the name so sessions() lists runs from the same second in order
+        t = sess.get("started") or time.time()
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + f"{int(t * 1000) % 1000:03d}"
+        name = f"{stamp}_{re.sub(r'[^\w-]+', '_', sess['machine'])}_{sess['id']}.json"
         p = os.path.join(self.root, "sessions", name)
-        json.dump(sess, open(p, "w"), indent=1)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(sess, f, indent=1)
         return p
 
     def sessions(self, limit=200) -> list[dict]:
@@ -221,58 +245,117 @@ class Store:
         out = []
         for f in files:
             try:
-                out.append(json.load(open(os.path.join(d, f))))
+                with open(os.path.join(d, f), encoding="utf-8") as fh:
+                    out.append(json.load(fh))
             except (OSError, ValueError):
                 pass
         return out
 
 
 # ---------------------------------------------------------------------------
+_UNINSTALL_KEYS = """$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+         'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+         'Registry::HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+"""
+# same ordering as vtuple(): up to four numeric parts, missing parts count as 0
+_VERSION_KEY = """function Get-VersionKey($v) {
+    $n = @([regex]::Matches("$v", '\\d+') | Select-Object -First 4 | ForEach-Object { [int64]$_.Value })
+    while ($n.Count -lt 4) { $n += 0 }
+    '{0:D12}.{1:D12}.{2:D12}.{3:D12}' -f $n
+}
+"""
+# /s strips exactly the outer quotes we add, so commands with several quoted parts survive cmd.exe
+_RUN = """$p = Start-Process -FilePath $env:ComSpec -ArgumentList ('/s /c "' + $cmd + '"') -Wait -PassThru -WindowStyle Hidden
+"""
+SCRIPT_EXT = {"powershell": ".ps1", "shell": ".sh", "sh": ".sh", "cmd": ".cmd"}
+
+
+def _ps(text: str) -> str:
+    """PowerShell single-quoted literal."""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _name_filter(value: str) -> str:
+    if value.startswith("re:"):
+        return f"$_.DisplayName -match {_ps(value[3:])}"
+    return f"$_.DisplayName -like ('*' + [WildcardPattern]::Escape({_ps(value)}) + '*')"
+
+
 def render_scripts(pkg: Package) -> dict:
-    """Stand-alone PowerShell for a package (Install / Uninstall / Detect)."""
-    name = pkg.detection.get("value") or pkg.name
-    detect = f"""# Detect '{pkg.name}' — outputs the installed version, or nothing if not installed
-$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
-         'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
-$hit = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
-       Where-Object {{ $_.DisplayName -like '*{name.replace("'", "''")}*' }} |
-       Sort-Object {{ [version]($_.DisplayVersion -replace '[^0-9.]','' -replace '^$','0') }} -Descending |
-       Select-Object -First 1
-if ($hit) {{ $hit.DisplayVersion }}
+    """Stand-alone scripts for a package: Install.ps1, Uninstall.ps1 and Detect.ps1 (plus Detect.sh/.cmd when the
+    detection script is not PowerShell)."""
+    det = pkg.detection or {}
+    method, value = det.get("method", "registry"), det.get("value") or ""
+    out = {}
+    if method == "script":
+        lang = pkg.language or "powershell"
+        if lang == "powershell":
+            detect = value
+        else:
+            other = "Detect" + SCRIPT_EXT.get(lang, ".txt")
+            out[other] = value if lang == "cmd" else value.replace("\r\n", "\n")
+            detect = (f"# Detection for '{pkg.name}' is a {lang} script, not PowerShell: see {other}\n"
+                      f"Write-Error 'Use {other} to detect this package'\nexit 1\n")
+    elif method == "file":
+        detect = f"""# Detect '{pkg.name}' by file: outputs its version, or nothing if the file is missing
+$f = [Environment]::ExpandEnvironmentVariables({_ps(value)})
+if (Test-Path -LiteralPath $f -PathType Leaf) {{
+    $v = (Get-Item -LiteralPath $f).VersionInfo.FileVersion
+    if (-not $v -and $f -notmatch '\\.(exe|dll|sys)$') {{ $v = Get-Content -LiteralPath $f -TotalCount 1 }}
+    if ($v) {{ "$v".Trim() }} else {{ '0' }}
+}}
 """
-    if pkg.detection.get("method") == "msi_product_code" and pkg.product_code:
-        detect = f"""$k = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{pkg.product_code}',
+    elif pkg.product_code and (method == "msi_product_code" or (method == "registry" and not value)):
+        detect = f"""# Detect '{pkg.name}' by MSI product code: outputs the installed version, or nothing if not installed
+$k = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{pkg.product_code}',
      'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{pkg.product_code}' -ErrorAction SilentlyContinue
-if ($k) {{ $k[0].DisplayVersion }}
-"""
-    elif pkg.detection.get("method") == "script":
-        detect = pkg.detection.get("value", "")
-    install_cmd = expand(pkg.install, pkg, installer='$PSScriptRoot\\' + pkg.installer if pkg.installer else "")
-    uninstall_cmd = expand(pkg.uninstall, pkg, installer="")
-    install = f"""# Install '{pkg.name}' {pkg.version} silently
-$ErrorActionPreference = 'Stop'
-$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{install_cmd.replace("'", "''")}' -Wait -PassThru -WindowStyle Hidden
-if (@({",".join(map(str, pkg.success_codes))}) -notcontains $p.ExitCode) {{ throw "Install failed with exit code $($p.ExitCode)" }}
-Write-Output "Installed (exit code $($p.ExitCode))"
-"""
-    if "{registry_uninstall}" in pkg.uninstall:
-        uninstall = f"""# Uninstall '{pkg.name}' using its own uninstaller from Add/Remove Programs
-$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
-         'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
-$hit = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '*{name.replace("'", "''")}*' }} | Select-Object -First 1
-if (-not $hit) {{ Write-Output 'Not installed'; return }}
-$cmd = if ($hit.QuietUninstallString) {{ $hit.QuietUninstallString }} else {{ $hit.UninstallString + ' {pkg.uninstall.replace("{registry_uninstall}", "").strip()}' }}
-$cmd = $cmd -replace 'MsiExec.exe /I', 'MsiExec.exe /X'
-if ($cmd -match 'msiexec' -and $cmd -notmatch '/qn') {{ $cmd += ' /qn /norestart' }}
-$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $cmd -Wait -PassThru -WindowStyle Hidden
-Write-Output "Uninstall exit code $($p.ExitCode)"
+if ($k) {{ @($k)[0].DisplayVersion }}
 """
     else:
-        uninstall = f"""# Uninstall '{pkg.name}'
-$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{uninstall_cmd.replace("'", "''")}' -Wait -PassThru -WindowStyle Hidden
-Write-Output "Uninstall exit code $($p.ExitCode)"
+        detect = f"""# Detect '{pkg.name}': outputs the installed version, or nothing if not installed
+{_VERSION_KEY}{_UNINSTALL_KEYS}$hit = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+       Where-Object {{ {_name_filter(value or pkg.name)} }} |
+       Sort-Object {{ Get-VersionKey $_.DisplayVersion }} -Descending |
+       Select-Object -First 1
+if ($hit) {{ if ($hit.DisplayVersion) {{ $hit.DisplayVersion }} else {{ '0' }} }}
 """
-    return {"Install.ps1": install, "Uninstall.ps1": uninstall, "Detect.ps1": detect}
+    install = f"# Install '{pkg.name}' {pkg.version} silently\n$ErrorActionPreference = 'Stop'\n"
+    cmd = expand(pkg.install, pkg, installer="{installer}")
+    if pkg.installer:
+        install += f"$installer = Join-Path $PSScriptRoot {_ps(pkg.installer)}\n"
+        install += f"$cmd = {_ps(cmd)}.Replace('{{installer}}', $installer)\n"
+    else:
+        install += f"$cmd = {_ps(cmd)}\n"
+    codes = ",".join(map(str, pkg.success_codes or [0]))
+    install += _RUN + f"""if (@({codes}) -notcontains $p.ExitCode) {{ throw "Install failed with exit code $($p.ExitCode)" }}
+Write-Output "Installed (exit code $($p.ExitCode))"
+exit $p.ExitCode
+"""
+    if "{registry_uninstall}" in pkg.uninstall:
+        extra = expand(pkg.uninstall, pkg).strip()
+        uninstall = f"""# Uninstall '{pkg.name}' using its own uninstaller from Add/Remove Programs
+{_VERSION_KEY}{_UNINSTALL_KEYS}$hit = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+       Where-Object {{ {_name_filter(value if method == "registry" and value else pkg.name)} }} |
+       Sort-Object {{ Get-VersionKey $_.DisplayVersion }} -Descending |
+       Select-Object -First 1
+if (-not $hit) {{ Write-Output 'Not installed'; exit 0 }}
+if ($hit.UninstallString -match 'msiexec(\\.exe)?\\s+/[ix]\\s*(\\{{[0-9A-Fa-f-]+\\}})') {{
+    $cmd = 'msiexec.exe /x ' + $Matches[2] + ' /qn /norestart'
+}} elseif ($hit.QuietUninstallString) {{
+    $cmd = $hit.QuietUninstallString
+}} else {{
+    $cmd = $hit.UninstallString + ' ' + {_ps(extra)}
+}}
+""" + _RUN + """Write-Output "Uninstall exit code $($p.ExitCode)"
+exit $p.ExitCode
+"""
+    elif pkg.uninstall.strip():
+        uninstall = f"# Uninstall '{pkg.name}'\n$cmd = {_ps(expand(pkg.uninstall, pkg))}\n" + _RUN + \
+            'Write-Output "Uninstall exit code $($p.ExitCode)"\nexit $p.ExitCode\n'
+    else:
+        uninstall = f"# '{pkg.name}' has no uninstall command\nWrite-Error 'No uninstall command is set for this package'\nexit 1\n"
+    out.update({"Install.ps1": install, "Uninstall.ps1": uninstall, "Detect.ps1": detect})
+    return out
 
 
 def expand(template: str, pkg: Package, installer: str = "", registry_uninstall: str = "") -> str:
@@ -321,34 +404,36 @@ def detect(ep, pkg: Package, inv: list[dict]) -> tuple[bool, str | None, dict | 
 
 # ---------------------------------------------------------------------------
 def applicable(store: Store, hostname: str, onboarding: bool) -> list[Deployment]:
-    client = store.client_of(hostname)
+    client_ids = {c.id for c in store.clients_of(hostname)}
     res = []
     for d in store.deployments:
         if not d.enabled or (d.onboarding_only and not onboarding):
             continue
         if d.target_kind == "all" or (d.target_kind == "machine" and d.target_value.lower() == hostname.lower()) \
-                or (d.target_kind == "client" and client and d.target_value == client.id):
+                or (d.target_kind == "client" and d.target_value in client_ids):
             res.append(d)
     # most specific deployment wins per item: machine > client > all
     rank = {"machine": 0, "client": 1, "all": 2}
     best = {}
-    for d in sorted(res, key=lambda d: rank[d.target_kind]):
+    for d in sorted(res, key=lambda d: rank.get(d.target_kind, 3)):
         best.setdefault((d.item_type, d.item_id), d)
-    out = list(best.values())
     # prerequisites first
-    order, seen = [], set()
+    order, seen, visiting = [], set(), set()
 
-    def visit(d, depth=0):
-        if (d.item_type, d.item_id) in seen or depth > 20:
+    def visit(d):
+        key = (d.item_type, d.item_id)
+        if key in seen or key in visiting:  # done already, or a prerequisite loop
             return
-        if d.item_type == "software":
-            pkg = store.get("packages", d.item_id)
-            for pre in (pkg.prerequisites if pkg else []):
-                pd = best.get(("software", pre)) or Deployment("software", pre, "installed")
-                visit(pd, depth + 1)
-        seen.add((d.item_type, d.item_id))
+        visiting.add(key)
+        pkg = store.get("packages", d.item_id) if d.item_type == "software" else None
+        # removing a package must not pull its prerequisites onto the machine
+        if pkg and d.desired not in ("uninstalled", "ignore"):
+            for pre in pkg.prerequisites:
+                visit(best.get(("software", pre)) or Deployment("software", pre, "installed", id=f"pre-{pre}"))
+        visiting.discard(key)
+        seen.add(key)
         order.append(d)
-    for d in out:
+    for d in best.values():
         visit(d)
     return order
 
@@ -392,6 +477,7 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False) -> 
                 continue
             installed, ver, entry = detect(ep, pkg, inv)
             want = d.version if d.desired == "version" else pkg.version
+            note = ""
             if d.desired == "uninstalled":
                 act = "uninstall" if installed else "none"
             elif not installed:
@@ -402,12 +488,20 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False) -> 
                 act = "reinstall"  # downgrade
             else:
                 act = "none"
-            actions.append({"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
-                            "desired": d.desired + (f" {want}" if d.desired in ("latest", "version") and want else ""),
-                            "current": ver or "not installed", "action": act, "entry": entry})
+            # the library holds one installer per package, so a pin to any other version can't be installed
+            if d.desired == "version" and act != "none" and want and pkg.version \
+                    and vtuple(pkg.version) != vtuple(want):
+                act, note = "audit", f"the library has {pkg.version}, this deployment pins {want}"
+            a = {"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
+                 "desired": d.desired + (f" {want}" if d.desired in ("latest", "version") and want else ""),
+                 "want": want if d.desired in ("latest", "version") else "",
+                 "current": ver or "not installed", "action": act, "entry": entry}
+            if note:
+                a["result"] = note
+            actions.append(a)
         else:
             task = store.get("tasks", d.item_id)
-            if task is None:
+            if task is None or d.desired == "ignore":
                 continue
             r = ep.run_script(script=task.test, language=task.language, params={**task.params, **d.params},
                               timeout=600)
@@ -415,7 +509,7 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False) -> 
             act = "none" if ok else ("set" if d.desired == "enforce" else "audit")
             actions.append({"type": "task", "deployment": d.id, "item": task.id, "name": task.name,
                             "desired": d.desired, "current": "compliant" if ok else "not compliant",
-                            "action": act, "test_output": r["out"][-500:]})
+                            "action": act, "test_output": (r["out"] + r["err"])[-500:]})
     return actions
 
 
@@ -424,20 +518,44 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     t0 = time.time()
     a = dict(a)
     log_lines = []
+
+    def run(cmd):
+        r = ep.run_command(cmd=cmd, timeout=3600)
+        log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
+        return r
     try:
         if a["type"] == "software":
             pkg = store.get("packages", a["item"])
+            if pkg is None:
+                a.update(status="failed", result="the package was deleted from the library before it could run")
+                return a
             if a["action"] in ("uninstall", "reinstall"):
-                cmd = expand(pkg.uninstall, pkg, registry_uninstall=_registry_uninstall(a.get("entry")))
-                r = ep.run_command(cmd=cmd, timeout=3600)
-                log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
+                reg = _registry_uninstall(a.get("entry"))
+                if "{registry_uninstall}" in pkg.uninstall and not reg:
+                    a.update(status="failed", result="no uninstall command found in Add/Remove Programs")
+                    return a
+                if "{registry_uninstall}" in pkg.uninstall and reg.lower().startswith("msiexec"):
+                    cmd = reg  # EXE switches like /S or /VERYSILENT would make msiexec refuse to run
+                else:
+                    cmd = expand(pkg.uninstall, pkg, registry_uninstall=reg)
+                if not cmd.strip():
+                    a.update(status="failed", result="no uninstall command is set for this package")
+                    return a
+                if prog:
+                    prog.set_detail(f"Removing {pkg.name}")
+                run(cmd)
             if a["action"] in ("install", "upgrade", "reinstall"):
                 remote = _upload(ep, store, pkg, prog) if pkg.installer else ""
-                cmd = expand(pkg.install, pkg, installer=remote)
-                if prog:
-                    prog.set_detail(f"Installing {pkg.name} {pkg.version}")
-                r = ep.run_command(cmd=cmd, timeout=3600)
-                log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
+                try:
+                    if prog:
+                        prog.set_detail(f"Installing {pkg.name} {pkg.version}")
+                    r = run(expand(pkg.install, pkg, installer=remote))
+                finally:
+                    if remote:
+                        try:
+                            ep.remove_path(path=remote[:-len(pkg.installer) - 1])
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("Couldn't remove the uploaded installer %s: %s", remote, e)
                 if r["code"] not in pkg.success_codes:
                     a.update(status="failed", result=f"Installer exit code {r['code']}")
                     return a
@@ -448,6 +566,8 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             want_absent = a["action"] == "uninstall"
             if want_absent:
                 ok = not installed
+            elif a["desired"].startswith("version") and a.get("want"):
+                ok = installed and vtuple(ver) == vtuple(a["want"])
             else:
                 ok = installed and (not pkg.version or a["desired"].startswith("installed")
                                     or vtuple(ver) >= vtuple(pkg.version))
@@ -456,6 +576,9 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                      f"still {'installed' if installed else 'missing'} after {a['action']} ({ver or '-'})")
         else:
             task = store.get("tasks", a["item"])
+            if task is None:
+                a.update(status="failed", result="the task was deleted before it could run")
+                return a
             dep = store.get("deployments", a["deployment"])
             params = {**task.params, **(dep.params if dep else {})}
             if a["action"] == "set":
@@ -466,7 +589,7 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                 a.update(status="compliant" if t["code"] == 0 else "failed",
                          result="fixed" if t["code"] == 0 else "still not compliant after set")
             else:
-                a.update(status="non-compliant", result="audit only — not changed")
+                a.update(status="non-compliant", result="audit only, not changed")
     except Cancelled:
         raise
     except Exception as e:  # noqa: BLE001
@@ -482,7 +605,7 @@ def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding
     info = ep.info()
     host = info["hostname"]
     sess = {"id": _id(), "machine": host, "started": time.time(), "mode": mode, "onboarding": onboarding,
-            "client": (store.client_of(host).name if store.client_of(host) else ""), "actions": []}
+            "client": ", ".join(c.name for c in store.clients_of(host)), "actions": []}
     prog.reset(1, f"Detecting on {host}…")
     inv = ep.installed_software()
     actions = plan(ep, store, host, inv, onboarding)

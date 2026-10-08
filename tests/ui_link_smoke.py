@@ -3,6 +3,7 @@
 Run after tests/test_link.py (it creates the fake profiles):
   xvfb-run -s "-screen 0 1360x860x24" python3.12 tests/ui_link_smoke.py <workdir> <shots>
 """
+import gc
 import os
 import shutil
 import subprocess
@@ -36,16 +37,27 @@ orig = app.toast
 app.toast = lambda t, tone="success": (errors.append(t) if tone == "danger" else None, orig(t, tone))
 
 
+# Dead CTkFonts are freed by the cyclic GC on whichever thread triggers it. On a job's worker thread,
+# Font.__del__ makes a cross-thread Tk call, and with update() instead of mainloop() tkinter waits 1 s per font
+# for a main loop that never runs. By the clone step there are hundreds, so the clone looked hung.
+# Collect on this thread only.
+gc.disable()
+
+
 def pump(sec=.4):
     end = time.time() + sec
     while time.time() < end:
         app.update()
+        gc.collect(0)
         time.sleep(.015)
+    gc.collect()
 
 
-def wait():
+def wait(t=180):
     pump(.4)
+    end = time.time() + t
     while app.job is not None:
+        assert time.time() < end, "job still running after %ds" % t
         pump(.1)
     pump(.6)
 

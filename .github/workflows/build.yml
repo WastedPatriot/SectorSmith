@@ -39,6 +39,8 @@ jobs:
         run: python tests/test_core.py "$RUNNER_TEMP/sstest"
       - name: Run Link tests (encrypted pairing, user migration, network clone)
         run: python tests/test_link.py "$RUNNER_TEMP/sstest"
+      - name: Run Deploy tests (installer analysis, maintenance sessions, script export)
+        run: python tests/test_deploy.py "$RUNNER_TEMP/ssdeploy"
 
   windows:
     name: Windows integration + build
