@@ -222,12 +222,12 @@ GUIDES = {
             ("Look back at sessions", "Every run is saved on the Sessions tab with what was found, what changed "
                                       "and the installer output."),
         ],
-        "tips": ["Export scripts writes Install.ps1, Uninstall.ps1 and Detect.ps1 (plus the installer) to a folder, "
-                 "ready for your RMM or for running by hand.",
-                 "Installer type not recognised? The /S switch is only a guess. Check the vendor's docs and test on "
-                 "one PC.",
-                 "The library lives in %LOCALAPPDATA%\\SectorSmith\\deploy. Copy that folder to take it to "
-                 "another PC."],
+        "tips": [("Export scripts writes Install.ps1, Uninstall.ps1 and Detect.ps1 (plus the installer) to a "
+                  "folder, ready for your RMM or for running by hand."),
+                 ("Installer type not recognised? The /S switch is only a guess. Check the vendor's docs and test "
+                  "on one PC."),
+                 ("The library lives in %LOCALAPPDATA%\\SectorSmith\\deploy. Copy that folder to take it to "
+                  "another PC.")],
     },
     "advanced": {
         "title": "Advanced tools", "icon": "advanced", "tone": "violet",

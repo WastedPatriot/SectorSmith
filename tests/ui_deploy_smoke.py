@@ -19,8 +19,9 @@ os.makedirs(SHOTS, exist_ok=True)
 shutil.rmtree(os.path.join(W, "appdata"), ignore_errors=True)
 os.environ["LOCALAPPDATA"] = os.path.join(W, "appdata")
 fake_inv = os.path.join(W, "fake_software.json")
-json.dump([{"key": "FakeApp", "name": "Fake App", "version": "1.0.0", "publisher": "Fake Co", "scope": "machine",
-            "uninstall": "", "quiet_uninstall": "", "system_component": False}], open(fake_inv, "w"))
+with open(fake_inv, "w") as fh:
+    json.dump([{"key": "FakeApp", "name": "Fake App", "version": "1.0.0", "publisher": "Fake Co", "scope": "machine",
+                "uninstall": "", "quiet_uninstall": "", "system_component": False}], fh)
 os.environ["SECTORSMITH_FAKE_SOFTWARE"] = fake_inv
 pcs = os.path.join(W, "pc_state")
 shutil.rmtree(pcs, ignore_errors=True)
@@ -175,7 +176,9 @@ until(lambda: any(os.path.exists(os.path.join(out, d, "Detect.ps1")) for d in os
 folder = os.path.join(out, os.listdir(out)[0])
 for f in ("Install.ps1", "Uninstall.ps1", "Detect.ps1", "package.json", "FakeAppSetup.exe"):
     assert os.path.exists(os.path.join(folder, f)), (f, os.listdir(folder))
-assert "/S" in open(os.path.join(folder, "Install.ps1"), encoding="utf-8-sig").read()
+with open(os.path.join(folder, "Install.ps1"), encoding="utf-8-sig") as fh:
+    install_ps1 = fh.read()
+assert "/S" in install_ps1
 
 # --- winget and script packages ---------------------------------------------------
 app.go(D.PackageBuilder, mode="winget")
