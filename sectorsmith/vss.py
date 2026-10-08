@@ -3,6 +3,11 @@
 Every mounted NTFS/ReFS volume on the disk gets a point-in-time shadow copy; reads that fall inside
 those volumes are served from the snapshot (via Device._overlay) while the rest of the disk
 (partition table, EFI/MSR partitions, gaps) is read directly.
+
+Only clusters that were allocated when the snapshot was taken are frozen. VSS skips copy-on-write
+for free clusters and for its own store files, so raw reads of those can show later live data.
+That is harmless for a clone (nothing references them) but means a raw hash of a snapshotted
+volume is not stable; compare used clusters instead.
 """
 from __future__ import annotations
 

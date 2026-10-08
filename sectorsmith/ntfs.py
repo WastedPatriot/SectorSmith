@@ -34,6 +34,7 @@ class MFTEntry:
     flags: int = 0  # $DATA attribute flags (compressed/encrypted/sparse)
     path: str = ""
     has_data: bool = False
+    init_size: int | None = None  # valid data length; NTFS reads anything past it as zeros
 
     @property
     def recoverability(self) -> str:
@@ -141,6 +142,7 @@ class NTFSVolume:
         resident = None
         dflags = 0
         has_data = False
+        init_size = None
         off = attr_off
         while off + 16 <= len(rec):
             atype, alen = struct.unpack_from("<II", rec, off)
@@ -166,7 +168,7 @@ class NTFSVolume:
                     start_vcn = struct.unpack_from("<Q", rec, off + 16)[0]
                     ro = struct.unpack_from("<H", rec, off + 32)[0]
                     if start_vcn == 0:
-                        size = struct.unpack_from("<Q", rec, off + 48)[0]
+                        size, init_size = struct.unpack_from("<QQ", rec, off + 48)
                     runs += decode_runlist(rec[off: off + alen], ro)
                 else:
                     vlen, voff = struct.unpack_from("<IH", rec, off + 16)
@@ -179,7 +181,7 @@ class NTFSVolume:
         names.sort(key=lambda t: (t[0] == 2, t[0]))
         _ns, nm, parent, pseq = names[0]
         return MFTEntry(recno, seq, nm, parent, pseq, is_dir, not in_use, size, mtime, runs, resident, dflags,
-                        has_data=has_data)
+                        has_data=has_data, init_size=init_size)
 
     # ------------------------------------------------------------------
     def _mft_byte_ranges(self):
@@ -278,6 +280,8 @@ class NTFSVolume:
                 f.write(e.resident)
                 return len(e.resident)
             remaining = e.size
+            # clusters past the valid data length hold stale bytes from earlier files
+            valid = e.size if e.init_size is None else min(e.size, e.init_size)
             for lcn, clusters in e.runs:
                 nbytes = min(clusters * self.cluster, remaining)
                 if nbytes <= 0:
@@ -290,11 +294,12 @@ class NTFSVolume:
                         if prog:
                             prog.check()
                         n = min(4 * 1024 * 1024, nbytes - pos)
+                        keep = max(0, min(n, valid - (written + pos)))
                         try:
-                            d = self.dev.read(self.base + lcn * self.cluster + pos, n)
+                            d = self.dev.read(self.base + lcn * self.cluster + pos, keep) if keep else b""
                         except OSError:
-                            d = bytes(n)
-                        f.write(d.ljust(n, b"\0"))
+                            d = bytes(keep)
+                        f.write(d[:keep].ljust(n, b"\0"))
                         pos += n
                 remaining -= nbytes
                 written += nbytes
