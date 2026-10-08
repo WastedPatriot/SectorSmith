@@ -440,7 +440,7 @@ def hardware_erase(dev: Device, plan: HardwarePlan, prog: Progress, pt: _device.
         prog.reset(1000, plan.name)
         prog.set_label(plan.name, "The drive is erasing itself. This can't be stopped once started.")
         log.info("Hardware erase %s on %s (%s), estimate %ss", plan.name, dev.path, dev.model, est)
-        failure: list[BaseException] = []
+        failure: list[Exception] = []
 
         def send():
             try:
@@ -451,7 +451,7 @@ def hardware_erase(dev: Device, plan: HardwarePlan, prog: Progress, pt: _device.
                         pt.nvme_sanitize(plan.command, timeout)
                     except OSError as e:
                         raise HardwareEraseFailed(f"The drive refused {plan.name}: {e}") from e
-            except BaseException as e:  # noqa: BLE001  handed back to the job thread below
+            except Exception as e:  # noqa: BLE001  handed back to the job thread below
                 failure.append(e)
         t0 = time.monotonic()
         th = threading.Thread(target=send, daemon=True, name="hardware-erase")

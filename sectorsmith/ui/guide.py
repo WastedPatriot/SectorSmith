@@ -83,10 +83,10 @@ GUIDES = {
                                      "NIST category, verification and a QR code with its ID and hash."),
         ],
         "tips": ["One verified pass is enough for modern hard drives. Extra passes mostly add time.",
-                 "A frozen drive refuses its own erase until it is power-cycled: sleep the PC and wake it, or "
-                 "unplug the drive and plug it back in, then try again.",
-                 "USB enclosures and RAID controllers usually block the drive's own erase. Connect the drive "
-                 "directly, or overwrite it and destroy it if it leaves the business.",
+                 ("A frozen drive refuses its own erase until it is power-cycled: sleep the PC and wake it, or "
+                  "unplug the drive and plug it back in, then try again."),
+                 ("USB enclosures and RAID controllers usually block the drive's own erase. Connect the drive "
+                  "directly, or overwrite it and destroy it if it leaves the business."),
                  "Volumes on the target disk are locked and dismounted while the wipe runs."],
     },
     "shred": {

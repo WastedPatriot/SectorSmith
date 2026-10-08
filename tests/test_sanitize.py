@@ -380,7 +380,9 @@ tampered = html_doc.replace('"drive_serial":"S6PXNM0T123456A"', '"drive_serial":
 check(tampered != html_doc and not report.verify_certificate(tampered)[0], "changing the record breaks the hash")
 p = os.path.join(W, "cert.html")
 cid2 = report.wipe_certificate(p, dict(info, cert_id="TEST-0000-0001"), branding)
-check(cid2 == "TEST-0000-0001" and "TEST-0000-0001" in open(p, encoding="utf-8").read(), "certificate written to file")
+with open(p, encoding="utf-8") as fh:
+    cert_text = fh.read()
+check(cid2 == "TEST-0000-0001" and "TEST-0000-0001" in cert_text, "certificate written to file")
 
 # overwrite fallback, no branding, errors
 info2 = dict(info, hardware=False, nist="Clear", method=NIST_CLEAR.name, write_errors=3, verify_mismatched_blocks=1,

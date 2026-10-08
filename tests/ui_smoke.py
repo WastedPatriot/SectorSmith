@@ -213,7 +213,8 @@ answers["save"] = os.path.join(W, "cert.html")
 press("Save certificate…")
 pump()
 assert os.path.exists(answers["save"])
-cert = open(answers["save"], encoding="utf-8").read()
+with open(answers["save"], encoding="utf-8") as fh:
+    cert = fh.read()
 assert "Example IT Services Ltd" in cert and "NIST SP 800-88" in cert and "Software overwrite" in cert, "branded cert"
 assert "mossbit" not in cert.lower() and "<svg" in cert
 
@@ -249,8 +250,8 @@ from sectorsmith.ui.guide import load_settings  # noqa: E402
 st = app.go(ST.SettingsScreen)
 pump(0.5)
 logo_src = os.path.join(W, "logo.svg")
-open(logo_src, "w").write('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" '
-                          'height="10"/></svg>')
+with open(logo_src, "w") as fh:
+    fh.write('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>')
 filedialog.askopenfilename = lambda **k: logo_src
 st._pick_logo()
 st.company.set("Example IT Services Ltd")
