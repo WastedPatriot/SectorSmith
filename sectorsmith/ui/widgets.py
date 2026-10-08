@@ -68,7 +68,7 @@ class AutoScroll(ctk.CTkScrollableFrame):
                 self._scrollbar.lower(self._parent_canvas)
             self.after(80, self._fit)  # showing or hiding the bar changes the width, check again once it settles
         except tk.TclError:
-            pass
+            pass  # frame destroyed before the check ran
 
 
 # ---------------------------------------------------------------------------- icons
@@ -543,6 +543,7 @@ def _install_overlay_handlers(root):
         if root._smith_overlays:
             root._smith_overlays[-1].close()
             return "break"
+        return None
     root.bind("<Button-1>", click, add="+")
     root.bind("<Escape>", esc, add="+")
 
@@ -658,7 +659,7 @@ class Popover(ctk.CTkFrame):
         try:
             self.root._smith_overlays.remove(self)
         except (ValueError, AttributeError):
-            pass
+            pass  # already closed, or the root never had overlays
         self.shadow.destroy()
         self.destroy()
 
@@ -691,13 +692,13 @@ class Toast(ctk.CTkFrame):
                 t.update_idletasks()
                 y -= t.winfo_reqheight() + 10
             except tk.TclError:
-                pass
+                pass  # toast closed while restacking
 
     def _gone(self):
         try:
             Toast._stack.remove(self)
         except ValueError:
-            pass
+            pass  # already removed
         try:
             self.destroy()
         except tk.TclError:

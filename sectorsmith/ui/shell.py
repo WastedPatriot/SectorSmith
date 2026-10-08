@@ -189,7 +189,7 @@ class Rail(ctk.CTkFrame):
             y = it.winfo_rooty() - self.winfo_rooty() + it.winfo_height() // 2 - 15
             self.bar.place(x=0, y=y)
         except tk.TclError:
-            pass
+            pass  # rail item destroyed mid-redraw
 
 
 # ---------------------------------------------------------------------------- sub-nav

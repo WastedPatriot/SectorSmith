@@ -383,7 +383,7 @@ class Home(Screen):
                 t.sub.configure(text=f"{imgs} disk image{'s' if imgs != 1 else ''} open" if imgs else
                                 "Physical drives, no images open")
         except tk.TclError:
-            pass
+            pass  # tile closed while the drive list refreshed
 
     # -- cards ------------------------------------------------------------------
     def _recent(self, parent):

@@ -238,6 +238,6 @@ class CommandPalette(ctk.CTkFrame):
         try:
             self.app._smith_overlays.remove(self)
         except ValueError:
-            pass
+            pass  # already closed
         self.shadow.destroy()
         self.destroy()
