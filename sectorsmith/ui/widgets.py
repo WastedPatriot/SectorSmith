@@ -170,6 +170,10 @@ class DrivePicker(ctk.CTkScrollableFrame):
             ctk.CTkLabel(self, text="No drives found. Run as administrator, or drop a disk image (.img/.vhd) "
                                     "onto the window.", font=theme.font(13), text_color=P["muted"],
                          wraplength=520).pack(pady=30)
+        def is_usb(d):
+            return d.removable or d.bus in ("USB", "SD", "MMC")
+        if writes:  # external drives first when choosing somewhere to write
+            inventory = sorted(inventory, key=lambda x: not is_usb(x[0]))
         for dev, pt, err in inventory:
             if exclude_path and dev.path == exclude_path:
                 continue
@@ -184,7 +188,8 @@ class DrivePicker(ctk.CTkScrollableFrame):
             self._row(dict(kind="disk", dev=dev, part=None), "image" if dev.is_image else "drive",
                       f"{dev.name}  ·  {dev.model or 'Disk'}", sub, human_size(dev.size),
                       selectable=mode in ("disk", "any") and not disk_disabled and not err,
-                      tag="SYSTEM" if dev.is_system else None, indent=0, disabled_text=disk_disabled)
+                      tag="SYSTEM" if dev.is_system else ("USB" if is_usb(dev) else None), indent=0,
+                      disabled_text=disk_disabled)
             if pt and mode in ("part", "any"):
                 for p in pt.partitions:
                     if p.type_id in ("0x05", "0x0F", "0x85"):
@@ -219,7 +224,7 @@ class DrivePicker(ctk.CTkScrollableFrame):
         if fs:
             Pill(top, fs, "violet").pack(side="left", padx=6)
         if tag:
-            Pill(top, tag, "warn").pack(side="left", padx=6)
+            Pill(top, tag, "warn" if tag == "SYSTEM" else "success").pack(side="left", padx=6)
         ctk.CTkLabel(card, text=disabled_text or sub, font=theme.font(12),
                      text_color=P["warn"] if disabled_text else P["muted"]).grid(row=1, column=1, sticky="w",
                                                                                  pady=(0, 10))

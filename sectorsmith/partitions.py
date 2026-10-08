@@ -421,3 +421,45 @@ def describe(pt: PartitionTable, ss: int) -> str:
                      f"{p.type_name} {p.name}")
     lines += [f"  ! {n}" for n in pt.notes]
     return "\n".join(lines)
+
+
+def fix_gpt_after_grow(dev: Device) -> str | None:
+    """After cloning a GPT disk onto a bigger one, move the backup GPT to the real end of the disk and
+    widen the usable area (the extra space then shows as unallocated). Also fixes the protective MBR.
+    Returns a description of what was done, or None if nothing was needed."""
+    ss = dev.sector_size
+    hdr = read_gpt_header(dev, 1)
+    if hdr is None:
+        return None
+    last = dev.total_sectors - 1
+    if hdr["alt_lba"] == last:
+        return None
+    if hdr["alt_lba"] > last:
+        raise DeviceError("Backup GPT lies beyond the end of this disk (target smaller than source?).")
+    n, esize = hdr["n_entries"], hdr["entry_size"]
+    table = dev.read(hdr["entries_lba"] * ss, n * esize)
+    ent_sectors = -(-len(table) // ss)
+    padded = table.ljust(ent_sectors * ss, b"\0")
+    ecrc = zlib.crc32(table)
+    raw = bytearray(hdr["raw"])
+    struct.pack_into("<Q", raw, 32, last)                      # alternate (backup) header LBA
+    struct.pack_into("<Q", raw, 48, last - ent_sectors - 1)    # last usable LBA
+    primary = _gpt_header_bytes(bytes(raw), hdr["header_size"], ecrc)
+    backup = _gpt_header_bytes(bytes(raw), hdr["header_size"], ecrc, my_lba=last, alt_lba=1,
+                               entries_lba=last - ent_sectors)
+    old_alt = hdr["alt_lba"]
+    dev.write_sectors(1, primary)
+    dev.write_sectors(last - ent_sectors, padded)
+    dev.write_sectors(last, backup)
+    if 0 < old_alt < last - ent_sectors:  # clear the stale backup header left in the middle of the disk
+        dev.write_sectors(old_alt, bytes(ss))
+    mbr = bytearray(dev.read_sectors(0, 1))
+    for i in range(4):
+        off = 446 + 16 * i
+        if mbr[off + 4] == 0xEE:
+            struct.pack_into("<I", mbr, off + 12, min(last, 0xFFFFFFFF))
+    dev.write_sectors(0, bytes(mbr))
+    dev.flush()
+    extra = (last - old_alt) * ss
+    log.info("GPT moved to end of %s (+%s unallocated)", dev.name, human_size(extra))
+    return f"Partition table fitted to the larger disk — {human_size(extra)} of extra space is unallocated."

@@ -214,5 +214,36 @@ diff = [i // 512 for i in range(0, len(src_b), 512) if src_b[i:i + 512] != out_b
 check(sorted(r["bad_lbas"]) == sorted(BAD) and set(diff) <= BAD, f"imaging skips only bad sectors (diff {diff})")
 check(r["sha256"] == sha(outp), "hash re-computed for image with gaps")
 
+# 8. snapshot overlay routing + cloning onto a bigger disk -------------------------
+base = open_image(SRC)
+snapfile = os.path.join(W, "fake_snapshot.bin")
+p1s, p1e = meta["parts"][0]
+plen = (p1e - p1s + 1) * 512
+with open(snapfile, "wb") as f:
+    f.write(bytes([0xAB]) * plen)
+reader = open_image(snapfile)
+base._overlay = [(p1s * 512, plen, reader)]
+chunk = base.read(p1s * 512 - 4096, 8192)   # straddles the start of the overlaid partition
+check(chunk[:4096] == open(SRC, "rb").read()[p1s * 512 - 4096: p1s * 512] and chunk[4096:] == b"\xab" * 4096,
+      "snapshot overlay serves partition reads, direct reads elsewhere")
+tail = base.read((p1e + 1) * 512 - 512, 1024)
+check(tail[:512] == b"\xab" * 512 and tail[512:] == open(SRC, "rb").read()[(p1e + 1) * 512: (p1e + 1) * 512 + 512],
+      "overlay boundary at partition end is exact")
+base._overlay = []
+base.close()
+reader.close()
+
+big = os.path.join(W, "bigger_target.img")
+with open(big, "wb") as f:
+    f.truncate(512 * 1024 * 1024)
+bdev = open_image(big)
+r = surface.image_copy(open_image(SRC), bdev, Progress(1))
+check(r["grown"] and "unallocated" in r["grown"], f"clone onto bigger disk: {r['grown']}")
+v = subprocess.run(["sgdisk", "-v", big], capture_output=True, text=True).stdout
+check("No problems found" in v, "bigger target passes sgdisk -v (backup GPT moved to the end)")
+ptb = partitions.read_partition_table(open_image(big))
+check([(x.start_lba, x.fs) for x in ptb.partitions] == [(2048, "FAT32"), (83968, "NTFS"), (247808, "ext4")]
+      and not ptb.notes, "partitions intact on the bigger disk")
+
 print(f"\n{sum(OK)}/{len(OK)} checks passed")
 sys.exit(0 if all(OK) else 1)

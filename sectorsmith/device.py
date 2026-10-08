@@ -321,6 +321,9 @@ class Device:
     _writable: bool = field(default=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _locker: object = field(default=None, repr=False)
+    # [(start_byte, length, reader_device)] — reads inside these ranges come from the reader
+    # (used for Volume Shadow Copy snapshots of mounted volumes while cloning a live disk)
+    _overlay: list = field(default_factory=list, repr=False)
 
     # --- lifecycle ------------------------------------------------------
     @property
@@ -388,6 +391,29 @@ class Device:
 
     def read(self, offset: int, length: int) -> bytes:
         """Read ``length`` bytes at ``offset`` (any alignment). Short at end of device."""
+        if self._overlay:
+            return self._read_overlay(offset, length)
+        return self._read_direct(offset, length)
+
+    def _read_overlay(self, offset: int, length: int) -> bytes:
+        end = min(offset + length, self.usable_size)
+        out = bytearray()
+        pos = offset
+        segs = sorted(self._overlay, key=lambda s: s[0])
+        while pos < end:
+            seg = next((s for s in segs if s[0] <= pos < s[0] + s[1]), None)
+            if seg is not None:
+                n = min(end, seg[0] + seg[1]) - pos
+                data = seg[2].read(pos - seg[0], n).ljust(n, b"\0")
+            else:
+                nxt = min([s[0] for s in segs if s[0] > pos] + [end])
+                n = nxt - pos
+                data = self._read_direct(pos, n)
+            out += data
+            pos += n
+        return bytes(out)
+
+    def _read_direct(self, offset: int, length: int) -> bytes:
         end = min(offset + length, self.usable_size)
         if offset >= end:
             return b""

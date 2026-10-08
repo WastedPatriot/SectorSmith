@@ -1003,8 +1003,9 @@ class CloneWizard(Screen, _PickMixin):
         b = OptionCard(body, "Raw image (.img)", "Exact sector-by-sector copy. Works with any recovery tool.",
                        "img", grp, icon="image", tone="violet")
         b.pack(fill="x", pady=5)
-        c = OptionCard(body, "Another drive", "Clone straight onto a second drive. Everything on it will be "
-                                              "replaced.", "disk", grp, icon="clone", tone="danger")
+        c = OptionCard(body, "Another drive", "Clone straight onto a second drive — e.g. a new SSD / NVMe in a USB "
+                                              "enclosure. Everything on it will be replaced.", "disk", grp,
+                       icon="clone", tone="danger")
         c.pack(fill="x", pady=5)
         dnet = OptionCard(body, "A disk on another PC", "Clone over the network to a linked machine (Connect a "
                                                        "machine first).", "net", grp, icon="link", tone="violet")
@@ -1056,21 +1057,37 @@ class CloneWizard(Screen, _PickMixin):
                 self.buttons(primary=("Back", self._dest))
                 return
             self.app.mascot.set_mood("warn", "confirm")
-            self.result_card(body, "clone", "danger", f"{src['dev'].name} → {dst.name}",
-                             [f"Copy {human_size(size)}", f"ALL data on {dst.describe()} will be replaced."])
+            lines = [f"Copy {human_size(size)}", f"ALL data on {dst.describe()} will be replaced."]
+            if self._live(src["dev"]):
+                lines.append("Windows is using this disk — a snapshot is taken first so the copy is consistent.")
+            if src["kind"] == "disk" and dst.usable_size > size:
+                lines.append(f"The new disk is {human_size(dst.usable_size - size)} bigger — that space will be "
+                             f"unallocated; extend C: in Disk Management afterwards.")
+            self.result_card(body, "clone", "danger", f"{src['dev'].name} → {dst.name}", lines)
             go = self.buttons(primary=("Start cloning", lambda: self._go(src, start, count)))
             go.configure(state="disabled", fg_color=P["danger"])
             self.confirm_box(body, f"CLONE TO {dst.name.upper()}",
                              lambda ok: go.configure(state="normal" if ok else "disabled"))
         else:
-            self.result_card(body, "image", "violet", os.path.basename(self.dest),
-                             [f"Copy {human_size(size)} from {self.target_name()}", f"Saving to {self.dest}",
-                              "Unreadable sectors are skipped and logged. A SHA-256 hash is recorded."])
+            lines = [f"Copy {human_size(size)} from {self.target_name()}", f"Saving to {self.dest}",
+                     "Unreadable sectors are skipped and logged. A SHA-256 hash is recorded."]
+            if self._live(src["dev"]):
+                lines.append("Windows is using this disk — a snapshot is taken first so the copy is consistent.")
+            self.result_card(body, "image", "violet", os.path.basename(self.dest), lines)
             self.buttons(primary=("Start backup", lambda: self._go(src, start, count)),
                          secondary=("Back", self._after_pick))
 
+    @staticmethod
+    def _live(dev):
+        try:
+            from ..vss import needs_snapshot
+            return needs_snapshot(dev)
+        except Exception:  # noqa: BLE001
+            return False
+
     def _go(self, src, start, count):
         sdev = self.app.clone(src["dev"])
+        snap = self._live(src["dev"])
         if self.kind == "disk":
             dst = self.app.clone(self.dest_target["dev"])
             fmt = "raw"
@@ -1085,10 +1102,15 @@ class CloneWizard(Screen, _PickMixin):
             ok = res["bad_sectors"] == 0
             self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "sick")
             lines = [f"{human_size(res['bytes'])} copied", f"Unreadable sectors: {res['bad_sectors']}"]
+            if res.get("snapshot"):
+                lines.append(f"Copied from a snapshot of {', '.join(res['snapshot'])}")
+            if res.get("grown"):
+                lines.append(res["grown"])
             if res.get("sha256"):
                 lines.append(f"SHA-256: {res['sha256']}")
             self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                              "Backup finished" if ok else "Finished — some sectors were unreadable", lines)
             self.done_actions(os.path.dirname(self.dest) if self.kind != "disk" else None)
         self.app.run_job("Copy", lambda prog: surface.image_copy(sdev, dst, prog, start_lba=start, sectors=count,
-                                                                 fmt=fmt), done, panel, on_cancel=self.app.home)
+                                                                 fmt=fmt, snapshot=snap), done, panel,
+                         on_cancel=self.app.home)

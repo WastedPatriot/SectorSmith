@@ -10,8 +10,9 @@ CHUNK = 4 * 1024 * 1024
 
 
 def clone(src, src_path: str, dst, dst_path: str, prog: Progress, start_lba: int = 0, sectors: int | None = None,
-          dst_lba: int = 0, verify: bool = True) -> dict:
-    s_info = src.disk_open(path=src_path, writable=False)
+          dst_lba: int = 0, verify: bool = True, snapshot: bool = True) -> dict:
+    prog.set_label("Preparing (snapshotting the source if it's in use)…")
+    s_info = src.disk_open(path=src_path, writable=False, snapshot=snapshot)
     try:
         d_info = dst.disk_open(path=dst_path, writable=True)
     except Exception:
@@ -48,10 +49,18 @@ def clone(src, src_path: str, dst, dst_path: str, prog: Progress, start_lba: int
             prog.update(done)
             if done % (64 * CHUNK) == 0:
                 prog.set_detail(f"sent {sent / max(1, done):.0%} of raw size · {bad} unreadable sector(s)")
+        grown = None
+        whole = start_lba == 0 and dst_lba == 0 and length == s_info["usable"] // ss * ss
+        if whole and d_info["usable"] > length:
+            try:
+                grown = dst.disk_fix_gpt(path=dst_path)
+            except Exception as e:  # noqa: BLE001
+                grown = f"Couldn't adjust the partition table to the larger disk: {e}"
     finally:
         src.disk_close(path=src_path)
         dst.disk_close(path=dst_path)
     res = {"bytes": length, "bad_sectors": bad, "verify_mismatches": mismatches, "sent_bytes": sent,
-           "empty_chunks_skipped": zeros, "seconds": round(time.time() - t0, 1)}
+           "empty_chunks_skipped": zeros, "seconds": round(time.time() - t0, 1), "grown": grown,
+           "snapshot": s_info.get("snapshot", [])}
     log.info("Network clone %s:%s -> %s:%s %s", src.label, src_path, dst.label, dst_path, res)
     return res

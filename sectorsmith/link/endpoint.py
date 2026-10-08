@@ -30,7 +30,7 @@ SKIP_FILES = ["*.tmp", "~$*", "thumbs.db", "ntuser.dat*", "usrclass.dat*", "*.lo
 # ops a remote controller may call on an agent
 OPS = {"info", "list_disks", "list_profiles", "scan_tree", "dir_size", "read_file", "read_files", "write_file",
        "write_files", "mkdirs", "free_space", "path_exists", "disk_open", "disk_read", "disk_write", "disk_close",
-       "ping", "list_dir"}
+       "ping", "list_dir", "disk_fix_gpt"}
 
 
 def _long(p: str) -> str:
@@ -59,6 +59,7 @@ class LocalEndpoint:
     def __init__(self, extra_images: list[str] | None = None, label: str | None = None):
         self._devs: dict[str, Device] = {}
         self._open: dict[str, Device] = {}
+        self._snaps: dict = {}
         self.extra_images = list(extra_images or [])
         self.label = label or "This PC"
         self.lock = threading.Lock()
@@ -103,6 +104,7 @@ class LocalEndpoint:
             out.append({"path": d.path, "name": d.name, "model": d.model, "size": d.size,
                         "usable": d.usable_size, "sector_size": d.sector_size, "bus": d.bus, "serial": d.serial,
                         "is_system": d.is_system, "is_image": d.is_image, "scheme": scheme, "partitions": parts,
+                        "removable": d.removable or d.bus in ("USB", "SD", "MMC"),
                         "error": err})
         return out
 
@@ -113,14 +115,28 @@ class LocalEndpoint:
             raise LinkError(f"Unknown disk {path}")
         return self._devs[path]
 
-    def disk_open(self, path, writable=False):
+    def disk_open(self, path, writable=False, snapshot=False):
         d = self._dev(path)
         dev = Device(**{f: getattr(d, f) for f in ("path", "name", "size", "sector_size", "model", "bus", "serial",
                                                    "is_image", "is_system", "removable", "disk_number",
                                                    "data_size")})
         dev.open(writable=writable)
         self._open[path] = dev
-        return {"usable": dev.usable_size, "sector_size": dev.sector_size}
+        info = {"usable": dev.usable_size, "sector_size": dev.sector_size, "snapshot": [], "notes": []}
+        if snapshot and not writable:
+            from ..vss import needs_snapshot, snapshot_disk
+            if needs_snapshot(dev):
+                snap = snapshot_disk(dev)
+                self._snaps[path] = snap
+                info["snapshot"], info["notes"] = snap.volumes, snap.notes
+        return info
+
+    def disk_fix_gpt(self, path):
+        dev = self._open.get(path)
+        if dev is None or not dev.writable:
+            raise LinkError("Disk is not open for writing")
+        from ..partitions import fix_gpt_after_grow
+        return fix_gpt_after_grow(dev)
 
     def disk_read(self, path, offset, size, zskip=True, compress=True, tolerant=True):
         dev = self._open.get(path) or self._dev(path)
@@ -161,6 +177,9 @@ class LocalEndpoint:
         return {"sha": hashlib.sha256(data).hexdigest()}
 
     def disk_close(self, path):
+        snap = self._snaps.pop(path, None)
+        if snap is not None:
+            snap.release()
         dev = self._open.pop(path, None)
         if dev is not None:
             dev.flush() if dev.writable else None

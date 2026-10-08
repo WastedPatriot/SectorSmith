@@ -1022,7 +1022,8 @@ class ExpertMixin:
     @staticmethod
     def clone_device(dev: Device) -> Device:
         """Independent handle to the same disk, so jobs and the UI never share one."""
-        return dataclasses.replace(dev, _io=None, _writable=False, _lock=threading.Lock(), _locker=None)
+        return dataclasses.replace(dev, _io=None, _writable=False, _lock=threading.Lock(), _locker=None,
+                                   _overlay=[])
 
     def status(self, msg: str, warn: bool = False):
         self.status_lbl.configure(text=msg, foreground="#b00020" if warn else "#555")

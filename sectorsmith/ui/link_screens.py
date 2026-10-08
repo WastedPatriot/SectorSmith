@@ -68,6 +68,8 @@ class EndpointDiskPicker(ctk.CTkScrollableFrame):
         if not disks:
             ctk.CTkLabel(self, text="No disks visible on this machine (is it running as administrator?)",
                          font=theme.font(13), text_color=P["muted"]).pack(pady=20)
+        if writes:
+            disks = sorted(disks, key=lambda d: not d.get("removable"))
         for d in disks:
             if d["path"] == exclude_path:
                 continue
@@ -83,6 +85,8 @@ class EndpointDiskPicker(ctk.CTkScrollableFrame):
                          text_color=P["text"]).pack(side="left")
             if d["is_system"]:
                 Pill(top, "WINDOWS RUNS HERE", "warn").pack(side="left", padx=6)
+            elif d.get("removable"):
+                Pill(top, "USB", "success").pack(side="left", padx=6)
             parts = ", ".join(f"{(p['mount'][0].rstrip(chr(92)) + ' ') if p['mount'] else ''}{p['fs'] or '?'}"
                               for p in d["partitions"][:5])
             sub = "Protected — boot this PC from the SectorSmith USB to clone onto it" if locked else \
@@ -525,9 +529,10 @@ class NetCloneWizard(Screen):
         self.src, self.src_disk = m, d
         body = self._disk_step(1, "Copy it onto…", f"From {m.label}: {d['name']} · {human_size(d['size'])}", True,
                                self._picked_dest, exclude=(m, d["path"]))
-        self.note(body, "Cloning onto a PC's own Windows disk? Boot that PC from the SectorSmith USB stick, then "
-                        "link it with 'PC booted from USB'. The disk will then be selectable here.", "violet").pack(
-            anchor="w", pady=(8, 0))
+        self.note(body, "Tip: a new SSD/NVMe in a USB enclosure plugged into either PC shows up here (marked USB) — "
+                        "clone onto it, then fit it in the new PC. To overwrite a PC's own Windows disk instead, "
+                        "boot that PC from the SectorSmith USB stick and link it with 'PC booted from USB'.",
+                  "violet").pack(anchor="w", pady=(8, 0))
 
     def _picked_dest(self, m, d):
         self.dst, self.dst_disk = m, d
@@ -539,10 +544,14 @@ class NetCloneWizard(Screen):
             self.buttons(primary=("Back", self._source))
             return
         self.app.mascot.set_mood("warn", "confirm")
-        self.result_card(body, "clone", "danger", f"{self.src.label} → {m.label}",
-                         [f"Copy {self.src_disk['name']} ({human_size(need)}) onto {d['name']} · {d['model']}",
-                          "Every sector is copied; empty areas are skipped on the wire and the copy is verified.",
-                          "If the destination PC has different hardware, Windows may need drivers on first boot."])
+        lines = [f"Copy {self.src_disk['name']} ({human_size(need)}) onto {d['name']} · {d['model']}",
+                 "Every sector is copied; empty areas are skipped on the wire and the copy is verified."]
+        if self.src_disk["is_system"] or any(p["mount"] for p in self.src_disk["partitions"]):
+            lines.append("The source is in use — a snapshot (VSS) is taken first so the copy is consistent.")
+        if d["usable"] > need:
+            lines.append(f"The destination is {human_size(d['usable'] - need)} bigger — extend C: afterwards.")
+        lines.append("If the destination PC has different hardware, Windows may need drivers on first boot.")
+        self.result_card(body, "clone", "danger", f"{self.src.label} → {m.label}", lines)
         phrase = f"CLONE TO {m.label.upper()}"
         go = self.buttons(primary=("Start cloning", self._go))
         go.configure(state="disabled", fg_color=P["danger"])
@@ -563,7 +572,9 @@ class NetCloneWizard(Screen):
                               f"({res['sent_bytes'] / max(1, res['bytes']):.0%} of the disk)",
                               f"Verified: {'every block matched' if not res['verify_mismatches'] else str(res['verify_mismatches']) + ' block(s) differ'}",
                               f"Unreadable source sectors: {res['bad_sectors']}",
-                              f"Took {human_time(res['seconds'])}"])
+                              f"Took {human_time(res['seconds'])}"]
+                             + ([f"Copied from a snapshot of {', '.join(res['snapshot'])}"] if res.get("snapshot")
+                                else []) + ([res["grown"]] if res.get("grown") else []))
             self.buttons(primary=("Back to home", self.app.home))
         self.app.run_job("Network clone", lambda prog: netclone.clone(src, sp, dst, dp, prog), done, panel,
                          on_cancel=self.app.home)

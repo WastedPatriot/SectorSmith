@@ -125,7 +125,7 @@ def vhd_footer(size: int) -> bytes:
 
 
 def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: int | None = None,
-               fmt: str = "raw", fill_bad: bytes = b"\x00", do_hash: bool = True) -> dict:
+               fmt: str = "raw", fill_bad: bytes = b"\x00", do_hash: bool = True, snapshot: bool = False) -> dict:
     """Copy sectors from ``src`` to ``dst`` (a file path for an image, or a Device for clone/restore).
 
     Two passes like ddrescue: pass 1 copies in 4 MiB chunks and skips any chunk that errors;
@@ -137,6 +137,11 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
     length = sectors * ss
     chunk = 4 * 1024 * 1024
     src.open(writable=False)
+    snap = None
+    if snapshot:  # consistent copy of a disk whose volumes are in use (e.g. the running Windows disk)
+        from .vss import snapshot_disk
+        prog.set_label("Taking a snapshot of the running disk…")
+        snap = snapshot_disk(src, progress=prog.set_detail)
 
     to_device = isinstance(dst, Device)
     if to_device:
@@ -194,8 +199,15 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
                         pass
                     bad.append(off // ss)
                 prog.update((i + 1) * chunk)
+        grown = None
         if to_device:
             dst.flush()
+            if start_lba == 0 and sectors == src.total_sectors and dst.total_sectors > sectors:
+                from .partitions import fix_gpt_after_grow
+                try:
+                    grown = fix_gpt_after_grow(dst)
+                except Exception as e:  # noqa: BLE001
+                    grown = f"Couldn't adjust the partition table to the larger disk: {e}"
         else:
             if fmt == "vhd":
                 fh.seek(length)
@@ -207,6 +219,8 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
             dst.close()
         else:
             fh.close()
+        if snap is not None:
+            snap.release()
         src.close()
 
     digest = None
@@ -230,7 +244,8 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
         else:
             digest = hasher.hexdigest()
 
-    res = {"bytes": length, "bad_sectors": len(bad), "bad_lbas": bad[:5000], "sha256": digest, "dest": out_path}
+    res = {"bytes": length, "bad_sectors": len(bad), "bad_lbas": bad[:5000], "sha256": digest, "dest": out_path,
+           "grown": grown, "snapshot": snap.volumes if snap else [], "snapshot_notes": snap.notes if snap else []}
     if not to_device:
         with open(str(out_path) + ".log.txt", "w", encoding="utf-8") as lf:
             lf.write(f"SectorSmith image log\nSource: {src.describe()}\nStart LBA: {start_lba}\n"

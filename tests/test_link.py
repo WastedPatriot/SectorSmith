@@ -150,6 +150,13 @@ with open(back, "wb") as f:
 local2 = LocalEndpoint(extra_images=[back])
 res = netclone.clone(remote, target_img, local2, back, Progress(1))
 check(sha(back) == sha(src_img), "remote → local clone identical")
+big_r = os.path.join(W, "remote_bigger.img")
+with open(big_r, "wb") as f:
+    f.truncate(400 * 1024 * 1024)
+lbig = LocalEndpoint(extra_images=[src_img, big_r])
+res = netclone.clone(lbig, src_img, lbig, big_r, Progress(1))
+v = subprocess.run(["sgdisk", "-v", big_r], capture_output=True, text=True).stdout
+check(res["grown"] and "No problems found" in v, "clone onto a bigger disk fixes the GPT")
 try:
     netclone.clone(local, src_img, remote, "/nonexistent", Progress(1))
     check(False, "bad target rejected")

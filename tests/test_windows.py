@@ -97,6 +97,35 @@ try:
     got = open(os.path.join(out, "hello.bin"), "rb").read()
     check(got == payload, "deleted file recovered byte-exact on real NTFS")
 
+    # Volume Shadow Copy: a snapshot must keep showing the volume as it was
+    from sectorsmith.vss import needs_snapshot, snapshot_disk
+    check(needs_snapshot(dev), "mounted test volume needs a snapshot")
+    dev.open()
+    snap = snapshot_disk(dev)
+    check(snap.volumes, f"snapshot taken ({snap.volumes} {snap.notes})")
+    p_off, p_len = data_part.start_lba * dev.sector_size, data_part.sectors * dev.sector_size
+
+    def part_hash(direct=False):
+        h = hashlib.sha256()
+        pos = 0
+        while pos < p_len:
+            n = min(8 * 1024 * 1024, p_len - pos)
+            h.update(dev._read_direct(p_off + pos, n) if direct else dev.read(p_off + pos, n))
+            pos += n
+        return h.hexdigest()
+    before = part_hash()
+    with open(root + "after_snapshot.bin", "wb") as f:
+        f.write(os.urandom(2_000_000))
+    lk = VolumeLocker(dev.disk_number)
+    lk.lock()
+    lk.release()
+    time.sleep(1)
+    check(part_hash() == before, "snapshot reads unaffected by later writes")
+    check(part_hash(direct=True) != before, "live volume did change (so the snapshot really was used)")
+    snap.release()
+    dev.close()
+    os.remove(root + "after_snapshot.bin")
+
     # surface scan + imaging
     r = surface.surface_scan(dev, Progress(1))
     check(r["bad_sectors"] == 0, f"surface scan clean ({r['blocks']} blocks)")

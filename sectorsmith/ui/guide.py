@@ -124,6 +124,26 @@ GUIDES = {
         "tips": ["Imaging a failing drive first, then recovering from the image, is the safest approach.",
                  "Open any image later by dropping it onto the window."],
     },
+    "upgrade": {
+        "title": "Upgrade to a new SSD / NVMe", "icon": "clone", "tone": "success", "task": "CloneWizard",
+        "intro": "Move a whole PC onto a new, bigger drive using a USB enclosure or adapter — no reinstall.",
+        "steps": [
+            ("Plug in the new drive", "Put the new SSD/NVMe in a USB enclosure and plug it into the PC (or into a "
+                                      "linked PC). It shows up marked USB."),
+            ("Back up / clone → Another drive", "Pick the disk Windows runs from as the source and the USB drive "
+                                                 "as the destination. Over the network? Use Clone a disk to another "
+                                                 "PC instead."),
+            ("Let it snapshot and copy", "Windows keeps running: SectorSmith takes a Volume Shadow Copy snapshot "
+                                         "first so every file is copied as it was at that moment."),
+            ("Swap the drives", "Fit the new drive inside the PC and boot from it."),
+            ("Use the extra space", "A bigger drive's extra space appears as unallocated. In Disk Management "
+                                    "extend C: (if a Recovery partition sits in the way, extend into the space "
+                                    "after it or move it with Advanced tools)."),
+        ],
+        "tips": ["The partition table is fitted to the bigger disk automatically.",
+                 "The new drive must be at least as big as the old one (sector-for-sector copy).",
+                 "BitLocker? Suspend protection before swapping drives, then resume after the first boot."],
+    },
     "connect": {
         "title": "Connect a machine", "icon": "link", "tone": "accent", "task": "ConnectScreen",
         "intro": "Link another PC on the same network so you can work on both from one window — perfect when "
@@ -197,7 +217,8 @@ GUIDES = {
         "tips": ["Launch straight into this view with SectorSmith.exe --classic."],
     },
 }
-ORDER = ["start", "recover", "partition", "wipe", "shred", "health", "clone", "connect", "migrate", "netclone",
+ORDER = ["start", "recover", "partition", "wipe", "shred", "health", "clone", "upgrade", "connect", "migrate",
+         "netclone",
          "advanced"]
 
 
