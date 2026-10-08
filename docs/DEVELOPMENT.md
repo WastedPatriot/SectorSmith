@@ -1,0 +1,29 @@
+# SectorSmith developer notes
+
+Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Proprietary from 1.4.0, see LICENSE.
+
+## Layout
+- `sectorsmith/` engine: device.py (raw I/O), partitions.py (MBR/GPT, fix_gpt_after_grow), wipe.py, surface.py
+  (scan and imaging, smart/used-space copy), usedmap.py (NTFS/FAT/exFAT/ext used-space maps), ntfs.py, carver.py,
+  vss.py (Windows shadow copies), report.py
+- `sectorsmith/link/` SectorSmith Link: TLS with a pinned cert and token, PowerShell one-liner connector, listen mode
+  (USB/WinPE). endpoint.py holds the ops a linked PC exposes. migrate.py moves a user to a new PC.
+  netclone.py clones one disk to one or many disks across PCs.
+- `sectorsmith/deploy/` SectorSmith Deploy (desired-state software deployment):
+  analyze.py (MSI/EXE to silent switches and detection), core.py (Store, Package/Task/Client/Deployment,
+  detect, execute, re-check sessions, export of Install/Uninstall/Detect.ps1)
+- `sectorsmith/ui/` UI (main.py, screens.py, link_screens.py, deploy_screens.py, guide.py, mascot.py for Mossbit)
+- `tools/` make_sprites.py, make_docs.py (README screenshots and GIFs), make_usb.ps1 (WinPE stick)
+- `tests/` test_core.py, test_link.py and test_deploy.py (run `python tests/build_test_disk.py <dir>` first),
+  test_windows.py (CI only), ui_smoke.py, ui_link_smoke.py and ui_deploy_smoke.py (need a display, use xvfb on Linux)
+
+## Rules
+- Lint with `ruff`, `bandit -r sectorsmith` and `pyflakes`. Keep tests green before committing.
+- Destructive operations always need a typed confirmation in the UI.
+
+## Next up
+1. Cancel must stop every long job promptly and report the state it left things in.
+2. User migration: to a local drive or NVMe, from an old disk attached by USB, and bringing apps across via Deploy.
+3. SSD/NVMe hardware sanitize and the branded wipe certificate.
+4. UI refresh: job-grouped navigation, client and ticket bar, Jobs history, indigo accent, Mossbit personality setting.
+5. README and screenshots for 1.4.0, version bump, tagged release.
