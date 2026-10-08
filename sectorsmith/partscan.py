@@ -179,63 +179,65 @@ def scan_partitions(dev: Device, prog: Progress, start_lba: int = 0, end_lba: in
                         return st + blocks * bs // ss
         return None
 
-    span = end_lba - start_lba
-    prog.reset(span * ss, f"Partition search ({mode})")
-    if mode == "full":
-        chunk_sectors = (4 * 1024 * 1024) // ss
-        lba = start_lba
-        while lba < end_lba:
-            prog.check()
-            n = min(chunk_sectors, end_lba - lba)
-            try:
-                buf = dev.read_sectors(lba, n + 2)  # +2 so an ext superblock straddling the end is visible
-            except OSError:
-                lba += n
-                continue
-            jump = None
-            # fast pre-filter with C-speed find(): only sectors ending in 55AA or carrying an
-            # ext magic at +56 are worth parsing
-            hits = set()
-            for pat, rel in ((b"\x55\xaa", 510), (b"\x53\xef", 56)):
-                k = buf.find(pat)
-                while k != -1:
-                    if (k - rel) % ss == 0 and 0 <= (k - rel) // ss < n:
-                        hits.add((k - rel) // ss)
-                    k = buf.find(pat, k + 1)
-            for i in sorted(hits):
-                if jump and lba + i < jump:
-                    continue
-                j = check_at(lba + i, buf, i * ss)
-                if j and skip_found and j > lba + i:
-                    jump = j
-            lba = jump if (jump and jump > lba + n) else lba + n
-            prog.update((min(lba, end_lba) - start_lba) * ss)
-    else:
-        cands = set()
-        step = max(1, 2048 * 512 // ss)
-        cands.update(range(start_lba - start_lba % step, end_lba, step))
-        cands.update(range(start_lba - start_lba % 63, min(end_lba, 63 * 255 * 1024), 63))
-        lba_list = sorted(c for c in cands if start_lba <= c < end_lba)
-        nread = max(1, 2048 // ss)  # boot sector + where an ext superblock would sit (+1024 bytes)
-        skip_until = -1
-        for i, lba in enumerate(lba_list):
-            if lba < skip_until:
-                continue
-            if i % 256 == 0:
+    try:
+        span = end_lba - start_lba
+        prog.reset(span * ss, f"Partition search ({mode})")
+        if mode == "full":
+            chunk_sectors = (4 * 1024 * 1024) // ss
+            lba = start_lba
+            while lba < end_lba:
                 prog.check()
-                prog.update((lba - start_lba) * ss)
-            try:
-                buf = dev.read_sectors(lba, nread)
-            except OSError:
-                continue
-            j = None
-            if buf[510:512] == b"\x55\xaa":
-                j = check_at(lba, buf, 0)
-            if not j and ss <= 1024 and buf[1024 + 56:1024 + 58] == b"\x53\xef":
-                j = check_at(lba + 1024 // ss, buf, 1024)
-            if j and skip_found:
-                skip_until = j
-        prog.update(span * ss)
-    dev.close()
+                n = min(chunk_sectors, end_lba - lba)
+                try:
+                    buf = dev.read_sectors(lba, n + 2)  # +2 so an ext superblock straddling the end is visible
+                except OSError:
+                    lba += n
+                    continue
+                jump = None
+                # fast pre-filter with C-speed find(): only sectors ending in 55AA or carrying an
+                # ext magic at +56 are worth parsing
+                hits = set()
+                for pat, rel in ((b"\x55\xaa", 510), (b"\x53\xef", 56)):
+                    k = buf.find(pat)
+                    while k != -1:
+                        if (k - rel) % ss == 0 and 0 <= (k - rel) // ss < n:
+                            hits.add((k - rel) // ss)
+                        k = buf.find(pat, k + 1)
+                for i in sorted(hits):
+                    if jump and lba + i < jump:
+                        continue
+                    j = check_at(lba + i, buf, i * ss)
+                    if j and skip_found and j > lba + i:
+                        jump = j
+                lba = jump if (jump and jump > lba + n) else lba + n
+                prog.update((min(lba, end_lba) - start_lba) * ss)
+        else:
+            cands = set()
+            step = max(1, 2048 * 512 // ss)
+            cands.update(range(start_lba - start_lba % step, end_lba, step))
+            cands.update(range(start_lba - start_lba % 63, min(end_lba, 63 * 255 * 1024), 63))
+            lba_list = sorted(c for c in cands if start_lba <= c < end_lba)
+            nread = max(1, 2048 // ss)  # boot sector + where an ext superblock would sit (+1024 bytes)
+            skip_until = -1
+            for i, lba in enumerate(lba_list):
+                if lba < skip_until:
+                    continue
+                if i % 256 == 0:
+                    prog.check()
+                    prog.update((lba - start_lba) * ss)
+                try:
+                    buf = dev.read_sectors(lba, nread)
+                except OSError:
+                    continue
+                j = None
+                if buf[510:512] == b"\x55\xaa":
+                    j = check_at(lba, buf, 0)
+                if not j and ss <= 1024 and buf[1024 + 56:1024 + 58] == b"\x53\xef":
+                    j = check_at(lba + 1024 // ss, buf, 1024)
+                if j and skip_found:
+                    skip_until = j
+            prog.update(span * ss)
+    finally:
+        dev.close()
     found.sort(key=lambda f: f.start_lba)
     return found

@@ -7,7 +7,7 @@ import struct
 from dataclasses import dataclass, field
 
 from .device import Device
-from .util import Progress, get_logger
+from .util import Cancelled, Progress, get_logger
 
 log = get_logger()
 
@@ -35,6 +35,7 @@ class MFTEntry:
     path: str = ""
     has_data: bool = False
     init_size: int | None = None  # valid data length; NTFS reads anything past it as zeros
+    attrs: int = 0  # file attributes from $STANDARD_INFORMATION (0x400 = reparse point, e.g. a junction)
 
     @property
     def recoverability(self) -> str:
@@ -143,6 +144,7 @@ class NTFSVolume:
         dflags = 0
         has_data = False
         init_size = None
+        attrs = 0
         off = attr_off
         while off + 16 <= len(rec):
             atype, alen = struct.unpack_from("<II", rec, off)
@@ -154,6 +156,8 @@ class NTFSVolume:
             if atype == 0x10 and not nonres:  # $STANDARD_INFORMATION
                 voff = struct.unpack_from("<H", rec, off + 20)[0]
                 mtime = _filetime(struct.unpack_from("<Q", rec, off + voff + 8)[0])
+                if off + voff + 36 <= len(rec):
+                    attrs = struct.unpack_from("<I", rec, off + voff + 32)[0]
             elif atype == 0x30 and not nonres:  # $FILE_NAME
                 voff = struct.unpack_from("<H", rec, off + 20)[0]
                 v = off + voff
@@ -181,7 +185,28 @@ class NTFSVolume:
         names.sort(key=lambda t: (t[0] == 2, t[0]))
         _ns, nm, parent, pseq = names[0]
         return MFTEntry(recno, seq, nm, parent, pseq, is_dir, not in_use, size, mtime, runs, resident, dflags,
-                        has_data=has_data, init_size=init_size)
+                        has_data=has_data, init_size=init_size, attrs=attrs)
+
+    @staticmethod
+    def _ext_data(rec: bytes):
+        """For an extension record (big or very fragmented files keep $DATA pieces there, listed in the base
+        record's $ATTRIBUTE_LIST): (base_recno, [(start_vcn, runs, size, init_size)]), else None."""
+        base_ref = struct.unpack_from("<Q", rec, 32)[0] & 0xFFFFFFFFFFFF
+        if not base_ref or not struct.unpack_from("<H", rec, 22)[0] & 1:
+            return None
+        off = struct.unpack_from("<H", rec, 20)[0]
+        pieces = []
+        while off + 16 <= len(rec):
+            atype, alen = struct.unpack_from("<II", rec, off)
+            if atype == 0xFFFFFFFF or alen == 0 or off + alen > len(rec):
+                break
+            if atype == 0x80 and rec[off + 9] == 0 and rec[off + 8]:
+                start_vcn = struct.unpack_from("<Q", rec, off + 16)[0]
+                ro = struct.unpack_from("<H", rec, off + 32)[0]
+                size, init = struct.unpack_from("<QQ", rec, off + 48) if start_vcn == 0 else (None, None)
+                pieces.append((start_vcn, decode_runlist(rec[off: off + alen], ro), size, init))
+            off += alen
+        return (base_ref, pieces) if pieces else None
 
     # ------------------------------------------------------------------
     def _mft_byte_ranges(self):
@@ -205,6 +230,7 @@ class NTFSVolume:
     def scan(self, prog: Progress, deleted_only: bool = False) -> list[MFTEntry]:
         prog.reset(self.n_records * self.rec_size, "Reading NTFS master file table")
         entries: dict[int, MFTEntry] = {}
+        ext: dict[int, list] = {}
         done = 0
         read_chunk = 4 * 1024 * 1024
         for rec_start, dev_off, nbytes in self._mft_byte_ranges():
@@ -223,13 +249,30 @@ class NTFSVolume:
                         continue
                     try:
                         e = self._parse(recno, rec)
+                        x = None if e else self._ext_data(rec)
                     except (struct.error, IndexError):
                         continue
                     if e:
                         entries[recno] = e
+                    elif x:
+                        ext.setdefault(x[0], []).extend(x[1])
                 pos += n
                 done += n
                 prog.update(done)
+        for recno, pieces in ext.items():
+            e = entries.get(recno)
+            if e is None or e.is_dir or e.deleted:
+                continue
+            pieces.sort(key=lambda p: p[0])
+            if not e.has_data:
+                e.has_data = True
+                e.runs = []
+            elif pieces[0][0] == 0:
+                continue  # the base record already holds the start; don't guess how the pieces interleave
+            for _vcn, runs, size, init in pieces:
+                e.runs += runs
+                if size is not None:
+                    e.size, e.init_size = size, init
         self.entries = entries
         self._build_paths()
         res = [e for e in entries.values() if e.recno >= 16 or e.recno == ROOT_RECORD]
@@ -320,7 +363,11 @@ def recover_entries(vol: NTFSVolume, entries: list[MFTEntry], out_dir: str, prog
     ok, failed = 0, []
     used = set()
     for e in files:
-        prog.check()
+        try:
+            prog.check()
+        except Cancelled as c:
+            c.info.update(recovered=ok, total=len(files), out_dir=out_dir)
+            raise
         prog.set_detail(e.name)
         rel = safe_rel_path((e.path + "\\" + e.name) if keep_paths else e.name)
         if not rel:
@@ -335,6 +382,13 @@ def recover_entries(vol: NTFSVolume, entries: list[MFTEntry], out_dir: str, prog
         try:
             vol.recover(e, target, prog)
             ok += 1
+        except Cancelled as c:
+            try:
+                os.remove(target)  # half a file is worse than none: it looks recovered but isn't
+            except OSError:
+                pass  # nothing was written yet
+            c.info.update(recovered=ok, total=len(files), out_dir=out_dir)
+            raise
         except Exception as ex:  # noqa: BLE001
             failed.append(f"{e.name}: {ex}")
         done += e.size

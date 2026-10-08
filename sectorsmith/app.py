@@ -13,8 +13,8 @@ from tkinter import filedialog, messagebox, ttk
 from . import carver, ntfs, partitions, partscan, surface, wipe
 from .device import Device, list_disks, mounted_partitions_linux, open_image, volume_letters_for
 from .hexview import HexView
-from .util import APP_NAME, APP_VERSION, Cancelled, Progress, app_dir, get_logger, human_size, human_time, \
-    is_admin
+from .util import APP_NAME, APP_VERSION, Cancelled, Progress, app_dir, cancel_scope, get_logger, human_size, \
+    human_time, is_admin
 
 log = get_logger()
 
@@ -1068,7 +1068,8 @@ class ExpertMixin:
 
         def worker():
             try:
-                res = func(prog)
+                with cancel_scope(prog.check):
+                    res = func(prog)
                 self.q.put(("done", on_done, res))
             except Cancelled:
                 self.q.put(("cancelled", title))

@@ -10,13 +10,13 @@ import threading
 import time
 import tkinter as tk
 import traceback
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 from .. import partitions
 from ..device import list_disks, open_image, volume_letters_for
-from ..util import APP_NAME, Cancelled, Progress, get_logger
+from ..util import APP_NAME, Cancelled, Progress, cancel_scope, get_logger
 from . import nav, theme
 from .mascot import MascotHub
 from .shell import ContextBar, Rail, SubNav, technician
@@ -94,6 +94,9 @@ class MainWindow(*_Base):
         self.job_record = None
         self.jobs: list[dict] = []          # this session's jobs, newest last
         self.recent: list[str] = []         # palette entries opened, newest last
+        self._job_screen = None
+        self._job_title = ""
+        self._quitting = None
         self.screen = None
         self._route = (None, {})
         self.drop_handlers = []
@@ -358,11 +361,26 @@ class MainWindow(*_Base):
         threading.Thread(target=work, daemon=True).start()
 
     def _quit(self):
+        if self.job is not None and self._quitting is None:
+            if not messagebox.askyesno("Stop and quit?", "A task is still running. Stop it safely and quit?"):
+                return
+            self._quitting = time.monotonic()
+            self.cancel_job()
+            self._quit_when_stopped()
+            return
         try:
             if self.link:
                 self.link.stop()
         finally:
             self.destroy()
+
+    def _quit_when_stopped(self):
+        # give the job a moment to close disks and remove snapshots before the process ends
+        if self.job is None or time.monotonic() - self._quitting > 30:
+            self.job = None
+            self._quit()
+        else:
+            self.after(200, self._quit_when_stopped)
 
     def _set_icon(self):
         from .mascot import ASSETS
@@ -514,22 +532,36 @@ class MainWindow(*_Base):
                                client=self.context.get("client") or "", ticket=self.context.get("ticket") or "",
                                technician=technician(), machine="This PC", detail=detail, result="Running")
         self.jobs.append(self.job_record)
+        self._job_screen = self.screen
+        self._job_title = title
         self.mascot.set_mood("working", "working")
         log.info("UI job start: %s", title)
 
         def worker():
             try:
-                self.q.put(("done", func(prog)))
-            except Cancelled:
-                self.q.put(("cancelled", None))
+                # everything this thread calls (disk I/O, Link calls, installers, VSS) checks Cancel
+                with cancel_scope(prog.check):
+                    r = func(prog)
+                self.q.put(("done", r))
+            except Cancelled as c:
+                log.info("UI job %s cancelled: %s", title, {k: v for k, v in c.info.items() if k != "failed"})
+                self.q.put(("cancelled", dict(c.info, progress=prog.snapshot())))
             except Exception as e:  # noqa: BLE001
                 log.error("UI job %s failed: %s", title, traceback.format_exc())
                 self.q.put(("error", e))
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name=f"job-{title}").start()
 
     def cancel_job(self):
-        if self.job:
+        """Ask the running job to stop. It stops at its next safe point; the panel shows Cancelling... until then."""
+        if self.job and not self.job.cancelled:
+            log.info("UI job %s: cancel requested", self._job_title)
             self.job.cancel()
+            try:
+                if self.job_panel is not None:
+                    self.job_panel.set_cancelling()
+            except tk.TclError:
+                pass  # panel already gone; the cancel still goes through
+            self.mascot.say(text="Stopping safely, one moment...")
 
     def _finish_record(self, result):
         if self.job_record is not None:
@@ -547,29 +579,11 @@ class MainWindow(*_Base):
                     except Exception:  # noqa: BLE001
                         log.error("UI callback failed: %s", traceback.format_exc())
                     continue
-                on_done, on_error, on_cancel = self._job_cbs
-                self.job = None
-                self.mascot.progress = 0
-                self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"))
-                self.bar.update_jobs(None)
-                if kind == "done":
-                    try:
-                        on_done(rest[0])
-                    except Exception as e:  # noqa: BLE001
-                        log.error("on_done failed: %s", traceback.format_exc())
-                        self.mascot.set_mood("sad", "error")
-                        self.toast(f"Error: {e}", "danger")
-                elif kind == "cancelled":
-                    self.mascot.set_mood("sad", "cancel")
-                    (on_cancel or (lambda: None))()
-                else:
-                    self.mascot.set_mood("sad", "error")
-                    if on_error:
-                        on_error(rest[0])
-                    else:
-                        self.toast(f"{type(rest[0]).__name__}: {rest[0]}", "danger")
+                self._job_finished(kind, rest[0])
         except queue.Empty:
             pass
+        finally:
+            self.after(120, self._poll)  # always, or the UI stops hearing from jobs and background tasks
         if self.job is not None and self.job_panel is not None:
             s = self.job.snapshot()
             try:
@@ -579,7 +593,43 @@ class MainWindow(*_Base):
             self.mascot.progress = s["pct"] / 100
         if self.job is not None:
             self.bar.update_jobs(self.job)
-        self.after(120, self._poll)
+        self.protocol("WM_DELETE_WINDOW", self._quit)
+
+    def _job_finished(self, kind, value):
+        on_done, on_error, on_cancel = self._job_cbs
+        title = self._job_title
+        self.job = None
+        self.job_panel = None
+        self.mascot.progress = 0
+        self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"))
+        self.bar.update_jobs(None)
+        scr = self._job_screen
+        # the screen that started the job may be gone (Home, guide, Connect): don't draw on a dead widget
+        here = scr is not None and scr is self.screen and scr.winfo_exists()
+        try:
+            if kind == "done":
+                if here:
+                    on_done(value)
+                else:
+                    self.toast(f"{title} finished")
+            elif kind == "cancelled":
+                self.mascot.set_mood("sad", "cancel")
+                if not here:
+                    self.toast(f"{title} stopped", "warn")
+                elif on_cancel:
+                    on_cancel(value)
+                else:
+                    scr.cancelled_state(f"{title} stopped", ["It stopped before finishing."])
+            else:
+                self.mascot.set_mood("sad", "error")
+                if here and on_error:
+                    on_error(value)
+                else:
+                    self.toast(f"{type(value).__name__}: {value}", "danger")
+        except Exception as e:  # noqa: BLE001  (a broken result screen must not stop the UI loop)
+            log.error("Job %s %s handler failed: %s", title, kind, traceback.format_exc())
+            self.mascot.set_mood("sad", "error")
+            self.toast(f"Error: {e}", "danger")
 
     # ------------------------------------------------------------------ drag & drop
     def _drop_enter(self, e):

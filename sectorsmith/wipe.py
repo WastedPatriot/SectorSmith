@@ -149,12 +149,24 @@ def wipe_range(dev: Device, start: int, length: int, method: Method, prog: Progr
         return bad
 
     mismatches = 0
-    for pi in range(npass):
-        prog.set_label(f"{method.name} — pass {pi + 1}/{npass}", _pass_desc(method.passes[pi]))
-        write_pass(pi)
-        if verify == "all" or (verify == "last" and pi == npass - 1):
-            prog.set_label(f"{method.name} — verifying pass {pi + 1}/{npass}")
-            mismatches += verify_pass(pi)
+    pi = 0
+    try:
+        for pi in range(npass):
+            prog.set_label(f"{method.name} — pass {pi + 1}/{npass}", _pass_desc(method.passes[pi]))
+            write_pass(pi)
+            if verify == "all" or (verify == "last" and pi == npass - 1):
+                prog.set_label(f"{method.name} — verifying pass {pi + 1}/{npass}")
+                mismatches += verify_pass(pi)
+    except Cancelled as c:
+        try:
+            dev.flush()
+        except OSError:
+            pass  # best effort; the stopped report already says part-erased
+        # every pass starts at the beginning, so after pass 1 the whole range has been overwritten once
+        c.info.update(pass_no=pi + 1, passes=npass, overwritten=min(length, done_work) if pi == 0 else length,
+                      length=length, verified=False)
+        log.info("Wipe cancelled on %s in pass %d/%d", dev.path, pi + 1, npass)
+        raise
     result = {"bytes": length, "passes": npass, "write_errors": len(errors), "bad_lbas": errors[:1000],
               "verify_mismatched_blocks": mismatches, "verified": verify != "none"}
     log.info("Wipe finished on %s [%d +%d]: %s", dev.path, start, length, result)
@@ -269,16 +281,21 @@ def shred_paths(paths: list[str], method: Method, prog: Progress) -> dict:
     prog.reset(total, f"Shredding {len(files)} file(s)")
     done = 0
     failed = []
+    shredded = 0
     for f in files:
-        prog.check()
-        prog.set_detail(f)
         try:
+            prog.check()
+            prog.set_detail(f)
             sz = os.path.getsize(f)
             shred_file(f, method, prog)
+            shredded += 1
             done += sz * len(method.passes)
             prog.update(done)
         except OSError as e:
             failed.append(f"{f}: {e}")
+        except Cancelled as c:
+            c.info.update(shredded=shredded, total=len(files), current=f)
+            raise
     for p in paths:  # remove now-empty folders, deepest first
         if os.path.isdir(p):
             for root, dirs, _ in sorted(os.walk(p), key=lambda t: -len(t[0])):

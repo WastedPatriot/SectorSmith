@@ -1,6 +1,7 @@
 """Shared helpers: progress reporting, cancellation, formatting, logging."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -13,7 +14,37 @@ APP_VERSION = "1.3.0"
 
 
 class Cancelled(Exception):
-    """Raised inside an engine when the user presses Cancel."""
+    """Raised inside an engine when the user presses Cancel. ``info`` says what was done before it stopped."""
+
+    def __init__(self, msg: str = "Cancelled", **info):
+        super().__init__(msg)
+        self.info = info
+
+
+_scope = threading.local()
+
+
+@contextlib.contextmanager
+def cancel_scope(check):
+    """Long calls made by this thread inside the block (endpoint ops, subprocesses, VSS, used-space maps, Link
+    calls to another PC) call ``check()`` while they wait, so Cancel stops them too. ``check`` raises Cancelled."""
+    prev = getattr(_scope, "check", None)
+    _scope.check = check
+    try:
+        yield
+    finally:
+        _scope.check = prev
+
+
+def current_check():
+    return getattr(_scope, "check", None)
+
+
+def check_cancel():
+    """Raise Cancelled if the job this thread works for was cancelled (no-op outside a cancel_scope)."""
+    c = getattr(_scope, "check", None)
+    if c is not None:
+        c()
 
 
 def app_dir() -> Path:

@@ -14,7 +14,7 @@ from __future__ import annotations
 import subprocess
 
 from .device import Device
-from .util import get_logger, is_windows
+from .util import check_cancel, get_logger, is_windows
 
 log = get_logger()
 
@@ -78,24 +78,31 @@ def snapshot_disk(dev: Device, progress=None) -> Snapshot:
         return snap
     from .device import windows_volume_map
     overlay = []
-    for v in windows_volume_map():
-        if v["disk"] != dev.disk_number:
-            continue
-        name = (v["letters"] or [v["guid"]])[0]
-        if progress:
-            progress(f"Taking a snapshot of {name}…")
-        try:
-            sid, devobj = create_shadow(v["guid"])
-        except Exception as e:  # noqa: BLE001  (FAT/EFI volumes can't be snapshotted — read directly)
-            snap.notes.append(f"{name}: no snapshot ({str(e)[:80]}) — read live")
-            continue
-        snap.shadows.append(sid)
-        reader = Device(path=devobj, name=f"snapshot {name}", size=v["length"], sector_size=dev.sector_size)
-        reader.open(writable=False)
-        snap.readers.append(reader)
-        overlay.append((v["offset"], v["length"], reader))
-        snap.volumes.append(name)
-        log.info("Snapshot of %s on %s: %s", name, dev.name, devobj)
+    try:
+        for v in windows_volume_map():
+            if v["disk"] != dev.disk_number:
+                continue
+            check_cancel()
+            name = (v["letters"] or [v["guid"]])[0]
+            if progress:
+                progress(f"Taking a snapshot of {name}…")
+            try:
+                # not interrupted half-way: VSS would still finish it and leave a shadow copy nobody deletes
+                sid, devobj = create_shadow(v["guid"])
+            except Exception as e:  # noqa: BLE001  (FAT/EFI volumes can't be snapshotted — read directly)
+                snap.notes.append(f"{name}: no snapshot ({str(e)[:80]}) — read live")
+                continue
+            snap.shadows.append(sid)
+            check_cancel()
+            reader = Device(path=devobj, name=f"snapshot {name}", size=v["length"], sector_size=dev.sector_size)
+            reader.open(writable=False)
+            snap.readers.append(reader)
+            overlay.append((v["offset"], v["length"], reader))
+            snap.volumes.append(name)
+            log.info("Snapshot of %s on %s: %s", name, dev.name, devobj)
+    except BaseException:
+        snap.release()  # Cancel (or a failure) mustn't leave shadow copies behind
+        raise
     dev._overlay = overlay
     return snap
 
