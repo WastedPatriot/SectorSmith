@@ -365,9 +365,12 @@ for want in ("Example IT Services Ltd", "data:image/png;base64,", "Northwind Den
 check(f"Started</th><td>{report._stamp(1760000000.0)}" in html_doc and "Duration</th><td>00:02:05" in html_doc,
       "certificate shows start, end and duration")
 check(html_doc.count("<svg") == 1 and "mossbit" not in html_doc.lower(), "one QR, no mascot")
-from sectorsmith.ui import theme  # noqa: E402
-app_colours = {v.lower() for v in theme.PALETTE.values() if isinstance(v, str) and v.startswith("#") and
-               v.lower() not in ("#fff", "#ffffff", "#000", "#000000", "#111111", "#111")}
+# read the theme's colours from its source: importing it needs customtkinter, which the engine CI job lacks
+with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sectorsmith", "ui",
+                       "theme.py"), encoding="utf-8") as fh:
+    theme_src = fh.read()
+app_colours = {v.lower() for v in re.findall(r"#[0-9a-fA-F]{6}\b", theme_src)
+               if v.lower() not in ("#ffffff", "#000000", "#111111")}
 used = {c.lower() for c in re.findall(r"#[0-9a-fA-F]{3,6}\b", html_doc)}
 check(not (used & app_colours), f"no app colours on the certificate ({sorted(used & app_colours)})")
 svg = re.search(r"<svg.*?</svg>", html_doc, re.S).group(0)

@@ -179,7 +179,7 @@ class SettingsScreen(Screen):
                     shutil.copyfile(logo, keep)
                     logo = str(keep)
                 except OSError:
-                    pass
+                    pass  # couldn't copy it: keep using the original file
         self.logo = logo
         save_settings(brand_company=self.company.get().strip(), brand_logo=logo)
         self._show_logo()
