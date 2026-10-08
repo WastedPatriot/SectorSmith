@@ -545,6 +545,87 @@ check(by["Remote flag"]["status"] == "compliant" and os.path.exists(rflag), "tas
 check(rs["machine"] == remote.label and rs["summary"]["failed"] == 0, f"linked session summary {rs['summary']}")
 check(not os.listdir(remote.deploy_dir()), "installers removed from the linked PC afterwards")
 check("Big Suite" not in inventory(), "this PC's own software list untouched by the remote session")
+
+# --- 6. Cancel a maintenance run on a linked PC while an installer hangs --------------------------
+import threading  # noqa: E402
+from sectorsmith.util import Cancelled, cancel_scope  # noqa: E402
+
+cstore = Store(os.path.join(W, "lib4"))
+slow = cstore.upsert("packages", Package(name="Slow App", version="1.0", kind="script", language="shell",
+                                         install=f'sleep 60; "{PY}" "{FAKEINST}" add "Slow App" 1.0',
+                                         detection={"method": "registry", "value": "Slow App"}))
+deploy(cstore, slow)
+deploy(cstore, installer_pkg(cstore, "Never Run", "1.0"))
+prog = Progress(1)
+out = {}
+
+
+def _session():
+    try:
+        with cancel_scope(prog.check):
+            out["r"] = core.run_session(remote, cstore, prog, mode="full")
+    except Exception as e:  # noqa: BLE001
+        out["r"] = e
+    out["t"] = time.time()
+
+
+th = threading.Thread(target=_session, daemon=True)
+th.start()
+time.sleep(2)
+pressed = time.time()
+prog.cancel()
+th.join(30)
+r = out.get("r")
+dt = out.get("t", 999) - pressed
+check(isinstance(r, Cancelled) and dt < 3, f"Cancel stops a hanging installer on the linked PC in {dt:.2f}s")
+sess = getattr(r, "info", {}).get("session") or {}
+st = {a["name"]: a for a in sess.get("actions", [])}
+check(st.get("Slow App", {}).get("status") == "cancelled" and "part-way" in st["Slow App"]["result"]
+      and st.get("Never Run", {}).get("status") == "cancelled" and "not run" in st["Never Run"]["result"],
+      "the cancelled session says what was stopped part-way and what never ran")
+check(sess.get("cancelled") and os.path.exists(sess.get("path", "")) and sess["summary"]["cancelled"] == 2,
+      "the cancelled session is saved for the Sessions tab")
+check("Slow App" not in inventory_of(remote_fake) and remote.ping() == "pong",
+      "nothing half-registered, and the link is still up")
+check(not os.listdir(remote.deploy_dir()), "no installer left behind on the linked PC after Cancel")
+
+# --- 7. Apps come across in a user migration -----------------------------------------------------
+from sectorsmith.link import apps as mapps, migrate  # noqa: E402
+
+set_inventory(entry("Bar Tool", "1.2"), entry("Mozilla Firefox (x64 en-GB)", "120.0"), entry("Acme Payroll", "3"),
+              entry("Microsoft Visual C++ 2019 X64 Minimum Runtime", "14.2"), entry("Already There", "1.0"),
+              dict(entry("Hidden Part", "1"), system_component=True))
+with open(remote_fake) as _f:
+    _rinv = json.load(_f)
+with open(remote_fake, "w") as _f:
+    json.dump(_rinv + [entry("Already There", "1.0")], _f)
+astore = Store(os.path.join(W, "lib5"))
+installer_pkg(astore, "Bar Tool", "1.5")
+src_inv = mapps.clean_inventory(ep.installed_software())
+check([e["name"] for e in src_inv] == ["Acme Payroll", "Already There", "Bar Tool", "Mozilla Firefox (x64 en-GB)"],
+      f"old PC's apps listed without runtimes or system parts {[e['name'] for e in src_inv]}")
+rows = mapps.match(src_inv, astore, remote.installed_software())
+by = {r_["name"]: r_ for r_ in rows}
+check(by["Bar Tool"]["source"] == "library" and by["Mozilla Firefox (x64 en-GB)"]["winget_id"] == "Mozilla.Firefox"
+      and by["Acme Payroll"]["source"] == "manual" and by["Already There"]["source"] == "installed",
+      "apps matched: Deploy library, winget, by hand, already there")
+prof = os.path.join(W, "mig_src", "erin")
+os.makedirs(os.path.join(prof, "Desktop"), exist_ok=True)
+with open(os.path.join(prof, "Desktop", "hello.txt"), "w") as _f:
+    _f.write("hi")
+mdst = os.path.join(W, "mig_dst", "erin")
+desk = [i for i in migrate.ITEMS if i.key == "desktop"]
+res = migrate.run(migrate.Plan(ep, prof, remote, mdst, desk, apps=rows, store=astore), Progress(1))
+got = {a["name"]: a for a in res["apps"]}
+check(got.get("Bar Tool", {}).get("status") == "compliant" and inventory_of(remote_fake).get("Bar Tool") == "1.5",
+      f"library app installed on the new PC by the Deploy engine during the move {got.get('Bar Tool')}")
+check(got.get("Mozilla Firefox", {}).get("status") == "failed",
+      "winget app tried (no winget here, so it fails and says so)")
+check(res["manual_apps"] == ["Acme Payroll"] and os.path.exists(os.path.join(mdst, "Desktop", "hello.txt")),
+      "files still copied, and apps to install by hand listed")
+with open(res["report"]) as fh:
+    rep = fh.read()
+check("Acme Payroll" in rep and "Bar Tool" in rep, "migration report lists the apps")
 remote.close()
 ag.wait(30)
 check(ag.returncode == 0, "agent exits cleanly")

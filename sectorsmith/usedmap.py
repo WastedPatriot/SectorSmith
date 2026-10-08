@@ -10,7 +10,7 @@ import struct
 
 from .device import Device
 from .partitions import read_partition_table
-from .util import get_logger
+from .util import Cancelled, check_cancel, get_logger
 
 log = get_logger()
 MERGE_GAP = 4 * 1024 * 1024  # merge used ranges closer than this (fewer, larger reads)
@@ -101,6 +101,8 @@ def _fat(dev: Device, base: int, size: int, bs: bytes):
     fat = dev.read(base + reserved * bps, fatsz * bps)
     used_bits = bytearray((nclusters + 7) // 8)
     for c in range(2, nclusters + 2):
+        if not c & 0xFFFF:
+            check_cancel()
         if kind == 32:
             v = struct.unpack_from("<I", fat, c * 4)[0] & 0x0FFFFFFF if c * 4 + 4 <= len(fat) else 0
         elif kind == 16:
@@ -159,6 +161,8 @@ def _ext(dev: Device, base: int, size: int):
     gdt = dev.read(base + (first_data + 1) * bs, groups * desc_size)
     used = []
     for g in range(groups):
+        if not g & 63:
+            check_cancel()
         d = gdt[g * desc_size:(g + 1) * desc_size]
         if len(d) < 32:
             return None
@@ -193,6 +197,8 @@ def partition_used(dev: Device, start_lba: int, sectors: int, fs: str):
             r = _ext(dev, base, size)
         else:
             r = None
+    except Cancelled:
+        raise
     except Exception as e:  # noqa: BLE001 — anything odd: be safe and copy everything
         log.warning("Used-space map failed for %s at LBA %d: %s", fs, start_lba, e)
         r = None
@@ -217,6 +223,7 @@ def copy_plan(dev: Device, start_lba: int = 0, sectors: int | None = None, smart
     covered = []
     info = []
     for p in parts:
+        check_cancel()
         ps, pe = p.start_lba * ss, (p.end_lba + 1) * ss
         if pe <= start or ps >= end:
             continue

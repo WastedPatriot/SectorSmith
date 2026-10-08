@@ -105,7 +105,19 @@ class Screen(ctk.CTkFrame):
             if not messagebox.askyesno("Stop?", "A task is still running. Cancel it and go home?"):
                 return
             self.app.cancel_job()
+            self.app.toast("Stopping it safely in the background...", "warn")
         self.app.home()
+
+    def cancelled_state(self, headline, lines, step=None, primary=None, secondary=None, extra=None):
+        """Clear result after Cancel: what stopped and what state things were left in."""
+        body = self.step(step if step is not None else max(0, len(self.steps) - 1), "Stopped", "") \
+            if self.steps else self.new_body()
+        if not self.steps:
+            self.title_lbl.configure(text="Stopped")
+            self.sub_lbl.configure(text="")
+        self.result_card(body, "warn", "warn", headline, lines)
+        self.buttons(primary=primary or ("Back to home", self.app.home), secondary=secondary, extra=extra)
+        return body
 
     def _draw_steps(self, cur):
         for w in self.stepper.winfo_children():
@@ -376,8 +388,10 @@ class RecoverWizard(Screen, _PickMixin):
             def job(prog):
                 vol = ntfs.NTFSVolume(dev, start * dev.sector_size)
                 return vol, vol.scan(prog)
-            self.app.run_job("Quick scan", job, self._mft_results, panel,
-                             on_error=self._error, on_cancel=self.app.home)
+            self.app.run_job("Quick scan", job, self._mft_results, panel, on_error=self._error,
+                             on_cancel=lambda info: self.cancelled_state(
+                                 "Scan stopped", ["Nothing on the drive was changed."], step=2,
+                                 secondary=("Scan again", self._start)))
         else:
             out = self.out_var.get().strip()
             if not out:
@@ -397,8 +411,8 @@ class RecoverWizard(Screen, _PickMixin):
                 return carver.carve(dev, out, prog, sigs=sigs, start_lba=start, end_lba=start + count,
                                     on_file=on_file)
             self.app.run_job("Deep scan", job, lambda r: self._deep_done(r, out), panel, on_error=self._error,
-                             on_cancel=lambda: self._deep_done({"files": self._found_count, "by_type": {},
-                                                                "out_dir": out}, out, cancelled=True))
+                             on_cancel=lambda info: self._deep_done({"files": self._found_count, "by_type": {},
+                                                                     "out_dir": out}, out, cancelled=True))
 
     def _check_dest(self, out):
         t = self.target
@@ -514,14 +528,23 @@ class RecoverWizard(Screen, _PickMixin):
                 lines.append(f"{len(res['failed'])} couldn't be recovered (e.g. {res['failed'][0]})")
             self.result_card(body, "check", "success", f"{res['recovered']:,} file(s) recovered", lines)
             self.done_actions(out)
-        self.app.run_job("Recover", job, done, panel, on_error=self._error)
+        def stopped(info):
+            n = info.get("recovered", 0)
+            self.cancelled_state(f"Stopped after {n:,} of {info.get('total', len(ents)):,} file(s)",
+                                 [f"The files already saved are in {out}.",
+                                  "The file being saved when you pressed Cancel was removed (it was incomplete).",
+                                  "Nothing on the source drive was changed."], step=3,
+                                 secondary=("Open folder", lambda: self.app.open_folder(out)))
+        self.app.run_job("Recover", job, done, panel, on_error=self._error, on_cancel=stopped)
 
     def _deep_done(self, res, out, cancelled=False):
         body = self.step(3, "Deep scan finished" if not cancelled else "Deep scan stopped", "")
         n = res["files"]
         self.app.mascot.set_mood("happy" if n else "idle", "found" if n else "none")
         self.result_card(body, "check" if n else "warn", "success" if n else "warn", f"{n:,} file(s) found",
-                         [f"Saved into folders by type in {out}"])
+                         [f"Saved into folders by type in {out}"]
+                         + (["Stopped by Cancel: the rest of the drive wasn't searched. Nothing on it was "
+                             "changed."] if cancelled else []))
         chips = ctk.CTkFrame(body, fg_color="transparent")
         chips.pack(fill="x")
         for ext, cnt in sorted(res.get("by_type", {}).items(), key=lambda x: -x[1]):
@@ -545,7 +568,9 @@ class PartitionWizard(Screen, _PickMixin):
                                  "Deep search: checking every sector. This takes a while on big drives.")
         self._draw_steps(1)
         self.app.run_job("Partition search", lambda prog: partscan.scan_partitions(dev, prog, mode=mode),
-                         lambda r: self._results(r, mode), panel, on_cancel=self.app.home)
+                         lambda r: self._results(r, mode), panel,
+                         on_cancel=lambda info: self.cancelled_state("Search stopped",
+                                                                     ["Nothing on the drive was changed."]))
 
     def _results(self, found, mode):
         lost = [f for f in found if f.status == "Lost"]
@@ -713,7 +738,23 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         self._draw_steps(3)
         self.t_start = time.time()
         self.app.run_job("Wipe", lambda prog: wipe.wipe_disk(wdev, method, prog, start_lba=start, sectors=count),
-                         self._done, panel, on_cancel=self.app.home)
+                         self._done, panel, on_cancel=self._stopped)
+
+    def _stopped(self, info):
+        self.app._inventory = None
+        done, total = info.get("overwritten", 0), info.get("length") or 1
+        pas = f"pass {info.get('pass_no', 1)} of {info.get('passes', 1)}"
+        if done <= 0:
+            lines = ["It stopped before anything was written. The drive is as it was."]
+        else:
+            lines = [(f"It stopped in {pas}. About {human_size(done)} of {human_size(total)} "
+                      f"({100 * done / total:.0f}%) has been overwritten at least once."),
+                     ("The drive is now part-erased: its partitions are probably damaged, and data in the part not "
+                      "reached yet may still be readable."),
+                     "Don't reuse or hand it on like this. Run the wipe again to finish it.",
+                     "No wipe certificate was made."]
+        self.cancelled_state("Wipe stopped part-way" if done > 0 else "Wipe stopped", lines, step=3,
+                             secondary=("Wipe again", self._confirm))
 
     def _done(self, res):
         self.res = res
@@ -878,7 +919,16 @@ class ShredWizard(Screen, _StrengthMixin):
                 self.result_card(body, "check", "success", f"{human_size(res['bytes'])} of free space cleaned",
                                  [f"Method: {method.name}"])
             self.buttons(primary=("Back to home", self.app.home))
-        self.app.run_job("Shred", job, done, panel, on_cancel=self.app.home)
+        def stopped(info):
+            if files:
+                lines = [f"{info.get('shredded', 0)} of {info.get('total', 0)} file(s) were shredded and are gone.",
+                         "The file being shredded when you pressed Cancel is partly overwritten but still there: "
+                         + str(info.get("current", "")), "The rest weren't touched."]
+            else:
+                lines = ["The temporary fill file was deleted, so the drive's free space is back.",
+                         "Your files weren't touched. Free space is only partly cleaned: run it again to finish."]
+            self.cancelled_state("Shredding stopped" if files else "Cleaning stopped", lines, step=2)
+        self.app.run_job("Shred", job, done, panel, on_cancel=stopped)
 
 
 # ---------------------------------------------------------------------------
@@ -928,7 +978,9 @@ class HealthWizard(Screen, _PickMixin):
             r = surface.surface_scan(dev, prog, start_lba=start, sectors=count, on_block=on_block, repair=repair)
             self.app.call_soon(self._paint, dict(pending))
             return r
-        self.app.run_job("Health check", job, self._result, panel, on_cancel=self.app.home)
+        self.app.run_job("Health check", job, self._result, panel, on_cancel=lambda info: self.cancelled_state(
+            "Health check stopped", ["Sectors that were rewritten so far stay repaired. Nothing else was changed."]
+            if repair else ["It only reads, so nothing on the drive was changed."], step=2))
 
     def _paint(self, cells):
         try:
@@ -1131,6 +1183,24 @@ class CloneWizard(Screen, _PickMixin):
             self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                              "Backup finished" if ok else "Finished — some sectors were unreadable", lines)
             self.done_actions(os.path.dirname(self.dest) if self.kind != "disk" else None)
+        def stopped(info):
+            self.app._inventory = None
+            st = info.get("state")
+            if self.kind == "disk":
+                lines = (["Nothing was written to the destination drive."] if st == "untouched" else
+                         [f"The destination drive {self.dest_target['dev'].name} is only partly written "
+                          f"({human_size(info.get('written', 0))} copied).",
+                          "It won't start Windows or open reliably like this. Clone again to finish, or wipe it "
+                          "before using it for something else."])
+            elif st == "complete, not hashed":
+                lines = [f"The image {self.dest} is complete. Only the SHA-256 check was skipped."]
+            else:
+                lines = [f"The unfinished image file was deleted ({os.path.basename(str(self.dest))})."
+                         if st == "removed" else f"The image file {self.dest} is incomplete: delete it."]
+            if snap:
+                lines.append("The snapshot of the running disk was removed.")
+            lines.append("The source drive wasn't changed.")
+            self.cancelled_state("Copy stopped", lines, step=3)
         self.app.run_job("Copy", lambda prog: surface.image_copy(sdev, dst, prog, start_lba=start, sectors=count,
                                                                  fmt=fmt, snapshot=snap, smart=smart), done, panel,
-                         on_cancel=self.app.home)
+                         on_cancel=stopped)

@@ -172,10 +172,14 @@ GUIDES = {
                                 "one (either way works)."),
             ("Have the user sign in once on the new PC", "That creates their profile folder, so files land with "
                                                          "the right permissions."),
-            ("Pick from and to", "Choose the old PC + user, then the new PC + user (or type a folder)."),
+            ("Pick from and to", "Choose the old PC + user, then the new PC + user. Old PC won't start? Plug its "
+                                 "disk or NVMe in by USB: its users show under 'On other drives'. To keep a copy "
+                                 "on a USB disk instead, pick a drive under New folder."),
             ("Choose what comes across", "Desktop, Documents, Downloads, Pictures and more, plus Chrome, Edge, "
                                          "Firefox, Outlook signatures, Sticky Notes and Office templates. Sizes "
                                          "are shown before you start."),
+            ("Bring the apps", "The old PC's apps are listed. Ones in your Deploy library or on winget install "
+                               "silently on the new PC; the rest are listed for you to install."),
             ("Run it — then run it again", "The first run copies everything. Later runs copy only new or changed "
                                            "files, so you can pre-stage the day before and do a quick final sync."),
         ],
@@ -184,7 +188,10 @@ GUIDES = {
                  "Chrome/Edge saved passwords are locked to the old PC by Windows. Export them first (or rely on "
                  "browser sync).",
                  "OneDrive folders are off by default — they re-sync on their own when the user signs in.",
-                 "A report of every run is saved in %LOCALAPPDATA%\\SectorSmith\\reports."],
+                 "A report of every run is saved in %LOCALAPPDATA%\\SectorSmith\\reports.",
+                 "Cancel is safe: what was copied stays, and Run again carries on from there.",
+                 ("A disk with no drive letter? 'Drives without a letter' reads its NTFS partition directly "
+                  "(read-only). BitLocker disks need unlocking in Windows first.")],
     },
     "netclone": {
         "title": "Clone a disk to another PC", "icon": "clone", "tone": "violet", "task": "NetCloneWizard",

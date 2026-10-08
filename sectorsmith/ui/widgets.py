@@ -288,11 +288,20 @@ class ProgressPanel(ctk.CTkFrame):
                                     border_width=2, border_color=P["danger"], font=theme.font(13, "bold"),
                                     command=on_cancel)
         self.cancel.pack(pady=16)
+        self.cancelling = False
+
+    def set_cancelling(self):
+        """Cancel was pressed: the job stops at its next safe point (a block boundary, the end of a file)."""
+        self.cancelling = True
+        self.cancel.configure(text="Cancelling...", state="disabled")
+        self.label.configure(text="Cancelling...")
+        self.detail.configure(text="Finishing the current step safely, then stopping. This takes a few seconds.")
 
     def update_from(self, s: dict):
         self.ring.set(s["pct"] / 100)
-        self.label.configure(text=s["label"])
-        self.detail.configure(text=s["detail"])
+        if not self.cancelling:
+            self.label.configure(text=s["label"])
+            self.detail.configure(text=s["detail"])
         self.chips["speed"].configure(text=f"{human_size(s['speed'])}/s" if s["speed"] else "—")
         self.chips["eta"].configure(text=human_time(s["eta"]))
         self.chips["done"].configure(text=human_size(s["done"]) if s["total"] > 4096 else f"{s['done']}/{s['total']}")
