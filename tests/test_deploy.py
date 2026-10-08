@@ -119,11 +119,12 @@ def fake_exe(path, marker, info):
     for k, v in info.items():
         blob += ver_string(k, v, len(blob))
     blob += b"\0" * 64 + marker + b"\0" * 300
-    open(path, "wb").write(bytes(blob))
+    with open(path, "wb") as _f:
+        _f.write(bytes(blob))
 
 
 FAKEINST = os.path.join(W, "fakeinst.py")
-open(FAKEINST, "w").write('''import hashlib, json, os, sys
+_FAKEINST_SRC = ('''import hashlib, json, os, sys
 # stands in for an installer: edits the fake Add/Remove Programs list the endpoint reads
 inv_path = os.environ["SECTORSMITH_FAKE_SOFTWARE"]
 inv = json.load(open(inv_path))
@@ -143,6 +144,8 @@ if "--noop" not in opt:
     json.dump(inv, open(inv_path, "w"))
 sys.exit(int(opt.get("--exit", 0)))
 ''')
+with open(FAKEINST, "w") as _f:
+    _f.write(_FAKEINST_SRC)
 
 
 def entry(name, version):
@@ -151,11 +154,13 @@ def entry(name, version):
 
 
 def set_inventory(*entries):
-    json.dump(list(entries), open(FAKE, "w"))
+    with open(FAKE, "w") as _f:
+        json.dump(list(entries), _f)
 
 
 def inventory_of(path):
-    return {e["name"]: e["version"] for e in json.load(open(path))}
+    with open(path) as _f:
+        return {e["name"]: e["version"] for e in json.load(_f)}
 
 
 def inventory():
@@ -193,9 +198,11 @@ d3 = deploy(st, p, "uninstalled", target_kind="machine", target_value="PC-9")
 st2 = Store(lib)
 check(st2.get("packages", p.id) == p and st2.get("tasks", t.id) == t and st2.get("clients", c.id) == c
       and st2.get("deployments", d1.id) == d1, "store saves and reloads every kind unchanged")
-raw = json.load(open(os.path.join(lib, "packages.json")))
+with open(os.path.join(lib, "packages.json")) as _f:
+    raw = json.load(_f)
 raw[0]["field_from_a_newer_version"] = 1
-json.dump(raw, open(os.path.join(lib, "packages.json"), "w"))
+with open(os.path.join(lib, "packages.json"), "w") as _f:
+    json.dump(raw, _f)
 check(Store(lib).get("packages", p.id) == p, "unknown fields in the JSON are ignored")
 p.version = "8.7"
 st.upsert("packages", p)
@@ -253,7 +260,8 @@ check("guess" in s["notes"][0] and s["install"] == '"{installer}" /S', "unknown 
 check(not any(ch in n for n in s["notes"] + A.analyze(inno)["notes"] for ch in "\u2014\u2013"),
       "analysis notes are plain text")
 mx = os.path.join(W, "in", "app.msix")
-open(mx, "wb").write(b"PK\3\4")
+with open(mx, "wb") as _f:
+    _f.write(b"PK\3\4")
 check(A.analyze(mx)["kind"] == "msix", "MSIX recognised")
 
 pk = st.add_from_installer(msi)
@@ -286,9 +294,16 @@ out = st.export_package(pk, os.path.join(W, "export"))
 files = sorted(os.listdir(out))
 check(files == ["Detect.ps1", "Install.ps1", "Uninstall.ps1", "contoso_notes_5.msi", "package.json"],
       f"export writes package.json, the installer and three scripts {files}")
-ps = {n: open(os.path.join(out, n), encoding="utf-8-sig").read() for n in files if n.endswith(".ps1")}
-check(open(os.path.join(out, "Install.ps1"), "rb").read()[:3] == b"\xef\xbb\xbf" and "\r\n" in
-      open(os.path.join(out, "Install.ps1"), newline="").read(), "scripts saved with BOM and CRLF for Windows PowerShell")
+ps = {}
+for _n in files:
+    if _n.endswith(".ps1"):
+        with open(os.path.join(out, _n), encoding="utf-8-sig") as _f:
+            ps[_n] = _f.read()
+with open(os.path.join(out, "Install.ps1"), "rb") as _f:
+    _head3 = _f.read()[:3]
+with open(os.path.join(out, "Install.ps1"), newline="") as _f:
+    _rawinst = _f.read()
+check(_head3 == b"\xef\xbb\xbf" and "\r\n" in _rawinst, "scripts saved with BOM and CRLF for Windows PowerShell")
 check("Join-Path $PSScriptRoot 'contoso_notes_5.msi'" in ps["Install.ps1"]
       and ".Replace('{installer}', $installer)" in ps["Install.ps1"]
       and "'msiexec.exe /i \"{installer}\" /qn /norestart ALLUSERS=1'" in ps["Install.ps1"],
@@ -408,10 +423,13 @@ check(runtime.id not in [d.item_id for d in core.applicable(store, host, False)]
       "removing a package doesn't install its prerequisites")
 store.delete("deployments", gone.id)
 
-before = open(FAKE).read()
+with open(FAKE) as _f:
+    before = _f.read()
 s1 = core.run_session(WinCodes(), store, Progress(1), mode="detect")
 by = {a["name"]: a for a in s1["actions"]}
-check(open(FAKE).read() == before and not os.path.exists(mark) and not os.path.exists(flag_b),
+with open(FAKE) as _f:
+    _after = _f.read()
+check(_after == before and not os.path.exists(mark) and not os.path.exists(flag_b),
       "detect mode changes nothing")
 check({n: by[n]["action"] for n in ("Foo App", "Bar Tool", "New Thing", "Runtime", "Old Junk", "Pinned",
                                     "Pin Mismatch", "Machine Wins", "Script Pkg", "File Pkg", "Flag file",
@@ -486,7 +504,8 @@ check(r["code"] == 127 and "Unknown" in r["err"], "unknown script language refus
 from sectorsmith.link.server import LinkServer  # noqa: E402
 
 remote_fake = os.path.join(W, "remote_installed.json")
-json.dump([entry("Foo App", "1.0")], open(remote_fake, "w"))
+with open(remote_fake, "w") as _f:
+    json.dump([entry("Foo App", "1.0")], _f)
 connected = []
 srv = LinkServer(on_connect=connected.append, port=47430)
 srv.start()
@@ -501,8 +520,10 @@ check(connected, "agent linked")
 remote = connected[0]
 rstore = Store(os.path.join(W, "lib3"))
 big = os.path.join(W, "src", "big_suite.bin")
-open(big, "wb").write(os.urandom(core.UPLOAD_CHUNK * 2 + 12345))
-sha = hashlib.sha256(open(big, "rb").read()).hexdigest()
+with open(big, "wb") as _f:
+    _f.write(os.urandom(core.UPLOAD_CHUNK * 2 + 12345))
+with open(big, "rb") as _f:
+    sha = hashlib.sha256(_f.read()).hexdigest()
 bigpkg = Package(name="Big Suite", version="1.0", installer="big_suite.bin",
                  install=f'"{PY}" "{FAKEINST}" add "Big Suite" 1.0 --sha {sha} --file "{{installer}}"',
                  detection={"method": "registry", "value": "Big Suite"})
