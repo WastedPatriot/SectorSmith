@@ -193,6 +193,173 @@ try:
 except Exception as e:  # noqa: BLE001
     check(True, f"bad target rejected ({type(e).__name__})")
 
+# --- Cancel over Link ----------------------------------------------------------------------------
+import threading  # noqa: E402
+from sectorsmith.util import Cancelled, cancel_scope  # noqa: E402
+
+
+def run_cancel(fn, after=None, delay=None):
+    """fn(prog) in a thread like the UI runs it; Cancel once `after` bytes are done or after `delay` seconds.
+    Returns (result or exception, seconds from Cancel to the job ending)."""
+    pressed = []
+
+    class Prog(Progress):
+        def update(self, done):
+            super().update(done)
+            if after is not None and done >= after:
+                press()
+    prog = Prog(1)
+
+    def press():
+        if not pressed:
+            pressed.append(time.time())
+            prog.cancel()
+    out = {}
+
+    def work():
+        try:
+            with cancel_scope(prog.check):
+                out["r"] = fn(prog)
+        except Exception as e:  # noqa: BLE001
+            out["r"] = e
+        out["t"] = time.time()
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    if delay is not None:
+        time.sleep(delay)
+        press()
+    th.join(90)
+    return (out.get("r", "still running"), (out["t"] - pressed[0]) if pressed and "t" in out else 999)
+
+
+marker = os.path.join(W, "remote_cancel_marker")
+if os.path.exists(marker):
+    os.remove(marker)
+r, dt = run_cancel(lambda prog: remote.run_command(cmd=f"(sleep 2; touch '{marker}') & sleep 60"), delay=0.6)
+time.sleep(2.5)
+check(isinstance(r, Cancelled) and dt < 3 and not os.path.exists(marker),
+      f"Cancel reaches a command running on the linked PC: stopped in {dt:.2f}s, and what it started")
+check(remote.ping() == "pong" and remote.alive, "link still up after a remote Cancel")
+r = remote.run_command(cmd="echo hi")
+check(r["code"] == 0 and "hi" in r["out"], "remote commands still work after Cancel")
+
+# migration local -> remote, cancelled part-way, then finished by Run again
+cf = os.path.join(new, "cancelled_move")
+plan_c = migrate.Plan(local, src_root, remote, cf, sel)
+r, dt = run_cancel(lambda prog: migrate.run(plan_c, prog), after=1)
+check(isinstance(r, Cancelled) and dt < 3 and r.info.get("cancelled") and os.path.exists(r.info["report"])
+      and "STOPPED" in open(r.info["report"]).read(),
+      f"migration: Cancel stops it in {dt:.2f}s and writes a report ({getattr(r, 'info', {}).get('copied')} "
+      "files copied before)")
+r2 = migrate.run(plan_c, Progress(1))
+check(not r2["failed"] and tree(cf) == tree(os.path.join(new, "alice")), "Run again after Cancel finishes the move")
+
+# disk clone local -> remote, cancelled part-way
+r, dt = run_cancel(lambda prog: netclone.clone_many(local, src_img, [(remote, target_img)], prog, smart=False),
+                   after=16 << 20)
+st = getattr(r, "info", {}).get("targets") or [{}]
+check(isinstance(r, Cancelled) and dt < 5 and st[0].get("state") == "part-written",
+      f"network clone: Cancel stops it in {dt:.2f}s and says the target is part-written")
+res = netclone.clone(local, src_img, remote, target_img, Progress(1))
+check(sha(target_img) == sha(src_img), "the cancelled target can be cloned again (disks were closed cleanly)")
+
+# --- old disk attached by USB: user folders on other drives ---------------------------------------
+vol = os.path.join(W, "usb_old_disk")
+shutil.rmtree(vol, ignore_errors=True)
+bob = os.path.join(vol, "Users", "bob")
+for rel, data in {"Desktop/note.txt": b"from the old disk", "Documents/cv.docx": os.urandom(70_000),
+                  "AppData/Roaming/Mozilla/Firefox/profiles.ini": b"[General]", "NTUSER.DAT": b"hive"}.items():
+    os.makedirs(os.path.dirname(os.path.join(bob, rel)), exist_ok=True)
+    open(os.path.join(bob, rel), "wb").write(data)
+os.makedirs(os.path.join(vol, "Users", "Public", "Documents"))
+for d in ("Program Files/Mozilla Firefox", "Program Files/7-Zip", "Program Files (x86)/Acme Payroll",
+          "Program Files/Common Files", "Users/bob/AppData/Local/Programs/Microsoft VS Code"):
+    os.makedirs(os.path.join(vol, d), exist_ok=True)
+os.environ["SECTORSMITH_VOLUMES"] = vol
+usb = LocalEndpoint()
+offp = usb.offline_profiles()
+check([p["name"] for p in offp] == ["bob"] and offp[0]["path"] == bob, f"user on an attached old disk found {offp}")
+vols = usb.list_volumes()
+check(vols and vols[0]["path"] == vol and vols[0]["free"] > 0, "attached drives listed with free space")
+from sectorsmith.link import apps  # noqa: E402
+found = usb.apps_on_disk(profile=bob)
+names = [a["name"] for a in found]
+check({"Mozilla Firefox", "7-Zip", "Microsoft Visual Studio Code", "Acme Payroll"} <= set(names)
+      and "Common Files" not in names, f"apps on the old disk found by their folders {names}")
+rows = apps.match(found)
+by = {r_["name"]: r_ for r_ in rows}
+check(by["Mozilla Firefox"]["winget_id"] == "Mozilla.Firefox" and by["Acme Payroll"]["source"] == "manual",
+      "old-disk apps matched to winget, unknown ones listed to install by hand")
+drive_dst = os.path.join(W, "usb_backup_drive", "SectorSmith", "bob")
+shutil.rmtree(os.path.dirname(drive_dst), ignore_errors=True)
+mk = usb.make_folder(path=drive_dst)
+r = migrate.run(migrate.Plan(usb, bob, remote, os.path.join(new, "bob_from_usb"), sel, apps=rows,
+                             install_apps=False), Progress(1))
+check(not r["failed"] and open(os.path.join(new, "bob_from_usb", "Desktop", "note.txt"), "rb").read()
+      == b"from the old disk", "old disk -> linked PC migration")
+r = migrate.run(migrate.Plan(usb, bob, usb, drive_dst, sel, apps=rows, install_apps=False), Progress(1))
+check(not r["failed"] and os.path.exists(os.path.join(drive_dst, "Documents", "cv.docx"))
+      and os.path.exists(os.path.join(drive_dst, "SectorSmith - apps on the old PC.txt")),
+      "old disk -> folder on another drive, with the app list saved next to the files")
+os.environ.pop("SECTORSMITH_VOLUMES")
+
+# --- NTFS partition without a drive letter, read raw -------------------------------------------------
+raw_disk = os.path.join(W, "raw_old.img")
+part = os.path.join(W, "raw_part.img")
+mnt = os.path.join(W, "raw_mnt")
+raw_files = {"Desktop/todo.txt": b"raw read", "Documents/Big/report.bin": os.urandom(3 * 1024 * 1024 + 4321),
+             "Documents/empty.txt": b"", "Pictures/p.jpg": os.urandom(150_000),
+             "AppData/Local/Google/Chrome/User Data/Default/Bookmarks": b'{"roots":{}}',
+             "AppData/Local/Google/Chrome/User Data/Default/Cache/x": b"skip me"}
+ok_raw = False
+try:
+    with open(part, "wb") as f:
+        f.truncate(48 * 1024 * 1024)
+    subprocess.run(["mkntfs", "-F", "-Q", "-q", "-s", "512", "-p", "2048", part], check=True,
+                   capture_output=True)
+    os.makedirs(mnt, exist_ok=True)
+    subprocess.run(["ntfs-3g", part, mnt], check=True, capture_output=True, timeout=30)
+    try:
+        for rel, data in raw_files.items():
+            pth = os.path.join(mnt, "Users", "dave", rel)
+            os.makedirs(os.path.dirname(pth), exist_ok=True)
+            open(pth, "wb").write(data)
+        os.makedirs(os.path.join(mnt, "Users", "Default", "Desktop"))
+        os.makedirs(os.path.join(mnt, "Program Files", "Notepad++"))
+    finally:
+        subprocess.run(["umount", mnt], capture_output=True, timeout=30)
+    with open(raw_disk, "wb") as f:
+        f.truncate(64 * 1024 * 1024)
+    subprocess.run(["sgdisk", "-Z", raw_disk], capture_output=True)
+    subprocess.run(["sgdisk", "-n1:2048:+48M", "-t1:0700", raw_disk], check=True, capture_output=True)
+    with open(part, "rb") as a_, open(raw_disk, "r+b") as b_:
+        b_.seek(2048 * 512)
+        b_.write(a_.read())
+    ok_raw = True
+except (OSError, subprocess.SubprocessError) as e:
+    print("SKIP raw NTFS checks (needs mkntfs + ntfs-3g/FUSE):", e)
+if ok_raw:
+    rawep = LocalEndpoint(extra_images=[raw_disk])
+    rp = rawep.offline_profiles(raw=True)
+    check([p["name"] for p in rp] == ["dave"] and rp[0]["path"].startswith("ntfs:"),
+          f"user found in an NTFS partition without a drive letter {[p['name'] for p in rp]}")
+    rroot = rp[0]["path"]
+    check(set(rawep.list_dir(path=rroot)) >= {"Desktop", "Documents", "AppData"}, "raw NTFS folders listed")
+    raw_dst = os.path.join(new, "dave")
+    shutil.rmtree(raw_dst, ignore_errors=True)
+    r = migrate.run(migrate.Plan(rawep, rroot, remote, raw_dst, sel), Progress(1))
+    want_raw = {k.replace("/", os.sep): hashlib.sha256(v).hexdigest() for k, v in raw_files.items()
+                if "Cache" not in k}
+    check(not r["failed"] and tree(raw_dst) == want_raw, f"raw NTFS -> linked PC: every file byte-exact {r['failed'][:2]}")
+    a_ = rawep.apps_on_disk(profile=rroot)
+    check([x["name"] for x in a_] == ["Notepad++"], "apps on a raw NTFS disk found by folder")
+    try:
+        rawep.write_files(root=rroot, items=[], blob=b"")
+        check(False, "raw NTFS is read-only")
+    except LinkError:
+        check(True, "raw NTFS is read-only")
+    rawep.close()
+
 remote.close()
 ag.wait(30)
 check(ag.returncode == 0, "agent exits cleanly when the controller disconnects")

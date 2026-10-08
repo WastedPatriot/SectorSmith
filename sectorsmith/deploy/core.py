@@ -11,10 +11,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from ..util import Cancelled, Progress, app_dir, get_logger
+from ..util import Cancelled, Progress, app_dir, cancel_scope, check_cancel, get_logger
 
 log = get_logger()
 UPLOAD_CHUNK = 4 * 1024 * 1024
+WINGET_INSTALL = "winget install --id {winget_id} -e --silent --accept-package-agreements --accept-source-agreements"
+WINGET_UNINSTALL = "winget uninstall --id {winget_id} -e --silent"
 
 
 def _id():
@@ -447,6 +449,7 @@ def _upload(ep, store: Store, pkg: Package, prog: Progress | None) -> str:
     with open(src, "rb") as f:
         off = 0
         while off < size or size == 0:
+            check_cancel()
             data = f.read(UPLOAD_CHUNK)
             ep.put_file(path=dest, offset=off, total=size, blob=data)
             off += len(data)
@@ -590,7 +593,9 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                          result="fixed" if t["code"] == 0 else "still not compliant after set")
             else:
                 a.update(status="non-compliant", result="audit only, not changed")
-    except Cancelled:
+    except Cancelled as c:
+        a.update(status="cancelled", result="stopped part-way by Cancel: check this item on the PC")
+        c.info["action"] = a
         raise
     except Exception as e:  # noqa: BLE001
         a.update(status="failed", result=str(e))
@@ -601,7 +606,15 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
 
 
 def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding: bool = False) -> dict:
-    """Detect → (execute) → re-check. mode: 'detect' (read-only) or 'full'."""
+    """Detect → (execute) → re-check. mode: 'detect' (read-only) or 'full'.
+
+    Cancel stops a running installer or script (on a linked PC too). What already ran is saved as a session
+    with the rest marked 'cancelled', and Cancelled.info["session"] holds it."""
+    with cancel_scope(prog.check):
+        return _run_session(ep, store, prog, mode, onboarding)
+
+
+def _run_session(ep, store, prog, mode, onboarding):
     info = ep.info()
     host = info["hostname"]
     sess = {"id": _id(), "machine": host, "started": time.time(), "mode": mode, "onboarding": onboarding,
@@ -618,20 +631,41 @@ def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding
     else:
         prog.reset(len(todo), f"Maintaining {host}: {len(todo)} change(s)")
         done = {}
-        for i, a in enumerate(todo):
-            prog.check()
-            prog.set_label(f"{a['action'].capitalize()}: {a['name']}")
-            r = execute(ep, store, a, prog)
-            done[a["deployment"]] = r
-            prog.update(i + 1)
+        try:
+            for i, a in enumerate(todo):
+                prog.check()
+                prog.set_label(f"{a['action'].capitalize()}: {a['name']}")
+                r = execute(ep, store, a, prog)
+                done[a["deployment"]] = r
+                prog.update(i + 1)
+        except Cancelled as c:
+            if c.info.get("action"):
+                part = c.info.pop("action")
+                done[part["deployment"]] = part
+            sess["actions"] = [dict(done.get(a["deployment"]) or
+                                    (dict(a, status="cancelled", result="not run: cancelled")
+                                     if a["action"] not in ("none", "audit") else
+                                     dict(a, status="compliant" if a["action"] == "none" else "non-compliant")),
+                                    entry=None) for a in actions]
+            _finish(store, sess, cancelled=True)
+            c.info["session"] = sess
+            raise
         sess["actions"] = [dict(done.get(a["deployment"]) or
                                 dict(a, status="compliant" if a["action"] == "none" else "non-compliant"),
                                 entry=None) for a in actions]
+    return _finish(store, sess)
+
+
+def _finish(store, sess, cancelled=False):
     sess["finished"] = time.time()
     st = [a["status"] for a in sess["actions"]]
     sess["summary"] = {"compliant": st.count("compliant"), "failed": st.count("failed"),
                        "pending": st.count("pending"), "non_compliant": st.count("non-compliant"),
+                       "cancelled": st.count("cancelled"),
                        "reboot": any(a.get("reboot") for a in sess["actions"])}
+    if cancelled:
+        sess["cancelled"] = True
     sess["path"] = store.save_session(sess)
-    log.info("Deploy session %s on %s: %s", sess["id"], host, sess["summary"])
+    log.info("Deploy session %s on %s%s: %s", sess["id"], sess["machine"], " (cancelled)" if cancelled else "",
+             sess["summary"])
     return sess

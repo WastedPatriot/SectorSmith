@@ -8,7 +8,7 @@ import time
 import uuid
 
 from .device import Device, DeviceError, open_image
-from .util import Progress, get_logger
+from .util import Cancelled, Progress, cancel_scope, get_logger
 
 log = get_logger()
 
@@ -131,7 +131,34 @@ def image_copy(src: Device, dst, prog: Progress, start_lba: int = 0, sectors: in
 
     Two passes like ddrescue: pass 1 copies in 4 MiB chunks and skips any chunk that errors;
     pass 2 retries the skipped chunks one sector at a time. Unreadable sectors are filled.
+
+    Cancel stops it between chunks (and during the snapshot and used-space map). A cancelled image file is
+    deleted, since half an image is no use; a cancelled clone leaves the destination disk part-written.
     """
+    with cancel_scope(prog.check):
+        try:
+            return _image_copy(src, dst, prog, start_lba, sectors, fmt, fill_bad, do_hash, snapshot, smart)
+        except Cancelled as c:
+            label = prog.label
+            done = prog.snapshot()["done"] if label.startswith("Imaging") else 0
+            if isinstance(dst, Device):
+                c.info.update(dest=dst.path, to_device=True, written=done,
+                              state="part-written" if label.startswith("Imaging") else "untouched")
+            elif label.startswith("Hashing"):
+                c.info.update(dest=dst, to_device=False, written=done, state="complete, not hashed")
+            else:
+                removed = False
+                for p in (dst, str(dst) + ".log.txt"):
+                    try:
+                        os.remove(p)
+                        removed = True
+                    except OSError:
+                        pass
+                c.info.update(dest=dst, to_device=False, written=done, state="removed" if removed else "incomplete")
+            raise
+
+
+def _image_copy(src, dst, prog, start_lba, sectors, fmt, fill_bad, do_hash, snapshot, smart):
     ss = src.sector_size
     if sectors is None:
         sectors = src.total_sectors - start_lba

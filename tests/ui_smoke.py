@@ -219,6 +219,38 @@ wait()
 shot("clone_done_dark")
 assert os.path.getsize(answers["save"]) == 256 * 1024 * 1024 + 512
 
+# --- Cancel a backup part-way: "Cancelling..." at once, then "Stopped" and no half image ------------
+from sectorsmith.ui.widgets import ProgressPanel  # noqa: E402
+app.go(S.CloneWizard)
+pump(0.6)
+pick(img)
+press("Next")
+answers["save"] = os.path.join(W, "ui_cancelled.vhd")
+press("Next")
+[w for w in app.screen.footer.winfo_children() if w.cget("text") == "Start backup"][0].invoke()
+app.cancel_job()
+panel = [w for w in app.screen.body.winfo_children() if isinstance(w, ProgressPanel)][0]
+assert panel.cancel.cget("text") == "Cancelling..." and panel.label.cget("text") == "Cancelling..."
+t0 = time.time()
+wait()
+assert time.time() - t0 < 6, "cancel took too long"
+shot("clone_cancelled_dark")
+assert app.screen.title_lbl.cget("text") == "Stopped", app.screen.title_lbl.cget("text")
+assert not os.path.exists(answers["save"]), "the unfinished image is removed"
+
+# a job that ends after you've left its screen must not break the UI loop
+scr = app.go(S.WipeWizard)
+pump(0.3)
+_, panel = scr.progress("Wiping…", "test")
+app.run_job("leave", lambda prog: time.sleep(0.8), lambda r: scr.step(3, "x"), panel,
+            on_cancel=lambda info: scr.step(3, "x"))
+app.open_guide("wipe")
+wait()
+got = []
+app.background(lambda: 42, got.append)
+pump(0.6)
+assert got == [42], "UI loop still delivers results after a job finished on a closed screen"
+
 # --- Shred via drop ------------------------------------------------------------------
 tmpd = os.path.join(W, "to_shred")
 os.makedirs(tmpd, exist_ok=True)

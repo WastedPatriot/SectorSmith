@@ -126,10 +126,29 @@ press("Next")
 until(lambda: scr.sizes)
 pump(.5)
 shot("migrate_what")
+press("Next")
+until(lambda: scr.apps_ready)
+pump(.5)
+shot("migrate_apps")
+assert scr.install_apps.get(), "a linked PC's profile folder can get apps installed"
 press("Start moving")
 wait()
 shot("migrate_done")
 assert os.path.exists(os.path.join(new, "carol", "Desktop", "big video.mp4")), os.listdir(os.path.join(new, "carol"))
+assert scr.title_lbl.cget("text") == "Move complete", scr.title_lbl.cget("text")
+
+# Cancel in the middle of a move: "Cancelling..." at once, then a clear "Stopped" screen
+from sectorsmith.ui.widgets import ProgressPanel  # noqa: E402
+shutil.rmtree(os.path.join(new, "dan"), ignore_errors=True)
+scr.dst_root = os.path.join(new, "dan")
+[w for w in scr.footer.winfo_children() if w.cget("text") == "Run again"][0].invoke()
+app.cancel_job()
+panel = [w for w in scr.body.winfo_children() if isinstance(w, ProgressPanel)]
+assert panel and panel[0].cancel.cget("text") == "Cancelling...", "panel shows Cancelling..."
+wait(15)
+shot("migrate_cancelled")
+assert scr.title_lbl.cget("text") == "Stopped", scr.title_lbl.cget("text")
+assert app.job is None
 
 # --- Clone a disk to another PC ------------------------------------------------------
 theme.set_mode("dark")

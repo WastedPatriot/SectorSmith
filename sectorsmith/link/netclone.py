@@ -7,7 +7,7 @@ import threading
 import time
 
 from ..usedmap import pieces
-from ..util import Cancelled, Progress, get_logger
+from ..util import Cancelled, Progress, cancel_scope, get_logger
 
 log = get_logger()
 CHUNK = 4 * 1024 * 1024
@@ -49,9 +49,17 @@ class _Target:
 
 def clone_many(src, src_path: str, targets: list[tuple], prog: Progress, start_lba: int = 0,
                sectors: int | None = None, smart: bool = True, snapshot: bool = True) -> dict:
-    """Read ``src`` once and write it to every (endpoint, disk_path) in ``targets`` in parallel."""
+    """Read ``src`` once and write it to every (endpoint, disk_path) in ``targets`` in parallel.
+
+    Cancel stops reading at once, lets each writer finish the block it is on, closes every disk and raises
+    Cancelled with ``info["targets"]`` saying which destinations were already being written."""
     if not targets:
         raise ValueError("No destination selected.")
+    with cancel_scope(prog.check):
+        return _clone_many(src, src_path, targets, prog, start_lba, sectors, smart, snapshot)
+
+
+def _clone_many(src, src_path, targets, prog, start_lba, sectors, smart, snapshot):
     prog.set_label("Preparing (snapshotting the source if it's in use)…")
     s_info = src.disk_open(path=src_path, writable=False, snapshot=snapshot)
     ss = s_info["sector_size"]
@@ -100,7 +108,9 @@ def clone_many(src, src_path: str, targets: list[tuple], prog: Progress, start_l
         for t in tg:
             t.q.put(None)
         for t in tg:
-            t.thread.join()
+            while t.thread.is_alive():  # the writers may still have a few blocks queued
+                t.thread.join(0.25)
+                prog.check()
         whole = start_lba == 0 and length == total_sectors * ss
         for t in tg:
             if not t.error and whole and t.info["usable"] > length:
@@ -108,11 +118,18 @@ def clone_many(src, src_path: str, targets: list[tuple], prog: Progress, start_l
                     t.grown = t.ep.disk_fix_gpt(path=t.path)
                 except Exception as e:  # noqa: BLE001
                     t.grown = f"Couldn't adjust the partition table to the larger disk: {e}"
-    except Cancelled:
+    except Cancelled as c:
+        started = {id(t) for t in tg if t.thread is not None}
         for t in tg:
             if t.thread and t.thread.is_alive():
-                t.error = t.error or "cancelled"
+                t.error = t.error or "cancelled"  # the writer skips whatever is still queued
                 t.q.put(None)
+        for t in tg:
+            if t.thread:
+                t.thread.join(30)  # never close a disk under a write in flight
+        c.info["targets"] = [{"machine": t.ep.label, "path": t.path,
+                              "state": ("part-written" if id(t) in started else "untouched"),
+                              "written": t.written} for t in tg]
         raise
     finally:
         try:
