@@ -121,8 +121,8 @@ def exe_info(path: str) -> dict:
 def clean_version(v: str | None) -> str:
     if not v:
         return ""
-    m = re.search(r"\d+(?:[.,]\d+){0,3}", v)
-    return m.group(0).replace(",", ".") if m else v.strip()
+    m = re.search(r"\d+(?:\s*[.,]\s*\d+){0,3}", v)  # also old-style "4, 2, 1, 0"
+    return re.sub(r"\s*[.,]\s*", ".", m.group(0)) if m else v.strip()
 
 
 def analyze(path: str) -> dict:
@@ -155,12 +155,12 @@ def analyze(path: str) -> dict:
         if e["silent"]:
             s["install"] = f'"{{installer}}" {e["silent"]}'
             s["uninstall"] = "{registry_uninstall} " + (e["uninstall_args"] or "")
-            s["notes"].append(f"Detected installer type: {e['framework']} — standard silent switches applied.")
+            s["notes"].append(f"Detected installer type: {e['framework']}. Its standard silent switches are filled in.")
         else:
             s["install"] = '"{installer}" /S'
             s["uninstall"] = "{registry_uninstall}"
-            s["notes"].append("Installer type not recognised — '/S' is a guess. Test it on one machine first, or check "
-                              "the vendor's docs for silent switches.")
+            s["notes"].append("Installer type not recognised, so '/S' is a guess. Test it on one machine first, or "
+                              "check the vendor's docs for silent switches.")
         s["detection"] = {"method": "registry", "value": s["name"]}
     s["version"] = clean_version(s["version"])
     return s

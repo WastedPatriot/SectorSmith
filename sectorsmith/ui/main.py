@@ -33,6 +33,7 @@ except Exception:  # noqa: BLE001 — drag-and-drop is optional
 
 _Base = (ctk.CTk, TkinterDnD.DnDWrapper) if _DND else (ctk.CTk,)
 IMAGE_EXTS = (".img", ".vhd", ".dd", ".raw", ".bin", ".001", ".iso")
+INSTALLER_EXTS = (".msi", ".exe", ".msix", ".msixbundle", ".appx", ".appxbundle")
 
 
 class MainWindow(*_Base):
@@ -53,6 +54,7 @@ class MainWindow(*_Base):
 
         self.images = []
         self._inventory = None
+        self._deploy_store = None
         from ..link.endpoint import LocalEndpoint
         self.local_ep = LocalEndpoint(label="This PC")
         self.link = None
@@ -178,6 +180,13 @@ class MainWindow(*_Base):
     def open_connect(self):
         from .link_screens import ConnectScreen
         self.go(ConnectScreen)
+
+    def deploy_store(self):
+        """The Deploy library, loaded on first use. Raises if its files can't be read."""
+        if self._deploy_store is None:
+            from ..deploy.core import Store
+            self._deploy_store = Store()
+        return self._deploy_store
 
     def background(self, fn, done, error=None):
         """Run fn() in a thread; deliver its result (or exception) on the UI thread."""
@@ -427,6 +436,10 @@ class MainWindow(*_Base):
         if others:
             if hasattr(self.screen, "accept_files"):
                 self.screen.accept_files(others)
+            elif all(p.lower().endswith(INSTALLER_EXTS) for p in others):
+                # installers dropped anywhere else go to the package builder, not the shredder
+                from .deploy_screens import PackageBuilder
+                self.go(PackageBuilder, path=others[0])
             else:
                 from .screens import ShredWizard
                 self.mascot.say("drop")

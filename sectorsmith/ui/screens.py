@@ -54,7 +54,7 @@ def greeting():
 class Screen(ctk.CTkFrame):
     guide_topic = None
 
-    def __init__(self, master, app, title="", subtitle="", steps=None, show_back=True):
+    def __init__(self, master, app, title="", subtitle="", steps=None, show_back=True, badge=None):
         super().__init__(master, fg_color=P["bg"], corner_radius=0)
         self.app = app
         self.steps = steps or []
@@ -74,9 +74,13 @@ class Screen(ctk.CTkFrame):
         row.pack(fill="x")
         titles = ctk.CTkFrame(row, fg_color="transparent")
         titles.pack(side="left", fill="x", expand=True, anchor="n")
-        self.title_lbl = ctk.CTkLabel(titles, text=title, font=theme.font(30, "bold"), text_color=P["text"],
+        trow = ctk.CTkFrame(titles, fg_color="transparent")
+        trow.pack(anchor="w")
+        self.title_lbl = ctk.CTkLabel(trow, text=title, font=theme.font(30, "bold"), text_color=P["text"],
                                       anchor="w")
-        self.title_lbl.pack(anchor="w")
+        self.title_lbl.pack(side="left")
+        if badge:  # e.g. PREVIEW on features that aren't finished yet
+            Pill(trow, badge, "warn").pack(side="left", padx=(12, 0), pady=(6, 0))
         self.sub_lbl = ctk.CTkLabel(titles, text=subtitle, font=theme.font(14), text_color=P["muted"], anchor="w",
                                     justify="left", wraplength=640)
         self.sub_lbl.pack(anchor="w", pady=(2, 0))
@@ -228,13 +232,17 @@ class Home(Screen):
             ("link", "Connect a machine", "Link another PC with one copy-paste command to work on both.",
              ConnectScreen, "accent"),
         ]
+        from .deploy_screens import DeployScreen
+        cards.append(("deploy", "Deploy software", "Install apps and run upkeep tasks on linked PCs. (Preview)",
+                      DeployScreen, "violet"))
         for i, (ic, t, d, cls, tone) in enumerate(cards):
             card = TaskCard(grid, ic, t, d, lambda c=cls: self.app.go(c), tone=tone)
             card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=8, pady=8)
         for c in range(3):
             grid.grid_columnconfigure(c, weight=1, uniform="c")
-        self.dz = DropZone(grid, "Drop files to shred", "or a disk image (.img / .vhd) to open it", height=118)
-        self.dz.grid(row=2, column=2, sticky="nsew", padx=8, pady=8)
+        self.dz = DropZone(grid, "Drop files to shred", "Disk images (.img / .vhd) open as drives, and installers "
+                                                        "become Deploy packages.", height=96, wide=True)
+        self.dz.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
         app.drop_handlers.append(lambda kind, _p: self.dz.hot(kind == "enter"))
         hint = ctk.CTkFrame(body, fg_color="transparent")
         hint.pack(fill="x", padx=8, pady=(14, 0))

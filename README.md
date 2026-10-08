@@ -10,7 +10,7 @@
 ![Portable](https://img.shields.io/badge/single%20.exe-portable-52C98E)
 ![Version](https://img.shields.io/badge/version-1.3.0-FF5C99)
 ![Link](https://img.shields.io/badge/Link-TLS%20encrypted-7656F5)
-[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/license-proprietary-lightgrey)](LICENSE)
 
 **Recover deleted files · find lost partitions · securely wipe drives · test drive health · clone & image disks · move users to new PCs**
 <br>Pro-grade disk tools as calm, step-by-step tasks, with a small pixel-art helper sweeping along as they run.
@@ -426,5 +426,5 @@ Every push runs [GitHub Actions](.github/workflows/build.yml):
 
 <div align="center">
 <img src="docs/images/mossbit_moods.png" width="70%">
-<br><sub>SectorSmith © 2026 WastedPatriot · <a href="LICENSE">MIT License</a> · Built with Python, CustomTkinter and a lot of tiny pixels.</sub>
+<br><sub>SectorSmith © 2026 WastedPatriot · <a href="LICENSE">All rights reserved</a> · Built with Python, CustomTkinter and a lot of tiny pixels.</sub>
 </div>

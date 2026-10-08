@@ -440,12 +440,13 @@ class LocalEndpoint:
                 f.truncate(total)
         return True
 
-    def run_command(self, cmd, timeout=3600, cwd=None):
+    def run_command(self, cmd, timeout=3600, cwd=None, env=None):
         import subprocess
         import time as _t
         t0 = _t.time()
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout, cwd=cwd,  # nosec B602
+                               env={**os.environ, **env} if env else None,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             code, out, err = r.returncode, r.stdout, r.stderr
         except subprocess.TimeoutExpired as e:
@@ -454,24 +455,47 @@ class LocalEndpoint:
         return {"code": code, "out": dec(out)[-6000:], "err": dec(err)[-3000:], "seconds": round(_t.time() - t0, 1)}
 
     def run_script(self, script, language="powershell", timeout=1800, params=None):
+        """language: powershell, cmd (Windows batch) or shell/sh. Params become variables at the top."""
         import tempfile
         params = params or {}
+        win = sys.platform == "win32"
+
+        def unavailable(msg):
+            return {"code": 127, "out": "", "err": msg, "seconds": 0}
         if language == "powershell":
+            exe = "powershell.exe" if win else shutil.which("pwsh")
+            if not exe:
+                return unavailable("PowerShell (pwsh) is not installed on this machine.")
             head = "".join(f"${k} = '{str(v).replace(chr(39), chr(39) * 2)}'\n" for k, v in params.items())
             fd, p = tempfile.mkstemp(suffix=".ps1", dir=self.deploy_dir())
             with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
                 f.write(head + script)
-            exe = "powershell.exe" if sys.platform == "win32" else "pwsh"
             cmd = f'{exe} -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{p}"'
-        else:
+        elif language == "cmd":
+            if not win:
+                return unavailable("Batch (cmd) scripts only run on Windows.")
+            # cmd has no safe quoting for every value, so params go in as environment variables
+            head = "@echo off\r\n"
+            fd, p = tempfile.mkstemp(suffix=".cmd", dir=self.deploy_dir())
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(head + script)
+            cmd = f'cmd.exe /d /c "{p}"'
+        elif language in ("shell", "sh"):
+            sh = shutil.which("sh")
+            if not sh:
+                return unavailable("Shell (sh) scripts need sh, which Windows doesn't have. Use PowerShell or cmd "
+                                   "for Windows PCs.")
             import shlex
             head = "".join(f"{k}={shlex.quote(str(v))}\n" for k, v in params.items())
             fd, p = tempfile.mkstemp(suffix=".sh", dir=self.deploy_dir())
-            with os.fdopen(fd, "w") as f:
-                f.write(head + script)
-            cmd = f'sh "{p}"'
+            with os.fdopen(fd, "w", newline="\n") as f:
+                f.write(head + script.replace("\r\n", "\n"))
+            cmd = f'"{sh}" "{p}"'
+        else:
+            return unavailable(f"Unknown script language: {language}")
         try:
-            return self.run_command(cmd, timeout=timeout)
+            env = {str(k): str(v) for k, v in params.items()} if language == "cmd" else None
+            return self.run_command(cmd, timeout=timeout, env=env)
         finally:
             try:
                 os.remove(p)
