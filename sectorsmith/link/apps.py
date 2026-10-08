@@ -170,7 +170,9 @@ class MigrationStore(core.Store):
     def __init__(self, base: core.Store, packages: list, deployments: list):
         super().__init__(base.root)
         self.base = base
-        self.data = {"packages": packages, "tasks": [], "clients": [], "deployments": deployments}
+        # only this migration's packages and deployments, not the whole library the base just loaded
+        self.data.clear()
+        self.data.update(packages=packages, tasks=[], clients=[], deployments=deployments)
 
     def save(self, kind=None):
         pass
