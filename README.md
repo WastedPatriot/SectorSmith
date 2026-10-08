@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/hero.png" alt="SectorSmith — the friendly disk toolkit for Windows techs" width="100%">
+<img src="docs/images/hero.png" alt="SectorSmith, the bench toolkit for MSP technicians" width="100%">
 
 <br>
 
@@ -8,12 +8,12 @@
 ![Windows 10 / 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Portable](https://img.shields.io/badge/single%20.exe-portable-52C98E)
-![Version](https://img.shields.io/badge/version-1.3.0-FF5C99)
+![Version](https://img.shields.io/badge/version-1.4.0-4F46E5)
 ![Link](https://img.shields.io/badge/Link-TLS%20encrypted-7656F5)
 [![License: Proprietary](https://img.shields.io/badge/license-proprietary-lightgrey)](LICENSE)
 
-**Recover deleted files · find lost partitions · securely wipe drives · test drive health · clone & image disks · move users to new PCs**
-<br>Pro-grade disk tools as calm, step-by-step tasks, with a small pixel-art helper sweeping along as they run.
+**The bench toolkit for MSP technicians.**
+<br>Recover files · find lost partitions · erase and certify drives · test drive health · image and clone · migrate users with their apps · deploy software
 
 [**Download**](#-download) · [**Quick start**](#-quick-start) · [**How-to guides**](#-how-to-guides) · [**Safety**](#-safety-rails) · [**FAQ**](#-faq) · [**Build from source**](#-build-from-source)
 
@@ -78,12 +78,24 @@ The appearance follows Windows or your own choice, and it's remembered. Drag and
 
 ---
 
+## 🆕 What's new in 1.4.0
+
+* **New look:** a menu grouped by job, a client and ticket bar on every job, Ctrl+K search, and an indigo theme. Mossbit has a Subtle mode (the default) and a Presentation mode for screen sharing.
+* **Deploy (preview):** drop an installer to build a package, deploy it to every PC, a client or one PC, and run maintenance with a check step before anything changes.
+* **Migrate user, now with apps:** start from an old disk or NVMe in a USB caddy (even with no drive letter), copy to a drive in one click, and reinstall the user's apps on the new PC.
+* **Erase and certify:** uses the drive's own Secure Erase or NVMe Sanitize when it can (NIST 800-88 Purge), and produces a branded A4 certificate with a QR code.
+* **Cancel that really stops:** every long job stops promptly and tells you what state it left things in.
+
 ## 📸 Tour
 
 <table>
 <tr>
-<td><img src="docs/images/home_light.png" alt="Home — light"><p align="center"><sub><b>Home</b> · light</sub></p></td>
-<td><img src="docs/images/home_dark.png" alt="Home — dark"><p align="center"><sub><b>Home</b> · dark</sub></p></td>
+<td><img src="docs/images/redesign/home_light.png" alt="Home, light"><p align="center"><sub><b>Home</b> · light</sub></p></td>
+<td><img src="docs/images/redesign/home_dark.png" alt="Home, dark"><p align="center"><sub><b>Home</b> · dark</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/images/redesign/drives_light.png" alt="Drives"><p align="center"><sub><b>Drives</b>: pick a drive, then the job</sub></p></td>
+<td><img src="docs/images/redesign/palette_light.png" alt="Command palette"><p align="center"><sub><b>Ctrl+K</b> to find any job</sub></p></td>
 </tr>
 <tr>
 <td><img src="docs/images/recover_results.png" alt="Deleted files found"><p align="center"><sub><b>Recover files</b> with original names and folders</sub></p></td>
@@ -103,7 +115,7 @@ The appearance follows Windows or your own choice, and it's remembered. Drag and
 
 ## 📦 Download
 
-**Easiest:** open the repo's **[Releases](../../releases)** page and download **`SectorSmith.exe`**. It's a single portable file — copy it to your toolkit USB stick and run it on any Windows 10/11 PC. It asks for administrator rights when it starts.
+**Easiest:** open the repo's **[Releases](../../releases)** page and download **`SectorSmith.exe`**. It's a single portable file, so copy it to your toolkit USB stick and run it on any Windows 10/11 PC. It asks for administrator rights when it starts.
 
 **Every commit** is also built automatically. Go to **Actions → Build & test → latest run → Artifacts → `SectorSmith-windows`**.
 
@@ -420,7 +432,11 @@ Every push runs [GitHub Actions](.github/workflows/build.yml):
 
 - [x] **Remote link:** pair machines with a copy-paste command, move users, and clone disks between them
 - [ ] Map network drives & printers for migrated users
-- [ ] Volume Shadow Copy for copying files that are open on the old PC
+- [x] Volume Shadow Copy for copying files that are open on the old PC
+- [x] Deploy: packages, deployments and maintenance runs on linked PCs (preview)
+- [ ] Package catalogue from winget and Chocolatey, onboarding and schedules
+- [ ] ScreenConnect connect button, Microsoft 365 and Active Directory
+- [ ] Server migration (shares, permissions, printers, tasks)
 - [ ] FAT/exFAT undelete with names
 - [ ] BitLocker unlock, ext4 write, LVM, RAID reconstruction
 - [x] ATA Secure Erase / NVMe Sanitize passthrough
