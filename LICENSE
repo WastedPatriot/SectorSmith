@@ -1,21 +1,68 @@
-MIT License
+SectorSmith End User Licence Agreement
 
-Copyright (c) 2026 WastedPatriot
+Copyright (c) 2026 WastedPatriot. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This licence applies to SectorSmith version 1.4.0 and later, including the
+source code in this repository and any compiled builds ("the Software").
+Versions released before 1.4.0 were published under the MIT License, and
+copies of those earlier versions remain under the MIT License.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Ownership
+   The Software is licensed, not sold. WastedPatriot owns all rights, title
+   and interest in the Software, including all intellectual property rights.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. Permitted use without a paid licence
+   You may view and read the source code in this repository, and run the
+   Software for up to 30 days solely to evaluate whether to buy a licence.
+   No other use is permitted without a licence agreed in writing with
+   WastedPatriot.
+
+3. Paid licences
+   Commercial use, including use by IT service providers on client systems,
+   requires a paid licence. The scope, number of technicians and term of a
+   paid licence are set out in the order or agreement under which it is
+   purchased.
+
+4. Restrictions
+   Unless a written agreement with WastedPatriot says otherwise, you may not:
+   (a) copy, modify, merge or create derivative works of the Software, except
+       as needed for the evaluation in section 2;
+   (b) distribute, sublicense, rent, lease, sell or host the Software for
+       others;
+   (c) remove or alter any copyright notice, licence notice or branding;
+   (d) bypass or disable any licensing or activation mechanism.
+
+5. Third-party components
+   The Software includes third-party open source components, which are
+   licensed under their own terms. See THIRD-PARTY-NOTICES.md. Nothing in this
+   licence limits your rights under those terms.
+
+6. Contributions
+   If you submit a contribution (for example a pull request or patch), you
+   grant WastedPatriot a perpetual, worldwide, royalty-free, irrevocable
+   licence to use, modify and distribute it as part of the Software under any
+   terms.
+
+7. No warranty
+   The Software reads and writes raw disks and can destroy data. It is
+   provided "as is", without warranty of any kind, express or implied,
+   including fitness for a particular purpose and non-infringement. You are
+   responsible for keeping backups and for checking that each operation is
+   correct before you run it.
+
+8. Limitation of liability
+   To the fullest extent permitted by law, WastedPatriot is not liable for
+   any loss of data, profits, business or goodwill, or any indirect or
+   consequential loss, arising from use of or inability to use the Software.
+   Nothing in this licence limits liability that cannot be limited by law.
+
+9. Termination
+   This licence ends automatically if you breach it. On termination you must
+   stop using the Software and delete all copies in your possession.
+
+10. Governing law
+    This licence is governed by the laws of England and Wales, and the courts
+    of England and Wales have exclusive jurisdiction.
+
+For licensing enquiries, contact WastedPatriot through
+https://github.com/WastedPatriot.
