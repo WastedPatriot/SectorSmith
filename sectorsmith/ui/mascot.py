@@ -1,5 +1,9 @@
-"""Mossbit — SectorSmith's pixel-art helper. Plays pre-rendered sprite sheets (see tools/make_sprites.py)
-in the sidebar, and sweeps across progress bars."""
+"""Mossbit, SectorSmith's pixel-art helper. Plays pre-rendered sprite sheets (see tools/make_sprites.py).
+
+How much of Mossbit shows depends on Settings > Personality (theme.effective_personality()):
+Full: companion dock with speech, particles on the progress bar. Subtle (default): sweeps the progress bar and
+appears on success and empty states, no speech. Off (and always in presentation mode): plain progress bar, outline
+icons instead. Mossbit never appears on certificates, reports or exports."""
 from __future__ import annotations
 
 import json
@@ -18,12 +22,12 @@ ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 LINES = {
     "hello": ["Hi! I'm Mossbit. What are we doing today?", "Ready to tidy up some drives!",
               "Pick a task and I'll grab my broom.", "Hello again! Which job is it today?"],
-    "pick": ["Which drive should we look at?", "Point me at a drive!", "Take your time — pick a drive."],
+    "pick": ["Which drive should we look at?", "Point me at a drive!", "Take your time, pick a drive."],
     "working": ["Sweep, sweep, sweep…", "Checking every sector for you.", "Working hard over here!",
                 "Almost there… probably!", "Tidying up, one sector at a time."],
     "found": ["Found them! Your files are safe now.", "Look what I dug up!", "Ta-da! Here's what I found."],
-    "none": ["Nothing turned up here. Want me to look deeper?", "All clear — nothing to find."],
-    "confirm": ["Just checking — this one can't be undone.", "Double-check that's the right drive!",
+    "none": ["Nothing turned up here. Want me to look deeper?", "All clear, nothing to find."],
+    "confirm": ["Just checking, this one can't be undone.", "Double-check that's the right drive!",
                 "Careful! This is permanent."],
     "wiped": ["All clean! Nothing left to find.", "Swept spotless!", "Squeaky clean. Nobody's reading that."],
     "healthy": ["This drive looks healthy!", "No bad sectors. Nice!"],
@@ -32,7 +36,7 @@ LINES = {
     "cancel": ["Okay, stopped!", "No problem, cancelled."],
     "done": ["All done!", "Finished! That was fun.", "Done and dusted!"],
     "drop": ["Ooh, what did you bring me?", "Got it! Let's see…"],
-    "guide": ["Here's how everything works.", "Pick a topic — I'll walk you through it."],
+    "guide": ["Here's how everything works.", "Pick a topic and I'll walk you through it."],
 }
 
 MOOD_ANIM = {"idle": "idle", "working": "sweep", "happy": "happy", "sad": "sad", "warn": "warn"}
@@ -59,7 +63,11 @@ class Sprites:
         fps = meta["anims"][anim]["fps"]
         w, h = meta["w"] * scale, meta["h"] * scale
         suffix = "_L" if flip else ""
-        strip = tk.PhotoImage(master=widget, file=os.path.join(ASSETS, f"mossbit_{anim}_x{scale}{suffix}.png"))
+        if scale in (3, 4, 5):
+            strip = tk.PhotoImage(master=widget, file=os.path.join(ASSETS, f"mossbit_{anim}_x{scale}{suffix}.png"))
+        else:  # x1 and x2: sample every 4th or 2nd pixel of the x4 strip
+            big = tk.PhotoImage(master=widget, file=os.path.join(ASSETS, f"mossbit_{anim}_x4{suffix}.png"))
+            strip = big.subsample(4 // scale)
         frames = []
         for i in range(n):
             fr = tk.PhotoImage(master=widget, width=w, height=h)
@@ -71,11 +79,11 @@ class Sprites:
 
 class SpeechBubble(ctk.CTkFrame):
     def __init__(self, master, **kw):
-        super().__init__(master, corner_radius=18, fg_color=theme.PALETTE["card"],
+        super().__init__(master, corner_radius=12, fg_color=theme.PALETTE["surface"],
                          border_width=1, border_color=theme.PALETTE["border"], **kw)
-        self.lbl = ctk.CTkLabel(self, text="", font=theme.font(14, "bold"), wraplength=210, justify="left",
+        self.lbl = ctk.CTkLabel(self, text="", font=theme.font(12), wraplength=180, justify="left",
                                 text_color=theme.PALETTE["text"], anchor="w")
-        self.lbl.pack(padx=16, pady=14, fill="x")
+        self.lbl.pack(padx=12, pady=10, fill="x")
         self._job = None
 
     def say(self, text: str):
@@ -101,7 +109,7 @@ class _Pixels:
         self.particles: list[list] = []
 
     def burst(self, cx, cy, n=36):
-        cols = [theme.c("accent"), theme.c("violet"), "#FFDE60", "#52C98E", "#7CCCFF", "#ffffff"]
+        cols = [theme.c("accent"), "#AAE1B8", "#FFDE60", "#52C98E", "#7CCCFF", "#ffffff"]
         for _ in range(n):
             a = random.uniform(0, math.tau)
             v = random.uniform(2.5, 7)
@@ -124,12 +132,15 @@ class _Pixels:
 
 
 class Mascot(tk.Canvas, _Pixels):
-    """Sidebar Mossbit. Wanders around on its own, sweeps back and forth while working,
+    """Companion Mossbit (Full personality). Wanders around its dock, sweeps back and forth while working,
     hops when something finishes, and reacts to clicks."""
 
     SCALE = 4
 
-    def __init__(self, master, bubble: SpeechBubble | None = None, width=280):
+    def __init__(self, master, bubble: SpeechBubble | None = None, width=280, scale=None, bg="subnav"):
+        if scale:
+            self.SCALE = scale
+        self.bg_token = bg
         frames, _fps, w, h = Sprites.get(master, "idle", self.SCALE)
         super().__init__(master, width=width, height=h, highlightthickness=0, bd=0)
         self.W, self.H, self.fw = width, h, w
@@ -139,6 +150,7 @@ class Mascot(tk.Canvas, _Pixels):
         self.mood = "idle"
         self.mood_t = time.monotonic()
         self.progress = 0.0
+        self.hidden = False  # set while a destructive confirmation is on screen
         self.facing = 1  # 1 = right, -1 = left
         self.x = (width - w) / 2 + 20
         self.state = "rest"
@@ -146,8 +158,8 @@ class Mascot(tk.Canvas, _Pixels):
         self.target = self.x
         self.last = time.monotonic()
         self._init_pixels(self.SCALE)
-        theme.on_theme_change(lambda: self.configure(background=theme.c("panel")))
-        self.configure(background=theme.c("panel"))
+        theme.on_theme_change(lambda: self.configure(background=theme.c(self.bg_token)))
+        self.configure(background=theme.c(self.bg_token))
         self.bind("<Button-1>", lambda _e: self.set_mood("happy", "done"))
         self._tick()
 
@@ -238,22 +250,30 @@ class Mascot(tk.Canvas, _Pixels):
         frames, fps, _w, _h = Sprites.get(self, anim, self.SCALE, flip=self.facing == -1)
         i = int(mt * fps) % len(frames) if anim != "walk" else int(time.monotonic() * fps) % len(frames)
         self.delete("all")
+        if self.hidden:
+            return
         self.create_image(round(self.x), 0, image=frames[i], anchor="nw")
         self._draw_particles()
 
 
 class SweepTrack(tk.Canvas, _Pixels):
-    """Pixel-style progress bar: Mossbit sweeps left to right, the % floats above, dust ahead is cleared."""
+    """Progress bar. Full: Mossbit sweeps along it with sparkles and dust. Subtle: a smaller Mossbit sweeps, no
+    particles. Off: a plain bar with the percentage."""
 
-    SCALE = 3
     BROOM_X = 46  # broom tip x in sprite pixels (see make_sprites)
     FEET_Y = 42
 
-    def __init__(self, master, width=720):
-        frames, _fps, sw, sh = Sprites.get(master, "sweep", self.SCALE)
-        self.sw, self.sh = sw, sh
-        self.H = sh + 70
+    def __init__(self, master, width=720, bg="bg"):
+        self.mode = theme.effective_personality()
+        self.SCALE = {"Full": 3, "Subtle": 2}.get(self.mode, 0)
+        if self.SCALE:
+            _frames, _fps, sw, sh = Sprites.get(master, "sweep", self.SCALE)
+            self.sw, self.sh = sw, sh
+            self.H = sh + (70 if self.mode == "Full" else 30)
+        else:
+            self.H = 44
         super().__init__(master, width=width, height=self.H, highlightthickness=0, bd=0)
+        self.bg_token = bg
         self.Wd = width
         self.value = 0.0
         self.target = 0.0
@@ -261,9 +281,9 @@ class SweepTrack(tk.Canvas, _Pixels):
         self.t0 = time.monotonic()
         rnd = random.Random(11)
         self.dust = [(rnd.random(), rnd.randint(0, 3), rnd.choice((1, 2))) for _ in range(70)]
-        self._init_pixels(self.SCALE)
-        theme.on_theme_change(lambda: self.configure(background=theme.c("bg")))
-        self.configure(background=theme.c("bg"))
+        self._init_pixels(max(1, self.SCALE))
+        theme.on_theme_change(lambda: self.configure(background=theme.c(self.bg_token)))
+        self.configure(background=theme.c(self.bg_token))
         self.bind("<Configure>", lambda e: setattr(self, "Wd", e.width))
         self._tick()
 
@@ -279,15 +299,19 @@ class SweepTrack(tk.Canvas, _Pixels):
         self.after(40, self._tick)
 
     def _draw(self):
-        t = time.monotonic() - self.t0
         self.value += (self.target - self.value) * .12
         self.delete("all")
+        if not self.SCALE:
+            self._draw_plain()
+            return
+        t = time.monotonic() - self.t0
+        full = self.mode == "Full"
         g = self.SCALE * 2  # bar block size
         x0 = 30
         x1 = self.Wd - 30
         x1 = x0 + ((x1 - x0) // g) * g
-        bar_top = self.H - 30
-        bar_h = g * 3
+        bar_top = self.H - (30 if full else 14)
+        bar_h = g * (3 if full else 2)
         px = x0 + (x1 - x0) * self.value
         dark = theme.lerp_color(theme.c("track"), "#000000", .25)
 
@@ -296,27 +320,28 @@ class SweepTrack(tk.Canvas, _Pixels):
         self.create_rectangle(x0, bar_top, x1, bar_top + bar_h, fill=theme.c("track"), outline="")
         # swept blocks with gradient + shine row
         nblocks = int((px - x0) // g)
-        a, b = "#52C98E", theme.c("violet")
+        a, b = "#52C98E", theme.c("accent")
         for k in range(nblocks):
             bx = x0 + k * g
             col = theme.lerp_color(a, b, k * g / max(1, x1 - x0))
             self.create_rectangle(bx, bar_top, bx + g - 1, bar_top + bar_h, fill=col, outline="")
             self.create_rectangle(bx, bar_top, bx + g - 1, bar_top + g * .5,
                                   fill=theme.lerp_color(col, "#ffffff", .35), outline="")
-        sparkle_k = int(t * 14) % max(1, nblocks) if nblocks else -1
-        if sparkle_k >= 0:
-            sx = x0 + sparkle_k * g
-            self.create_rectangle(sx + g * .25, bar_top + g, sx + g * .75, bar_top + g * 1.5, fill="#ffffff",
-                                  outline="")
-        # dust ahead of the broom
-        muted = theme.c("muted")
-        for fx, row, size in self.dust:
-            dx = x0 + (x1 - x0) * fx
-            if dx > px + 18:
-                bob = (math.sin(t * 2 + fx * 20) > .6) * self.SCALE
-                y = bar_top - 6 - row * self.SCALE * 2 - bob
-                s = self.SCALE * size
-                self.create_rectangle(dx, y - s, dx + s, y, fill=muted, outline="")
+        if full:
+            sparkle_k = int(t * 14) % max(1, nblocks) if nblocks else -1
+            if sparkle_k >= 0:
+                sx = x0 + sparkle_k * g
+                self.create_rectangle(sx + g * .25, bar_top + g, sx + g * .75, bar_top + g * 1.5, fill="#ffffff",
+                                      outline="")
+            # dust ahead of the broom
+            muted = theme.c("muted")
+            for fx, row, size in self.dust:
+                dx = x0 + (x1 - x0) * fx
+                if dx > px + 18:
+                    bob = (math.sin(t * 2 + fx * 20) > .6) * self.SCALE
+                    y = bar_top - 6 - row * self.SCALE * 2 - bob
+                    s = self.SCALE * size
+                    self.create_rectangle(dx, y - s, dx + s, y, fill=muted, outline="")
 
         # Mossbit
         frames, fps, _w, _h = Sprites.get(self, "sweep", self.SCALE)
@@ -325,16 +350,94 @@ class SweepTrack(tk.Canvas, _Pixels):
         left = max(-6 * self.SCALE, left)
         top = bar_top - 3 - self.FEET_Y * self.SCALE
         self.create_image(left, top, image=fr, anchor="nw")
-        self._draw_particles(.2)
+        if full:
+            self._draw_particles(.2)
+            # % badge (pixel style) above the head
+            txt = self.label or f"{self.value * 100:.0f}%"
+            bx = left + 22 * self.SCALE
+            by = top - 4
+            w = 18 + 10 * len(txt)
+            acc = theme.c("accent")
+            edge = theme.lerp_color(acc, "#000000", .3)
+            self.create_rectangle(bx - w / 2 - 3, by - 30, bx + w / 2 + 3, by + 3, fill=edge, outline="")
+            self.create_rectangle(bx - w / 2, by - 27, bx + w / 2, by, fill=acc, outline="")
+            self.create_rectangle(bx - 4, by, bx + 4, by + 6, fill=edge, outline="")
+            self.create_text(bx, by - 13, text=txt, fill=theme.c("on_accent"), font=(theme.family(), 13, "bold"))
+        else:
+            txt = self.label or f"{self.value * 100:.0f}%"
+            self.create_text(x1 + 3, top + 10, text=txt, anchor="ne", fill=theme.c("text"),
+                             font=(theme.family(), 13, "bold"))
 
-        # % badge (pixel style) above the head
+    def _draw_plain(self):
+        x0, x1 = 30, self.Wd - 30
+        y, h = self.H - 14, 8
         txt = self.label or f"{self.value * 100:.0f}%"
-        bx = left + 22 * self.SCALE
-        by = top - 4
-        w = 18 + 10 * len(txt)
-        acc = theme.c("accent")
-        edge = theme.lerp_color(acc, "#000000", .3)
-        self.create_rectangle(bx - w / 2 - 3, by - 30, bx + w / 2 + 3, by + 3, fill=edge, outline="")
-        self.create_rectangle(bx - w / 2, by - 27, bx + w / 2, by, fill=acc, outline="")
-        self.create_rectangle(bx - 4, by, bx + 4, by + 6, fill=edge, outline="")
-        self.create_text(bx, by - 13, text=txt, fill="#ffffff", font=(theme.family(), 13, "bold"))
+        self.create_text(x1, y - 10, text=txt, anchor="se", fill=theme.c("text"), font=(theme.family(), 13, "bold"))
+        from .icons import rounded_rect
+        rounded_rect(self, x0, y, x1, y + h, h / 2, fill=theme.c("track"), outline="")
+        if self.value > .002:
+            rounded_rect(self, x0, y, max(x0 + h, x0 + (x1 - x0) * self.value), y + h, h / 2, fill=theme.c("accent"),
+                         outline="")
+
+
+class MossbitView(tk.Canvas):
+    """A Mossbit for empty states, success screens and the welcome tour. Plays one animation in place."""
+
+    def __init__(self, master, anim="idle", scale=1, bg="surface", loop=True):
+        frames, fps, w, h = Sprites.get(master, anim, scale)
+        super().__init__(master, width=w, height=h, highlightthickness=0, bd=0)
+        self.frames, self.fps, self.loop, self.bg_token = frames, fps, loop, bg
+        self.t0 = time.monotonic()
+        theme.on_theme_change(lambda: self.configure(background=theme.c(self.bg_token)))
+        self.configure(background=theme.c(self.bg_token))
+        self._tick()
+
+    def _tick(self):
+        try:
+            i = int((time.monotonic() - self.t0) * self.fps)
+            i = i % len(self.frames) if self.loop else min(i, len(self.frames) - 1)
+            self.delete("all")
+            self.create_image(0, 0, image=self.frames[i], anchor="nw")
+        except tk.TclError:
+            return
+        if self.loop or i < len(self.frames) - 1:
+            self.after(60, self._tick)
+
+
+class MascotHub:
+    """app.mascot. Screens call set_mood() and say() without caring whether Mossbit is on screen; the hub forwards
+    to whichever companions exist and only lets Mossbit talk in the Full personality."""
+
+    def __init__(self):
+        self.views: list[Mascot] = []
+        self.mood = "idle"
+        self.progress = 0.0
+
+    def attach(self, view: Mascot):
+        self.views.append(view)
+        view.set_mood(self.mood)
+
+    def _live(self):
+        self.views = [v for v in self.views if _exists(v)]
+        return self.views
+
+    def set_mood(self, mood: str, line_key: str | None = None, text: str | None = None):
+        self.mood = mood
+        talk = theme.effective_personality() == "Full" and mood != "warn"
+        for v in self._live():
+            # "warn" is the destructive confirmation step: Mossbit steps out of view there
+            v.hidden = mood == "warn"
+            v.set_mood(mood, line_key if talk else None, text if talk else None)
+
+    def say(self, line_key: str | None = None, text: str | None = None):
+        if theme.effective_personality() != "Full":
+            return
+        for v in self._live():
+            v.say(line_key, text)
+
+
+def _exists(w) -> bool:
+    try:
+        return bool(w.winfo_exists())
+    except tk.TclError:
+        return False

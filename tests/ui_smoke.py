@@ -1,4 +1,5 @@
-"""Headless run-through of the new UI: every wizard, both themes, with screenshots.
+"""Headless run-through of the UI: every wizard, every rail route, the command palette, presentation mode and the
+Mossbit personalities, in both themes, with screenshots.
 
 Run: xvfb-run -s "-screen 0 1400x900x24" python3.12 tests/ui_smoke.py <workdir> <shots_dir>
 """
@@ -191,9 +192,9 @@ pick(img, 1)
 press("Next")
 shot("wipe_strength")
 press("Next")
-type_confirm("WIPE PARTITION 1")
+type_confirm("ERASE PARTITION 1")
 shot("wipe_confirm")
-press("Wipe it")
+press("Erase and certify")
 pump(0.8)
 shot("wipe_running")
 wait()
@@ -297,6 +298,106 @@ pump(0.5)
 app.open_advanced()
 pump(1.0)
 shot("advanced_dark")
+
+# --- new shell: rail routes, palette, context, presentation, personality ----------------------------------
+from sectorsmith.ui import mascot as Mo, nav, widgets as Wd, workspace as WS  # noqa: E402
+
+for mode in ("light", "dark"):
+    theme.set_mode(mode)
+    app.mode.set(mode.capitalize())
+    for cat in nav.CATEGORIES + [nav.SETTINGS]:
+        app.open_category(cat.key)
+        pump(0.6)
+        assert app.rail.items[cat.key].selected, cat.key
+        first = nav.first_item(cat)
+        if first is not None:
+            assert type(app.screen) is nav.resolve(first.target), (cat.key, type(app.screen))
+            assert app.subnav.winfo_manager(), f"sub-nav hidden on {cat.key}"
+        else:
+            assert type(app.screen) is S.Home and not app.subnav.winfo_manager()
+        shot(f"route_{cat.key}_{mode}")
+
+
+def walk(w):
+    yield w
+    for c in w.winfo_children():
+        yield from walk(c)
+
+
+# no default grey CustomTkinter scrollbars anywhere
+for key in ("drives", "settings"):
+    app.open_category(key)
+    pump(0.6)
+    bars = [w for w in walk(app) if isinstance(w, M.ctk.CTkScrollbar)]
+    assert all(tuple(b._button_color) == tuple(theme.PALETTE["border_strong"]) for b in bars), key
+
+# ticket and client are stamped on the next job
+app.set_ticket("48213")
+app.context["client"] = "Acme Legal"
+app.bar.update_context()
+assert app.bar.ticket.lbl.cget("text") == "Ticket #48213"
+app.go(S.HealthWizard)
+pump(0.6)
+pick(img)
+press("Next")
+wait()
+job = app.jobs[-1]
+assert (job["task"], job["result"], job["client"], job["ticket"]) == ("Health check", "Done", "Acme Legal", "48213"), job
+
+# Drives table hands the selected drive to the wizard
+app.open_category("drives")
+pump(1.0)
+table = [w for w in walk(app.screen) if isinstance(w, Wd.DataTable)][0]
+iid = next(i for i, d in table.rows.items() if d.path == img)
+table.tree.selection_set(iid)
+pump(0.3)
+app.screen._task(S.HealthWizard, app.screen.selected)
+pump(0.6)
+assert app.screen.target and app.screen.target["dev"].path == img
+
+# command palette: fuzzy search opens the wizard, '#' sets a ticket
+app.home()
+pump(0.5)
+app.open_palette()
+pump(0.4)
+pal = app._smith_overlays[-1]
+pal.var.set("erase cert")
+pump(0.3)
+shot("palette")
+assert pal.shown and pal.shown[0].label == "Erase and certify", [e.label for e in pal.shown]
+pal._run()
+pump(0.6)
+assert type(app.screen) is S.WipeWizard
+app.open_palette()
+pump(0.3)
+app._smith_overlays[-1].var.set("#777")
+pump(0.2)
+app._smith_overlays[-1]._run()
+assert app.context["ticket"] == "777"
+
+# presentation mode: Mossbit off, serials masked, chip shown; personality Off gives a plain progress bar
+app.home()
+pump(0.4)
+app.set_presentation(True)
+pump(0.6)
+assert theme.effective_personality() == "Off" and app.bar.present.winfo_ismapped()
+assert theme.mask("Z9A1K2SERIAL") == "\u2022" * 8 + "RIAL"
+shot("home_presenting")
+app.set_presentation(False)
+assert theme.mask("Z9A1K2") == "Z9A1K2"
+for pers, scale in (("Off", 0), ("Subtle", 2), ("Full", 3)):
+    app.set_personality(pers)
+    scr = app.go(S.WipeWizard)
+    pump(0.4)
+    _, panel = scr.progress("Erasing", "personality check")
+    assert panel.ring.SCALE == scale, (pers, panel.ring.SCALE)
+    has_companion = any(isinstance(w, Mo.Mascot) for w in walk(app.subnav))
+    assert has_companion == (pers == "Full"), pers
+app.set_personality("Subtle")
+app.open_category("jobs")
+pump(0.6)
+assert isinstance(app.screen, WS.JobsScreen)
+shot("jobs")
 
 print("toast errors:", errors)
 print("ALL UI CHECKS PASSED" if not errors else "UI ERRORS")

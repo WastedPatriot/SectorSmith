@@ -11,16 +11,20 @@ import customtkinter as ctk
 
 from .. import carver, ntfs, partitions, partscan, surface, wipe
 from ..report import wipe_certificate
-from ..util import get_logger, human_size, human_time
+from ..util import get_logger, human_size, human_time, is_admin
 from . import theme
-from .widgets import DrivePicker, DropZone, IconBadge, OptionCard, Pill, ProgressPanel, TaskCard, ghost_button, \
-    primary_button, selected_value
+from .shell import machine_status, technician
+from .widgets import AutoScroll, Card, DrivePicker, DropZone, EmptyState, Icon, IconBadge, OptionCard, Pill, \
+    Popover, \
+    ProgressPanel, QuickAction, StatusPill, StatusTile, TypedConfirm, caption, divider, ghost_button, \
+    primary_button, secondary_button, segmented, selected_value
 
 log = get_logger()
 P = theme.PALETTE
+PAD = theme.PAGE_PAD
 
 STRENGTHS = [
-    ("Quick", "Zero fill (1 pass)", "One pass of zeros. Fast — fine when the drive stays in the business."),
+    ("Quick", "Zero fill (1 pass)", "One pass of zeros. Fast, fine when the drive stays in the business."),
     ("Recommended", "NIST 800-88 Clear (1 pass + verify)", "The modern standard, with read-back verification."),
     ("Thorough", "DoD 5220.22-M (3 pass + verify)", "Three passes plus verification. Takes about 4x longer."),
 ]
@@ -43,9 +47,10 @@ def category(name: str) -> str:
     return "Other"
 
 
-def greeting():
+def greeting(who=None):
     h = _dt.datetime.now().hour
-    who = (os.environ.get("USERNAME") or os.environ.get("USER") or "").split(".")[0].capitalize()
+    who = (who if who is not None else technician()).replace(".", " ").split()
+    who = who[0][:1].upper() + who[0][1:] if who else ""
     part = "Good morning" if h < 12 else "Good afternoon" if h < 18 else "Good evening"
     return f"{part}{', ' + who if who and who.lower() not in ('root', 'admin', 'administrator') else ''}"
 
@@ -53,45 +58,45 @@ def greeting():
 # ---------------------------------------------------------------------------
 class Screen(ctk.CTkFrame):
     guide_topic = None
+    refreshable = False  # rebuilt in place when the client, personality or presentation mode changes
 
     def __init__(self, master, app, title="", subtitle="", steps=None, show_back=True, badge=None):
         super().__init__(master, fg_color=P["bg"], corner_radius=0)
         self.app = app
         self.steps = steps or []
         head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(fill="x", padx=44, pady=(30, 0))
-        if show_back:
-            nav = ctk.CTkFrame(head, fg_color="transparent")
-            nav.pack(fill="x", pady=(0, 10))
-            ctk.CTkButton(nav, text="←  Home", width=96, height=32, corner_radius=16, fg_color="transparent",
-                          hover_color=P["card_hover"], text_color=P["muted"], font=theme.font(13, "bold"),
-                          command=self.go_home).pack(side="left")
-            if self.guide_topic:
-                ctk.CTkButton(nav, text="?  How this works", width=150, height=32, corner_radius=16,
-                              fg_color=P["violet_soft"], hover_color=P["card_hover"], text_color=P["violet"],
-                              font=theme.font(12, "bold"), command=self._open_guide).pack(side="right")
-        row = ctk.CTkFrame(head, fg_color="transparent")
-        row.pack(fill="x")
-        titles = ctk.CTkFrame(row, fg_color="transparent")
+        head.pack(fill="x", padx=PAD, pady=(22, 0))
+        self.actions = ctk.CTkFrame(head, fg_color="transparent", width=1, height=1)  # page buttons, top right
+        self.actions.pack(side="right", anchor="n", pady=(4, 0))
+        self.stepper = ctk.CTkFrame(head, fg_color="transparent", height=1, width=1)
+        self.stepper.pack(side="right", anchor="n", pady=8)
+        titles = ctk.CTkFrame(head, fg_color="transparent")
         titles.pack(side="left", fill="x", expand=True, anchor="n")
         trow = ctk.CTkFrame(titles, fg_color="transparent")
         trow.pack(anchor="w")
-        self.title_lbl = ctk.CTkLabel(trow, text=title, font=theme.font(30, "bold"), text_color=P["text"],
-                                      anchor="w")
+        self.title_lbl = ctk.CTkLabel(trow, text=title, font=theme.font_style("h1"), text_color=P["text"],
+                                      anchor="w", height=30)
         self.title_lbl.pack(side="left")
         if badge:  # e.g. PREVIEW on features that aren't finished yet
-            Pill(trow, badge, "warn").pack(side="left", padx=(12, 0), pady=(6, 0))
-        self.sub_lbl = ctk.CTkLabel(titles, text=subtitle, font=theme.font(14), text_color=P["muted"], anchor="w",
-                                    justify="left", wraplength=640)
+            Pill(trow, badge, "warn").pack(side="left", padx=(12, 0), pady=(2, 0))
+        self.sub_lbl = ctk.CTkLabel(titles, text=subtitle, font=theme.font_style("body"), text_color=P["muted"],
+                                    anchor="w", justify="left", wraplength=640, height=20)
         self.sub_lbl.pack(anchor="w", pady=(2, 0))
-        self.stepper = ctk.CTkFrame(row, fg_color="transparent", height=1, width=1)
-        self.stepper.pack(side="right", anchor="n", pady=8)
+        titles.bind("<Configure>", lambda e: self.sub_lbl.configure(wraplength=max(240, min(720, e.width - 16))),
+                    add="+")
         self.holder = ctk.CTkFrame(self, fg_color="transparent")
-        self.holder.pack(fill="both", expand=True, padx=44, pady=(18, 0))
-        self.footer = ctk.CTkFrame(self, fg_color="transparent", height=76)
-        self.footer.pack(fill="x", padx=44, pady=(8, 24))
+        self.holder.pack(fill="both", expand=True, padx=PAD, pady=(18, 0))
+        if self.steps:
+            divider(self).pack(fill="x", pady=(8, 0))
+        self.footer = ctk.CTkFrame(self, fg_color="transparent", height=60)
+        self.footer.pack(fill="x", padx=PAD, pady=(12, 16))
         self.body = None
         self._draw_steps(0)
+
+    def header_action(self, text, command, primary=False, width=0):
+        b = (primary_button if primary else secondary_button)(self.actions, text, command, width=width or 140)
+        b.pack(side="right", padx=(10, 0))
+        return b
 
     def _open_guide(self):
         if self.app.job is not None:
@@ -124,11 +129,11 @@ class Screen(ctk.CTkFrame):
             w.destroy()
         for i, name in enumerate(self.steps):
             done, now = i < cur, i == cur
-            fg = P["success"] if done else P["accent"] if now else P["track"]
-            ctk.CTkLabel(self.stepper, text="✓" if done else str(i + 1), width=26, height=26, corner_radius=13,
-                         fg_color=fg, text_color="#ffffff" if (done or now) else P["muted"],
-                         font=theme.font(12, "bold")).pack(side="left", padx=(8 if i else 0, 4))
-            ctk.CTkLabel(self.stepper, text=name, font=theme.font(12, "bold" if now else "normal"),
+            fill = P["success"] if done else P["accent"] if now else P["neutral_soft"]
+            ctk.CTkLabel(self.stepper, text="✓" if done else str(i + 1), width=24, height=24, corner_radius=12,
+                         fg_color=fill, text_color=P["on_accent"] if (done or now) else P["muted"],
+                         font=theme.font(11, "bold")).pack(side="left", padx=(14 if i else 0, 6))
+            ctk.CTkLabel(self.stepper, text=name, font=theme.font_style("body_strong" if now else "body"),
                          text_color=P["text"] if now else P["muted"]).pack(side="left")
 
     def step(self, i, title=None, subtitle=None):
@@ -142,35 +147,39 @@ class Screen(ctk.CTkFrame):
     def new_body(self):
         old = self.body
         body = ctk.CTkFrame(self.holder, fg_color="transparent")
-        body.place(relx=0, rely=0, relwidth=1, relheight=1, y=26)
         self.body = body
         if old is not None:
             old.destroy()
+        for w in self.footer.winfo_children():
+            w.destroy()
+        if theme.reduced_motion():
+            body.place(relx=0, rely=0, relwidth=1, relheight=1)
+            return body
+        body.place(relx=0, rely=0, relwidth=1, relheight=1, y=16)
         start = time.monotonic()
 
         def rise():
-            t = min(1.0, (time.monotonic() - start) / .25)
+            t = min(1.0, (time.monotonic() - start) / .22)
             try:
-                body.place_configure(y=26 * (1 - t) ** 3)
+                body.place_configure(y=16 * (1 - t) ** 3)
             except tk.TclError:
                 return
             if t < 1:
                 self.after(12, rise)
         rise()
-        for w in self.footer.winfo_children():
-            w.destroy()
         return body
 
     def buttons(self, primary=None, secondary=None, extra=None):
         """primary/secondary: (text, command). Returns primary button."""
         pb = None
         if primary:
-            pb = primary_button(self.footer, primary[0], primary[1], width=210)
+            pb = primary_button(self.footer, primary[0], primary[1], width=180, height=40)
             pb.pack(side="right")
         if secondary:
-            ghost_button(self.footer, secondary[0], secondary[1], width=140).pack(side="right", padx=10)
+            secondary_button(self.footer, secondary[0], secondary[1], width=130, height=40).pack(side="right",
+                                                                                                   padx=10)
         if extra:
-            ghost_button(self.footer, extra[0], extra[1], width=180).pack(side="left")
+            secondary_button(self.footer, extra[0], extra[1], width=150, height=40).pack(side="left")
         return pb
 
     def progress(self, title, subtitle):
@@ -182,34 +191,62 @@ class Screen(ctk.CTkFrame):
         return body, panel
 
     def note(self, parent, text, tone="muted"):
-        return ctk.CTkLabel(parent, text=text, font=theme.font(12), text_color=P[tone], wraplength=780,
+        return ctk.CTkLabel(parent, text=text, font=theme.font_style("small"), text_color=P[tone], wraplength=780,
                             justify="left", anchor="w")
 
     def result_card(self, parent, icon, tone, headline, lines):
-        card = ctk.CTkFrame(parent, corner_radius=24, fg_color=P["card"])
+        card = ctk.CTkFrame(parent, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
         card.pack(fill="x", pady=(6, 10))
-        b = IconBadge(card, icon, 64, tone)
-        b.set_bg(theme.c("card"))
-        b.grid(row=0, column=0, rowspan=2, padx=24, pady=24, sticky="n")
-        ctk.CTkLabel(card, text=headline, font=theme.font(22, "bold"), text_color=P["text"], anchor="w").grid(
-            row=0, column=1, sticky="w", pady=(26, 2))
-        ctk.CTkLabel(card, text="\n".join(lines), font=theme.font(13), text_color=P["muted"], justify="left",
-                     anchor="w").grid(row=1, column=1, sticky="w", pady=(0, 24))
+        if icon == "check" and tone == "success" and theme.effective_personality() != "Off":
+            from .mascot import MossbitView  # Subtle and Full: Mossbit's happy hop instead of a check icon
+            b = MossbitView(card, "happy", 1, bg="surface", loop=False)
+        else:
+            b = IconBadge(card, icon, 44, tone)
+        b.grid(row=0, column=0, rowspan=2, padx=20, pady=20, sticky="n")
+        ctk.CTkLabel(card, text=headline, font=theme.font(18, "bold"), text_color=P["text"], anchor="w").grid(
+            row=0, column=1, sticky="w", pady=(20, 2), padx=(0, 20))
+        ctk.CTkLabel(card, text="\n".join(lines), font=theme.font_style("body"), text_color=P["text_2"],
+                     justify="left", anchor="w", wraplength=760).grid(row=1, column=1, sticky="w", pady=(0, 20),
+                                                                      padx=(0, 20))
         card.grid_columnconfigure(1, weight=1)
         return card
 
+    def summary(self, parent, icon, tone, title, sub, fields, note=None):
+        """Confirmation summary: icon, title, one line, then label and value pairs in two columns."""
+        card = ctk.CTkFrame(parent, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        card.pack(fill="x", pady=(4, 12))
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(18, 10))
+        IconBadge(top, icon, 40, tone).pack(side="left", padx=(0, 14))
+        t = ctk.CTkFrame(top, fg_color="transparent")
+        t.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(t, text=title, font=theme.font_style("h3"), text_color=P["text"], anchor="w").pack(fill="x")
+        ctk.CTkLabel(t, text=sub, font=theme.font_style("small"), text_color=P["muted"], anchor="w").pack(fill="x")
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=20, pady=(0, 14))
+        for i, (k, v) in enumerate(fields):
+            r, c = divmod(i, 2)
+            ctk.CTkLabel(grid, text=k, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                         width=110).grid(row=r, column=c * 2, sticky="w", pady=4)
+            mono = k in ("Serial", "Ticket", "Hash")
+            ctk.CTkLabel(grid, text=v, font=theme.mono(12) if mono else theme.font_style("body"),
+                         text_color=P["text"], anchor="w").grid(row=r, column=c * 2 + 1, sticky="w", pady=4,
+                                                                padx=(0, 24))
+        grid.grid_columnconfigure((1, 3), weight=1)
+        if note:
+            divider(card).pack(fill="x")
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=10)
+            Icon(row, "warn", 16, "warn", "surface").pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text=note, font=theme.font_style("small"), text_color=P["text_2"], anchor="w",
+                         justify="left", wraplength=720).pack(side="left", fill="x")
+        return card
+
     def confirm_box(self, parent, phrase, on_change):
-        box = ctk.CTkFrame(parent, corner_radius=20, fg_color=P["danger_soft"])
+        box = TypedConfirm(parent, phrase, on_change)
         box.pack(fill="x", pady=10)
-        ctk.CTkLabel(box, text=f"Type  {phrase}  to confirm", font=theme.font(15, "bold"),
-                     text_color=P["danger"]).pack(anchor="w", padx=22, pady=(18, 6))
-        var = tk.StringVar()
-        e = ctk.CTkEntry(box, textvariable=var, height=46, corner_radius=14, font=theme.font(16, "bold"),
-                         placeholder_text=phrase, border_color=P["danger"], fg_color=P["card"])
-        e.pack(fill="x", padx=22, pady=(0, 20))
-        var.trace_add("write", lambda *_: on_change(var.get().strip().upper() == phrase.upper()))
-        self.after(100, e.focus_set)
-        return var
+        self.after(100, box.entry.focus_set)
+        return box.var
 
     def done_actions(self, folder=None):
         self.buttons(primary=("Back to home", self.app.home),
@@ -217,51 +254,273 @@ class Screen(ctk.CTkFrame):
 
 
 # ---------------------------------------------------------------------------
+def context_line(app) -> str:
+    now = _dt.datetime.now()
+    parts = [f"{now:%A} {now.day} {now:%B}", app.context.get("client") or "All clients"]
+    if app.context.get("ticket"):
+        parts.append(f"ticket #{app.context['ticket']}")
+    n = len(app.machines()) - 1
+    parts.append(f"{n} machine{'s' if n != 1 else ''} linked")
+    return "  ·  ".join(parts)
+
+
+START_GROUPS = [
+    ("Recover", [("recover", "Recover files", "recover", "files"), ("partition", "Lost partitions", "recover",
+                                                                    "partitions")]),
+    ("Erase", [("wipe", "Erase and certify", "erase", "erase"), ("shred", "Shred files", "erase", "shred")]),
+    ("Drives", [("health", "Health check", "drives", "health"), ("clone", "Image and clone", "drives", "clone")]),
+    ("Machines", [("migrate", "Migrate user", "machines", "migrate"),
+                  ("netclone", "Network clone", "machines", "netclone")]),
+]
+TONE = {"Recover": "accent", "Erase": "danger", "Drives": "accent", "Machines": "teal"}
+
+
 class Home(Screen):
+    """Workspace overview: status tiles, recent jobs, grouped job starts, what's running, linked machines."""
+
+    refreshable = True
+
     def __init__(self, master, app):
-        super().__init__(master, app, title=greeting(), subtitle="What are we doing today?", show_back=False)
+        super().__init__(master, app, title=greeting(), subtitle=context_line(app), show_back=False)
+        self.title_lbl.configure(font=theme.font_style("display"), height=36)
+        self.new_job_btn = self.header_action("New job", self._new_job_menu, primary=True, width=120)
+        self.header_action("Connect a machine", app.open_connect, width=160)
         body = self.new_body()
-        grid = ctk.CTkFrame(body, fg_color="transparent")
+        page = AutoScroll(body)  # scrolls only on small windows
+        page.pack(fill="both", expand=True)
+        self.tiles_frame = tiles = ctk.CTkFrame(page, fg_color="transparent")
+        tiles.pack(fill="x", padx=(0, 4))
+        self._tiles(tiles)
+        low = ctk.CTkFrame(page, fg_color="transparent")
+        low.pack(fill="x", pady=(16, 0), padx=(0, 4))
+        low.grid_columnconfigure(0, weight=7, uniform="h")
+        low.grid_columnconfigure(1, weight=4, uniform="h")
+        low.grid_rowconfigure(1, weight=1)
+        self._recent(low).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.start = self._start(low)
+        self.start.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(16, 0))
+        self._running(low).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self._machines(low).grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(16, 0))
+        app.drop_handlers.append(lambda kind, _p: self.start.configure(
+            border_color=P["accent"] if kind == "enter" else P["border"]))
+        self._wide = None
+        page.bind("<Configure>", lambda e: self._reflow(e.width), add="+")
+
+    def _reflow(self, width):
+        """Four tiles and four job groups per row on wide windows, two on narrow ones."""
+        wide = width >= 1000
+        if wide == self._wide:
+            return
+        self._wide = wide
+        per = 4 if wide else 2
+        for i, t in enumerate(self.tile.values()):
+            r, c = divmod(i, per)
+            t.grid_configure(row=r, column=c, padx=(0 if c == 0 else 8, 0 if c == per - 1 else 8),
+                             pady=(16 if r else 0, 0))
+        for g, (cap, acts) in enumerate(self.groups):
+            block, c = divmod(g, per)
+            cap.grid_configure(row=block * 3, column=c, pady=(12 if block else 0, 6))
+            for r, a in enumerate(acts, 1):
+                a.grid_configure(row=block * 3 + r, column=c)
+        for frame, name in ((self.tiles_frame, "t"), (self.start_grid, "g")):
+            for c in range(4):
+                frame.grid_columnconfigure(c, weight=1 if c < per else 0, uniform=name if c < per else "")
+
+    def machines_changed(self):
+        self.app._refresh_screen()
+
+    # -- tiles ------------------------------------------------------------------
+    def _tiles(self, row):
+        app = self.app
+        remote = app.machines()[1:]
+        busy = sum(1 for m in remote if machine_status(m) == "Busy")
+        today = [j for j in app.jobs if _dt.date.fromtimestamp(j["started"]) == _dt.date.today()]
+        done = sum(1 for j in today if j["result"] == "Done")
+        running = sum(1 for j in today if j["result"] == "Running")
+        specs = [
+            ("Linked machines", len(remote), (f"{busy} busy" if busy else "All idle") if remote else
+             "Link a PC to work on it remotely",
+             "success", lambda: app.open_target("machines", "linked")),
+            ("Jobs today", len(today), f"{done} finished  ·  {running} running" if today else
+             "Stamped with client and ticket", "accent", lambda: app.open_target("jobs", "history")),
+            ("Drives on This PC", "-", "Counting drives", "info", lambda: app.open_target("drives", "all")),
+            ("Software library", "-", "Manage preview", "amber", lambda: app.open_target("manage", "library")),
+        ]
+        self.tile = {}
+        for i, (label, value, sub, tone, cmd) in enumerate(specs):
+            t = StatusTile(row, label, value, sub, tone, cmd)
+            t.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0 if i == 3 else 8))
+            row.grid_columnconfigure(i, weight=1, uniform="t")
+            self.tile[label] = t
+        app.background(self._count_drives, self._show_drives, error=lambda _e: None)
+        try:
+            st = app.deploy_store()
+            self.tile["Software library"].value.configure(text=str(len(st.packages)))
+            self.tile["Software library"].sub.configure(
+                text=f"{len(st.clients)} client{'s' if len(st.clients) != 1 else ''}  ·  "
+                     f"{len(st.deployments)} deployment{'s' if len(st.deployments) != 1 else ''}")
+        except Exception:  # noqa: BLE001  library not readable
+            self.tile["Software library"].sub.configure(text="Library not available")
+
+    def _count_drives(self):
+        from ..device import list_disks
+        try:
+            devs = list_disks()
+        except Exception:  # noqa: BLE001
+            devs = []
+        for d in devs:
+            d.close()
+        return len(devs)
+
+    def _show_drives(self, n):
+        try:
+            imgs = len(self.app.images)
+            t = self.tile["Drives on This PC"]
+            t.value.configure(text=str(n + imgs))
+            if not is_admin() and not n:
+                t.sub.configure(text="Run as administrator to see physical drives")
+            else:
+                t.sub.configure(text=f"{imgs} disk image{'s' if imgs != 1 else ''} open" if imgs else
+                                "Physical drives, no images open")
+        except tk.TclError:
+            pass  # tile closed while the drive list refreshed
+
+    # -- cards ------------------------------------------------------------------
+    def _recent(self, parent):
+        card = Card(parent, "Recent jobs", ("Open job history", lambda: self.app.open_target("jobs", "history")),
+                    pad=0)
+        card.head.pack_configure(padx=20)
+        jobs = list(reversed(self.app.jobs))[:5]
+        if not jobs:
+            EmptyState(card.body, "No jobs yet", "Jobs you run show up here with their client, ticket and result.",
+                       icon="jobs").pack(pady=(4, 18))
+            return card
+        cols = (("Task", 0), ("Machine", 140), ("Ticket", 90), ("Result", 130))
+        head = ctk.CTkFrame(card.body, fg_color=P["surface_2"], corner_radius=0, height=34)
+        head.pack(fill="x")
+        for i, (name, w) in enumerate(cols):
+            caption(head, name).grid(row=0, column=i, sticky="w", padx=(20 if i == 0 else 0, 12), pady=9)
+        _columns(head, cols)
+        for j in jobs:
+            divider(card.body).pack(fill="x")
+            r = ctk.CTkFrame(card.body, fg_color="transparent", height=44)
+            r.pack(fill="x")
+            task = ctk.CTkFrame(r, fg_color="transparent")
+            task.grid(row=0, column=0, sticky="w", padx=(20, 12), pady=7)
+            IconBadge(task, _job_icon(j["title"]), 28, "danger" if j["title"] in ("Wipe", "Shred") else "accent").pack(
+                side="left", padx=(0, 10))
+            ctk.CTkLabel(task, text=j["task"], font=theme.font_style("body_strong"), text_color=P["text"]).pack(
+                side="left")
+            ctk.CTkLabel(r, text=j["machine"], font=theme.font_style("body"), text_color=P["text_2"], width=140,
+                         anchor="w").grid(row=0, column=1, sticky="w", padx=(0, 12))
+            ctk.CTkLabel(r, text=f"#{j['ticket']}" if j["ticket"] else "-", font=theme.mono(12),
+                         text_color=P["text_2"], width=90, anchor="w").grid(row=0, column=2, sticky="w", padx=(0, 12))
+            pill = ctk.CTkFrame(r, fg_color="transparent", width=130)
+            pill.grid(row=0, column=3, sticky="w", padx=(0, 12))
+            StatusPill(pill, j["result"]).pack(anchor="w")
+            _columns(r, cols)
+        return card
+
+    def _start(self, parent):
+        card = Card(parent, "Start a job")
+        self.start_grid = grid = ctk.CTkFrame(card.body, fg_color="transparent")
         grid.pack(fill="x")
-        cards = [
-            ("recover", "Recover files", "Bring back deleted or lost files — names and folders included.",
-             RecoverWizard, "accent"),
-            ("partition", "Find lost partitions", "A drive shows as empty or RAW? Find and restore its partitions.",
-             PartitionWizard, "violet"),
-            ("wipe", "Wipe a drive", "Securely erase a disk or partition before reuse or disposal.", WipeWizard,
-             "danger"),
-            ("shred", "Shred files", "Permanently destroy specific files, or clean a drive's free space.",
-             ShredWizard, "warn"),
-            ("health", "Check drive health", "Test every sector and get a plain-English verdict.", HealthWizard,
-             "success"),
-            ("clone", "Back up / clone", "Copy a whole drive to an image file or to another drive.", CloneWizard,
-             "violet"),
-        ]
-        from .link_screens import ConnectScreen, MigrateWizard
-        cards += [
-            ("migrate", "Move a user", "Copy a user's files, browser data and more to a new PC.",
-             MigrateWizard, "success"),
-            ("link", "Connect a machine", "Link another PC with one copy-paste command to work on both.",
-             ConnectScreen, "accent"),
-        ]
-        from .deploy_screens import DeployScreen
-        cards.append(("deploy", "Deploy software", "Install apps and run upkeep tasks on linked PCs. (Preview)",
-                      DeployScreen, "violet"))
-        for i, (ic, t, d, cls, tone) in enumerate(cards):
-            card = TaskCard(grid, ic, t, d, lambda c=cls: self.app.go(c), tone=tone)
-            card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=8, pady=8)
-        for c in range(3):
-            grid.grid_columnconfigure(c, weight=1, uniform="c")
-        self.dz = DropZone(grid, "Drop files to shred", "Disk images (.img / .vhd) open as drives, and installers "
-                                                        "become Deploy packages.", height=96, wide=True)
-        self.dz.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
-        app.drop_handlers.append(lambda kind, _p: self.dz.hot(kind == "enter"))
-        hint = ctk.CTkFrame(body, fg_color="transparent")
-        hint.pack(fill="x", padx=8, pady=(14, 0))
-        ctk.CTkLabel(hint, text="New here?", font=theme.font(13, "bold"), text_color=P["text"]).pack(side="left")
-        ctk.CTkButton(hint, text="Read the 2-minute guide →", fg_color="transparent", hover_color=P["card_hover"],
-                      text_color=P["accent"], font=theme.font(13, "bold"), width=200, height=30,
-                      command=lambda: self.app.open_guide()).pack(side="left")
+        self.groups = []
+        for c, (group, acts) in enumerate(START_GROUPS):
+            grid.grid_columnconfigure(c, weight=1, uniform="g")
+            cap = caption(grid, group)
+            cap.grid(row=0, column=c, sticky="w", padx=6, pady=(0, 6))
+            tiles = []
+            for r, (icon, label, cat, item) in enumerate(acts, 1):
+                q = QuickAction(grid, icon, label, lambda cat=cat, item=item: self.app.open_target(cat, item),
+                                TONE[group])
+                q.grid(row=r, column=c, sticky="ew", padx=6, pady=4)
+                tiles.append(q)
+            self.groups.append((cap, tiles))
+        ctk.CTkLabel(card.body, text="Tip: drop a disk image, an installer or files anywhere in the window.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w").pack(fill="x", padx=6,
+                                                                                            pady=(12, 0))
+        return card
+
+    def _running(self, parent):
+        card = Card(parent, "Running", ("All jobs", lambda: self.app.open_target("jobs", "history")))
+        job = self.app.job
+        if job is None:
+            row = ctk.CTkFrame(card.body, fg_color="transparent")
+            row.pack(fill="x", pady=(4, 6))
+            Icon(row, "clock", 20, "muted", "surface").pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text="Nothing running. Progress for the job you start shows here.",
+                         font=theme.font_style("small"), text_color=P["muted"], justify="left", anchor="w",
+                         wraplength=280).pack(side="left", fill="x")
+        else:
+            rec = self.app.job_record or {}
+            ctk.CTkLabel(card.body, text=rec.get("task", "Job"), font=theme.font_style("body_strong"),
+                         text_color=P["text"], anchor="w").pack(fill="x")
+            bar = ctk.CTkProgressBar(card.body, height=8)
+            bar.set(job.snapshot()["pct"] / 100)
+            bar.pack(fill="x", pady=8)
+        return card
+
+    def _machines(self, parent):
+        card = Card(parent, "Linked machines", ("Connect", self.app.open_connect))
+        for i, m in enumerate(self.app.machines()[:5]):
+            row = ctk.CTkFrame(card.body, fg_color="transparent")
+            row.pack(fill="x", pady=5)
+            IconBadge(row, "pc", 32, "neutral").pack(side="left", padx=(0, 12))
+            StatusPill(row, machine_status(m)).pack(side="right")  # packed first so long text can't squeeze it
+            t = ctk.CTkFrame(row, fg_color="transparent")
+            t.pack(side="left", fill="x", expand=True)
+            info = m.info() if m.is_local else m.info_cache
+            name = info.get("hostname", m.label) if m.is_local else m.label
+            os_name = _short(info.get("os", "") or "", 28)
+            sub = f"This PC  ·  {os_name}" if m.is_local else f"{getattr(m, 'address', '')}  ·  {os_name}"
+            ctk.CTkLabel(t, text=name, font=theme.font_style("body_strong"), text_color=P["text"], anchor="w",
+                         height=18).pack(fill="x")
+            ctk.CTkLabel(t, text=sub, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                         height=16).pack(fill="x")
+        if len(self.app.machines()) == 1:
+            ctk.CTkLabel(card.body, text="No other PCs linked yet. Connect one with a single PowerShell command.",
+                         font=theme.font_style("small"), text_color=P["muted"], wraplength=300, justify="left",
+                         anchor="w").pack(fill="x", pady=(8, 0))
+        if theme.effective_personality() == "Full":
+            from .mascot import LINES, Mascot, SpeechBubble
+            dock = ctk.CTkFrame(card.body, fg_color="transparent")
+            dock.pack(side="bottom", fill="x")
+            bubble = SpeechBubble(dock)
+            bubble.pack(fill="x")
+            bubble.say(LINES["hello"][0])
+            m = Mascot(dock, bubble, width=300, scale=2, bg="surface")
+            m.pack(pady=(4, 0))
+            self.app.mascot.attach(m)
+        return card
+
+    def _new_job_menu(self):
+        from . import nav
+        items = []
+        for cat in nav.CATEGORIES[1:5]:
+            items.append(cat.label)
+            for it in nav.items(cat):
+                if it.target.startswith("app:") or it.key in ("all", "linked", "connect"):
+                    continue
+                items.append((it.label, lambda c=cat, i=it: self.app.open_item(c, i), it.icon, None))
+        Popover(self.new_job_btn, items, width=260, align="right")
+
+
+def _columns(frame, cols):
+    """Same column widths for a header row and its data rows (column 0 takes the rest)."""
+    frame.grid_columnconfigure(0, weight=1)
+    for i, (_name, w) in enumerate(cols[1:], 1):
+        frame.grid_columnconfigure(i, minsize=w + 12)
+
+
+def _short(text, n):
+    return text if len(text) <= n else text[:n - 3].rstrip() + "..."
+
+
+def _job_icon(title):
+    return {"Wipe": "wipe", "Shred": "shred", "Copy": "clone", "Clone": "netclone", "Migration": "migrate",
+            "Health check": "health", "Partition search": "partition", "Restore partitions": "partition",
+            "Deploy": "deploy", "Deploy check": "deploy"}.get(title, "recover")
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +531,20 @@ class _PickMixin:
         self.target = None
         top = ctk.CTkFrame(body, fg_color="transparent")
         top.pack(fill="x")
-        ctk.CTkButton(top, text="↻  Refresh", width=100, height=30, corner_radius=15, fg_color="transparent",
-                      hover_color=P["card_hover"], text_color=P["muted"], font=theme.font(12, "bold"),
-                      command=lambda: self._refresh_pick(body, mode, writes, exclude)).pack(side="right")
+        secondary_button(top, "Refresh", lambda: self._refresh_pick(body, mode, writes, exclude), width=90,
+                         height=30).pack(side="right")
         self._pick_args = (body, mode, writes, exclude)
         self.picker = None
         self._build_picker(body, mode, writes, exclude)
         self.next_btn = self.buttons(primary=(next_text, self._after_pick))
         self.next_btn.configure(state="disabled")
+        want = getattr(self.app, "preselect_path", None)  # set by the Drives table for the selected drive
+        if want:
+            self.app.preselect_path = None
+            for card, _b, t in self.picker.rows:
+                if t["kind"] == "disk" and t["dev"].path == want:
+                    card.click()
+                    break
         return body
 
     def _build_picker(self, body, mode, writes, exclude, refresh=False):
@@ -331,8 +596,8 @@ class RecoverWizard(Screen, _PickMixin):
         body = self.step(1, "How deep should I look?", f"Scanning {self.target_name()}")
         grp = []
         ntfs_ok = t["kind"] == "part" and t["part"].fs == "NTFS"
-        quick = OptionCard(body, "Quick scan", "Reads the drive's file table — recovers deleted files with their "
-                                               "original names, folders and dates. Usually takes seconds.",
+        quick = OptionCard(body, "Quick scan", "Reads the drive's file table and recovers deleted files with "
+                                               "their original names, folders and dates. Usually takes seconds.",
                            "mft", grp, icon="recover", badge_text="Best first try")
         quick.pack(fill="x", pady=6)
         deep = OptionCard(body, "Deep scan", "Searches every sector for photos, documents, videos and more. Works "
@@ -346,21 +611,21 @@ class RecoverWizard(Screen, _PickMixin):
         opts.pack(fill="x", pady=(10, 0))
         self.types = {}
         row = ctk.CTkFrame(opts, fg_color="transparent")
-        ctk.CTkLabel(row, text="Look for:", font=theme.font(13, "bold"), text_color=P["text"]).pack(side="left")
+        ctk.CTkLabel(row, text="Look for:", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
+            side="left")
         for grp_name in dict.fromkeys(s.group for s in carver.SIGNATURES):
             v = tk.BooleanVar(value=True)
             self.types[grp_name] = v
-            ctk.CTkCheckBox(row, text=grp_name, variable=v, font=theme.font(13), fg_color=P["accent"],
-                            hover_color=P["accent_hover"], corner_radius=6).pack(side="left", padx=10)
+            ctk.CTkCheckBox(row, text=grp_name, variable=v, font=theme.font_style("body"), checkbox_width=20,
+                            checkbox_height=20).pack(side="left", padx=10)
         self.out_var = tk.StringVar()
         orow = ctk.CTkFrame(opts, fg_color="transparent")
-        ctk.CTkLabel(orow, text="Save found files to:", font=theme.font(13, "bold"), text_color=P["text"]).pack(
-            side="left")
-        ctk.CTkEntry(orow, textvariable=self.out_var, width=380, height=36, corner_radius=12,
+        ctk.CTkLabel(orow, text="Save found files to:", font=theme.font_style("body_strong"),
+                     text_color=P["text"]).pack(side="left")
+        ctk.CTkEntry(orow, textvariable=self.out_var, width=380, height=36,
                      placeholder_text="Choose a folder on a different drive").pack(side="left", padx=10)
-        ctk.CTkButton(orow, text="Browse…", width=90, height=36, corner_radius=12, fg_color=P["violet"],
-                      command=lambda: self.out_var.set(filedialog.askdirectory() or self.out_var.get())).pack(
-            side="left")
+        secondary_button(orow, "Browse...", lambda: self.out_var.set(filedialog.askdirectory() or self.out_var.get()),
+                         width=90).pack(side="left")
 
         def chosen(v):
             if v == "deep":
@@ -442,38 +707,36 @@ class RecoverWizard(Screen, _PickMixin):
             body = self.step(3, f"Found {len(deleted):,} deleted file{'s' if len(deleted) != 1 else ''}",
                              "Select the files you want back, then press Recover.")
         else:
-            body = self.step(3, "No deleted files found", "Showing every file on the partition instead — you can "
-                                                         "still copy any of them out. Try a Deep scan for more.")
+            body = self.step(3, "No deleted files found", "Showing every file on the partition instead. You can "
+                                                         "still copy any of them out, or try a Deep scan for more.")
         self.app.mascot.set_mood("happy" if deleted else "idle", "found" if deleted else "none")
         bar = ctk.CTkFrame(body, fg_color="transparent")
         bar.pack(fill="x", pady=(0, 8))
-        ent = ctk.CTkEntry(bar, width=260, height=36, corner_radius=18, placeholder_text="Search names or folders…")
+        ent = ctk.CTkEntry(bar, width=260, height=34, placeholder_text="Search names or folders")
         ent.pack(side="left")
         self.filter = ent
         ent.bind("<KeyRelease>", lambda _e: self._fill())
-        self.cat = ctk.CTkSegmentedButton(bar, values=["All", "Photos", "Documents", "Video & audio", "Other"],
-                                          command=lambda _v: self._fill(), selected_color=P["accent"],
-                                          selected_hover_color=P["accent_hover"], font=theme.font(12, "bold"),
-                                          height=34, corner_radius=17)
+        self.cat = segmented(bar, ["All", "Photos", "Documents", "Video & audio", "Other"],
+                             command=lambda _v: self._fill(), height=34)
         self.cat.set("All")
         self.cat.pack(side="left", padx=12)
         self.only_del = tk.BooleanVar(value=bool(deleted))
         ctk.CTkSwitch(bar, text="Deleted only", variable=self.only_del, command=self._fill,
-                      progress_color=P["accent"], font=theme.font(12)).pack(side="left")
-        self.count_lbl = ctk.CTkLabel(bar, text="", font=theme.font(12), text_color=P["muted"])
+                      font=theme.font_style("body")).pack(side="left")
+        self.count_lbl = ctk.CTkLabel(bar, text="", font=theme.font_style("small"), text_color=P["muted"])
         self.count_lbl.pack(side="right")
-        wrap = ctk.CTkFrame(body, corner_radius=18, fg_color=P["card"])
+        wrap = ctk.CTkFrame(body, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
         wrap.pack(fill="both", expand=True)
         cols = ("name", "folder", "size", "modified", "state")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", style="Smith.Treeview",
                                  selectmode="extended")
         for c, w, t in zip(cols, (240, 330, 90, 140, 150), ("Name", "Folder", "Size", "Modified", "Chance")):
-            self.tree.heading(c, text=t)
+            self.tree.heading(c, text=t.upper(), anchor="w")
             self.tree.column(c, width=w, anchor="w")
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview, style="Smith.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
-        sb.pack(side="right", fill="y", pady=10, padx=4)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=(8, 8))
+        sb.pack(side="right", fill="y", pady=8, padx=(0, 3))
         self._fill()
         self.buttons(primary=("Recover selected", lambda: self._recover(False)),
                      secondary=("Recover all shown", lambda: self._recover(True)),
@@ -548,7 +811,7 @@ class RecoverWizard(Screen, _PickMixin):
         chips = ctk.CTkFrame(body, fg_color="transparent")
         chips.pack(fill="x")
         for ext, cnt in sorted(res.get("by_type", {}).items(), key=lambda x: -x[1]):
-            Pill(chips, f"{ext.upper()}  {cnt:,}", "violet").pack(side="left", padx=4, pady=4)
+            Pill(chips, f"{ext.upper()}  {cnt:,}", "accent").pack(side="left", padx=4, pady=4)
         self.done_actions(out)
 
 
@@ -575,7 +838,7 @@ class PartitionWizard(Screen, _PickMixin):
     def _results(self, found, mode):
         lost = [f for f in found if f.status == "Lost"]
         body = self.step(2, f"Found {len(found)} partition{'s' if len(found) != 1 else ''}"
-                            + (f" — {len(lost)} missing" if lost else ""),
+                            + (f", {len(lost)} missing" if lost else ""),
                          "Tick the ones to bring back." if lost else "Everything found is already in the "
                                                                       "partition table.")
         self.app.mascot.set_mood("happy" if lost else "idle", "found" if lost else "none")
@@ -584,27 +847,28 @@ class PartitionWizard(Screen, _PickMixin):
         lst = ctk.CTkScrollableFrame(body, fg_color="transparent", height=360)
         lst.pack(fill="both", expand=True)
         for f in found:
-            card = ctk.CTkFrame(lst, corner_radius=16, fg_color=P["card"])
-            card.pack(fill="x", pady=4)
+            card = ctk.CTkFrame(lst, corner_radius=10, fg_color=P["surface"], border_width=1,
+                                border_color=P["border"])
+            card.pack(fill="x", pady=3, padx=(0, 8))
             v = tk.BooleanVar(value=f.status == "Lost")
             if f.status == "Lost":
-                ctk.CTkCheckBox(card, text="", variable=v, width=24, fg_color=P["accent"],
-                                hover_color=P["accent_hover"]).pack(side="left", padx=(16, 4))
+                ctk.CTkCheckBox(card, text="", variable=v, width=24, checkbox_width=20,
+                                checkbox_height=20).pack(side="left", padx=(16, 4))
                 self.checks.append((v, f))
-            b = IconBadge(card, "partition", 42, "accent" if f.status == "Lost" else "violet")
-            b.set_bg(theme.c("card"))
+            b = IconBadge(card, "partition", 32, "accent" if f.status == "Lost" else "neutral")
             b.pack(side="left", padx=10, pady=10)
             txt = ctk.CTkFrame(card, fg_color="transparent")
             txt.pack(side="left", fill="x", expand=True)
             top = ctk.CTkFrame(txt, fg_color="transparent")
             top.pack(anchor="w")
-            ctk.CTkLabel(top, text=f"{f.fs}  {f.label}", font=theme.font(15, "bold"), text_color=P["text"]).pack(
-                side="left")
+            ctk.CTkLabel(top, text=f"{f.fs}  {f.label}", font=theme.font_style("body_strong"),
+                         text_color=P["text"]).pack(side="left")
             Pill(top, "Missing" if f.status == "Lost" else "In table",
                  "danger" if f.status == "Lost" else "success").pack(side="left", padx=8)
             ctk.CTkLabel(txt, text=f"Starts at sector {f.start_lba:,} · found via {f.source} · confidence "
-                                   f"{f.confidence}", font=theme.font(12), text_color=P["muted"]).pack(anchor="w")
-            ctk.CTkLabel(card, text=human_size(f.sectors * ss), font=theme.font(15, "bold"),
+                                   f"{f.confidence}", font=theme.font_style("small"), text_color=P["muted"]).pack(
+                anchor="w")
+            ctk.CTkLabel(card, text=human_size(f.sectors * ss), font=theme.font_style("body_strong"),
                          text_color=P["text"]).pack(side="right", padx=18)
         if mode == "quick":
             self.note(body, "Not what you expected? A deep search checks every single sector.").pack(anchor="w",
@@ -624,11 +888,11 @@ class PartitionWizard(Screen, _PickMixin):
         body = self.step(2, "Restore partitions?", "I'll back up the partition table first, then add these "
                                                    "entries.")
         self.app.mascot.set_mood("warn", "confirm")
-        self.result_card(body, "partition", "violet", f"{len(chosen)} partition(s) → {dev.name}",
+        self.result_card(body, "partition", "accent", f"{len(chosen)} partition(s) to {dev.name}",
                          [f"{f.fs} {f.label} at sector {f.start_lba:,}" for f in chosen])
         gpt = tk.BooleanVar(value=dev.usable_size > 2 * 1024 ** 4)
         ctk.CTkSwitch(body, text="If the drive has no partition table, create GPT (otherwise MBR)",
-                      variable=gpt, progress_color=P["accent"], font=theme.font(12)).pack(anchor="w", pady=6)
+                      variable=gpt, font=theme.font_style("body")).pack(anchor="w", pady=6)
         go = self.buttons(primary=("Restore now", lambda: self._go(chosen, gpt.get())))
         go.configure(state="disabled")
         self.confirm_box(body, "RESTORE", lambda ok: go.configure(state="normal" if ok else "disabled"))
@@ -658,12 +922,15 @@ class PartitionWizard(Screen, _PickMixin):
             self.app.mascot.set_mood("happy", "done")
             self.result_card(body, "check", "success", f"{len(out)} partition(s) are back",
                              out + ["", f"Backup saved: {bk}",
-                                    "Windows may need a rescan: Disk Management → Action → Rescan Disks."])
+                                    "Windows may need a rescan: Disk Management > Action > Rescan Disks."])
             self.done_actions(os.path.dirname(bk))
         self.app.run_job("Restore partitions", job, done, panel)
 
 
 # ---------------------------------------------------------------------------
+NO_METHOD = "Use the choice above"
+
+
 class _StrengthMixin:
     def strength_picker(self, parent):
         grp = []
@@ -676,11 +943,11 @@ class _StrengthMixin:
             row.grid_columnconfigure(i, weight=1, uniform="s")
         more = ctk.CTkFrame(parent, fg_color="transparent")
         more.pack(fill="x", pady=(14, 0))
-        ctk.CTkLabel(more, text="Other standards:", font=theme.font(13, "bold"), text_color=P["text"]).pack(
+        ctk.CTkLabel(more, text="More methods:", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
             side="left")
-        self._more = ctk.CTkOptionMenu(more, values=["—"] + list(wipe.METHODS), width=340, height=34,
-                                       corner_radius=12, fg_color=P["card"], button_color=P["violet"],
-                                       text_color=P["text"], command=lambda v: self._pick_more(v, grp))
+        self._more = ctk.CTkOptionMenu(more, values=[NO_METHOD] + list(wipe.METHODS), width=340, height=34,
+                                       font=theme.font_style("body"), dropdown_font=theme.font_style("body"),
+                                       command=lambda v: self._pick_more(v, grp))
         self._more.pack(side="left", padx=10)
         self.note(parent, "SSDs: overwriting can't reach spare flash cells. For SSDs leaving the business, also use "
                           "the manufacturer's Secure Erase, or physically destroy them.", "warn").pack(
@@ -690,9 +957,9 @@ class _StrengthMixin:
         return grp
 
     def _pick_more(self, v, grp):
-        if v != "—":
+        if v != NO_METHOD:
             for o in grp:
-                o.configure(border_color=P["border"], fg_color=P["card"])
+                o.configure(border_color=P["border"], fg_color=P["surface"])
                 o.selected = False
 
     def chosen_method(self):
@@ -702,15 +969,24 @@ class _StrengthMixin:
         return wipe.METHODS[selected_value(self._sgrp)]
 
 
+def erase_phrase(target) -> str:
+    """What the operator types to confirm: the disk name plus the end of its serial, or the partition number."""
+    dev = target["dev"]
+    if target["kind"] == "part":
+        return f"ERASE PARTITION {target['part'].index}"
+    serial = "".join(ch for ch in (dev.serial or "") if ch.isalnum())[-6:]
+    return f"ERASE {dev.name.upper()}" + (f" {serial.upper()}" if serial else "")
+
+
 class WipeWizard(Screen, _PickMixin, _StrengthMixin):
     guide_topic = "wipe"
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Wipe a drive", steps=["Drive", "Strength", "Confirm", "Wipe"])
-        self.pick_step(0, "Wipe a drive", "Pick a whole drive or a single partition to erase.", writes=True)
+        super().__init__(master, app, "Erase and certify", steps=["Drive", "Method", "Confirm", "Erase"])
+        self.pick_step(0, "Erase and certify", "Pick a whole drive or a single partition to erase.", writes=True)
 
     def _after_pick(self):
-        body = self.step(1, "How thorough?", f"Erasing {self.target_name()}")
+        body = self.step(1, "Choose a method", f"Erasing {self.target_name()}")
         self.strength_picker(body)
         self.buttons(primary=("Next", self._confirm))
 
@@ -719,22 +995,28 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         t = self.target
         dev = t["dev"]
         start, count = self.target_range()
-        body = self.step(2, "Last check", "Everything on this target will be permanently destroyed.")
+        body = self.step(2, "Confirm the erase", "Everything on this target is destroyed. This cannot be undone.")
         self.app.mascot.set_mood("warn", "confirm")
-        phrase = f"WIPE {dev.name.upper()}" if t["kind"] == "disk" else f"WIPE PARTITION {t['part'].index}"
-        self.result_card(body, "wipe", "danger", self.target_name(),
-                         [f"Size: {human_size(count * dev.sector_size)}", f"Method: {self.method.name}",
-                          "This can't be undone. Recovery tools — including this one — won't get it back."])
-        go = self.buttons(primary=("Wipe it", self._go), secondary=("Back", self._after_pick))
-        go.configure(state="disabled", fg_color=P["danger"])
-        self.confirm_box(body, phrase, lambda ok: go.configure(state="normal" if ok else "disabled"))
+        ctx = self.app.context
+        flash = dev.bus == "NVMe" or "SSD" in (dev.model or "").upper()
+        self.summary(body, "wipe", "danger", self.target_name(),
+                     f"{dev.bus}  \u00b7  {human_size(count * dev.sector_size)} will be overwritten",
+                     [("Serial", theme.mask(dev.serial) if dev.serial else "-"), ("Method", self.method.name),
+                      ("Client", ctx.get("client") or "Not set"),
+                      ("Ticket", f"#{ctx['ticket']}" if ctx.get("ticket") else "Not set"),
+                      ("Certificate", "Saved from the last step"), ("Technician", technician() or "-")],
+                     note="This looks like flash storage. Overwriting cannot reach spare cells, so also use the "
+                          "maker's Secure Erase or physically destroy it." if flash else None)
+        go = self.buttons(primary=("Erase and certify", self._go), secondary=("Back", self._after_pick))
+        go.configure(state="disabled", fg_color=P["danger"], hover_color=P["danger_hover"])
+        self.confirm_box(body, erase_phrase(t), lambda ok: go.configure(state="normal" if ok else "disabled"))
 
     def _go(self):
         dev = self.target["dev"]
         wdev = self.app.clone(dev)
         start, count = self.target_range()
         method = self.method
-        _, panel = self.progress("Wiping…", f"{method.name} on {self.target_name()}")
+        _, panel = self.progress("Erasing\u2026", f"{method.name} on {self.target_name()}")
         self._draw_steps(3)
         self.t_start = time.time()
         self.app.run_job("Wipe", lambda prog: wipe.wipe_disk(wdev, method, prog, start_lba=start, sectors=count),
@@ -761,14 +1043,14 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         self.res["end"] = time.time()
         self.app._inventory = None
         ok = res["write_errors"] == 0 and res["verify_mismatched_blocks"] == 0
-        body = self.step(3, "Wipe complete" if ok else "Wipe finished with problems", "")
+        body = self.step(3, "Erase complete" if ok else "Erase finished with problems", "")
         self.app.mascot.set_mood("happy" if ok else "sad", "wiped" if ok else "sick")
         lines = [f"{human_size(res['bytes'])} overwritten · {res['passes']} pass(es)",
                  "Verified by reading it back" if res["verified"] else "Not verified (method has no verify pass)",
                  f"Took {human_time(self.res['end'] - self.t_start)}"]
         if not ok:
             lines.append(f"Unwritable sectors: {res['write_errors']} · verify mismatches: "
-                         f"{res['verify_mismatched_blocks']} — this drive may be failing.")
+                         f"{res['verify_mismatched_blocks']}. This drive may be failing.")
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          "Drive is clean" if ok else "Some sectors couldn't be wiped", lines)
         self.buttons(primary=("Back to home", self.app.home), secondary=("Save certificate…", self._cert))
@@ -791,46 +1073,49 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
 class ShredWizard(Screen, _StrengthMixin):
     guide_topic = "shred"
 
-    def __init__(self, master, app):
+    def __init__(self, master, app, mode=None):
         super().__init__(master, app, "Shred files", steps=["Choose", "Confirm", "Shred"])
         self.items: list[str] = []
         self.free_folder = None
+        self.start_mode = mode
         self._build()
 
     def _build(self):
         body = self.step(0, "Shred files", "Drop files and folders below. They'll be overwritten, then deleted "
                                            "for good.")
-        self.mode = ctk.CTkSegmentedButton(body, values=["Files & folders", "Free space on a drive"],
-                                           command=lambda _v: self._mode_changed(), selected_color=P["accent"],
-                                           selected_hover_color=P["accent_hover"], font=theme.font(13, "bold"),
-                                           height=36, corner_radius=18)
-        self.mode.set("Files & folders")
+        self.mode = segmented(body, ["Files & folders", "Free space on a drive"],
+                              command=lambda _v: self._mode_changed(), height=34)
+        self.mode.set("Free space on a drive" if self.start_mode == "free" else "Files & folders")
+        if self.start_mode == "free":
+            self.title_lbl.configure(text="Clean free space")
+            self.sub_lbl.configure(text="Destroy traces of files deleted earlier. Your existing files are kept.")
         self.mode.pack(anchor="w", pady=(0, 12))
         self.mode_area = ctk.CTkFrame(body, fg_color="transparent")
         self.mode_area.pack(fill="x")
         self.files_frame = ctk.CTkFrame(self.mode_area, fg_color="transparent")
-        self.dz = DropZone(self.files_frame, "Drop files or folders here", "or use Add files / Add folder below",
-                           height=140)
+        self.dz = DropZone(self.files_frame, "Drop files or folders here", "or use Add files and Add folder below",
+                           height=140, icon="shred", tone="danger")
         self.dz.pack(fill="x")
         self.app.drop_handlers.append(lambda kind, _p: self.dz.hot(kind == "enter"))
         btns = ctk.CTkFrame(self.files_frame, fg_color="transparent")
         btns.pack(fill="x", pady=8)
-        ghost_button(btns, "Add files…", lambda: self.accept_files(list(filedialog.askopenfilenames())),
+        ghost_button(btns, "Add files...", lambda: self.accept_files(list(filedialog.askopenfilenames())),
                      width=130).pack(side="left")
-        ghost_button(btns, "Add folder…", lambda: self.accept_files([filedialog.askdirectory()]),
+        ghost_button(btns, "Add folder...", lambda: self.accept_files([filedialog.askdirectory()]),
                      width=130).pack(side="left", padx=8)
         self.list = ctk.CTkScrollableFrame(self.files_frame, fg_color="transparent", height=120)
         self.list.pack(fill="x")
         self.free_frame = ctk.CTkFrame(self.mode_area, fg_color="transparent")
         self.note(self.free_frame, "Fills the drive's empty space with wipe data and then frees it again. Your "
-                                   "existing files are kept — this just destroys traces of files deleted earlier."
+                                   "existing files are kept. This only destroys traces of files deleted earlier."
                   ).pack(anchor="w")
         fr = ctk.CTkFrame(self.free_frame, fg_color="transparent")
         fr.pack(fill="x", pady=10)
-        self.free_lbl = ctk.CTkLabel(fr, text="No drive chosen", font=theme.font(14, "bold"), text_color=P["text"])
+        self.free_lbl = ctk.CTkLabel(fr, text="No drive chosen", font=theme.font_style("body_strong"),
+                                     text_color=P["text"])
         self.free_lbl.pack(side="left")
-        ghost_button(fr, "Choose drive / folder…", self._pick_free, width=200).pack(side="left", padx=12)
-        ctk.CTkLabel(body, text="How thorough?", font=theme.font(15, "bold"), text_color=P["text"]).pack(
+        ghost_button(fr, "Choose drive or folder...", self._pick_free, width=200).pack(side="left", padx=12)
+        ctk.CTkLabel(body, text="How thorough?", font=theme.font_style("h3"), text_color=P["text"]).pack(
             anchor="w", pady=(16, 6))
         self.str_holder = ctk.CTkFrame(body, fg_color="transparent")
         self.str_holder.pack(fill="x")
@@ -864,15 +1149,16 @@ class ShredWizard(Screen, _StrengthMixin):
         for w in self.list.winfo_children():
             w.destroy()
         for p in self.items:
-            row = ctk.CTkFrame(self.list, corner_radius=12, fg_color=P["card"])
-            row.pack(fill="x", pady=2)
+            row = ctk.CTkFrame(self.list, corner_radius=8, fg_color=P["surface"], border_width=1,
+                               border_color=P["border"])
+            row.pack(fill="x", pady=2, padx=(0, 8))
             kind = "Folder" if os.path.isdir(p) else human_size(os.path.getsize(p))
-            ctk.CTkLabel(row, text=os.path.basename(p.rstrip("/\\")) or p, font=theme.font(13, "bold"),
+            ctk.CTkLabel(row, text=os.path.basename(p.rstrip("/\\")) or p, font=theme.font_style("body_strong"),
                          text_color=P["text"]).pack(side="left", padx=12, pady=6)
-            ctk.CTkLabel(row, text=f"{kind} · {os.path.dirname(p)}", font=theme.font(11),
+            ctk.CTkLabel(row, text=f"{kind} \u00b7 {os.path.dirname(p)}", font=theme.font_style("small"),
                          text_color=P["muted"]).pack(side="left")
-            ctk.CTkButton(row, text="✕", width=30, height=26, corner_radius=13, fg_color="transparent",
-                          hover_color=P["danger_soft"], text_color=P["danger"],
+            ctk.CTkButton(row, text="Remove", width=70, height=26, corner_radius=6, fg_color="transparent",
+                          hover_color=P["danger_soft"], text_color=P["danger"], font=theme.font_style("small"),
                           command=lambda x=p: (self.items.remove(x), self._render_items())).pack(side="right",
                                                                                                 padx=8)
 
@@ -892,10 +1178,10 @@ class ShredWizard(Screen, _StrengthMixin):
                              [os.path.basename(p.rstrip('/\\')) for p in self.items[:8]]
                              + (["…"] if len(self.items) > 8 else []) + [f"Method: {self.method.name}"])
             go = self.buttons(primary=("Shred them", lambda: self._go(True)), secondary=("Back", self._build))
-            go.configure(state="disabled", fg_color=P["danger"])
+            go.configure(state="disabled", fg_color=P["danger"], hover_color=P["danger_hover"])
             self.confirm_box(body, "SHRED", lambda ok: go.configure(state="normal" if ok else "disabled"))
         else:
-            self.result_card(body, "wipe", "violet", f"Clean free space on {self.free_folder}",
+            self.result_card(body, "wipe", "accent", f"Clean free space on {self.free_folder}",
                              [f"Method: {self.method.name}", "Your files stay. The drive will look full for a "
                                                              "while, then go back to normal."])
             self.buttons(primary=("Start", lambda: self._go(False)), secondary=("Back", self._build))
@@ -938,9 +1224,9 @@ class HealthWizard(Screen, _PickMixin):
     COLORS = ["#2BD9A0", "#8BD45A", "#FFD34D", "#FF9F40", "#FF6A3D", "#FF3B5C"]
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Check drive health", steps=["Drive", "Test", "Result"])
-        self.pick_step(0, "Check drive health", "Pick a drive (or partition) to test. Reading only — nothing is "
-                                                "changed.")
+        super().__init__(master, app, "Health check", steps=["Drive", "Test", "Result"])
+        self.pick_step(0, "Health check", "Pick a drive (or partition) to test. It only reads, nothing is "
+                                          "changed.")
 
     def _after_pick(self, repair=False):
         dev = self.app.clone(self.target["dev"])
@@ -999,10 +1285,10 @@ class HealthWizard(Screen, _PickMixin):
         if bad:
             head, icon, tone, key = f"{bad} bad sector(s) found", "warn", "danger", "sick"
             lines = ["Some parts of this drive can't be read. It may be failing.",
-                     "Back it up now (Back up / clone), then replace it."]
+                     "Image it now (Image and clone), then replace it."]
         elif slow / total > .02:
             head, icon, tone, key = "Readable, but slow in places", "warn", "warn", "sick"
-            lines = [f"{slow:,} slow area(s). Often an early sign of wear — keep an eye on it."]
+            lines = [f"{slow:,} slow area(s). Often an early sign of wear, so keep an eye on it."]
         else:
             head, icon, tone, key = "This drive is healthy", "check", "success", "healthy"
             lines = ["Every sector read back fine, with no slow spots."]
@@ -1024,7 +1310,8 @@ class HealthWizard(Screen, _PickMixin):
         legend = ctk.CTkFrame(body, fg_color="transparent")
         legend.pack(fill="x")
         for i, (k, v) in enumerate(c.items()):
-            ctk.CTkLabel(legend, text=f"■ {k}: {v:,}", font=theme.font(12), text_color=self.COLORS[i]).pack(
+            ctk.CTkLabel(legend, text=f"\u25a0 {k}: {v:,}", font=theme.font_style("small"),
+                         text_color=self.COLORS[i]).pack(
                 side="left", padx=(0, 14))
         if res["bad_lbas"]:
             self.note(body, "First bad sectors: " + ", ".join(map(str, res["bad_lbas"][:12]))).pack(anchor="w",
@@ -1032,9 +1319,13 @@ class HealthWizard(Screen, _PickMixin):
         dev = self.target["dev"]
         extra = None
         if bad and not dev.is_system:
-            extra = ("Try repairing…", self._repair_confirm)
+            extra = ("Try repairing...", self._repair_confirm)
         self.buttons(primary=("Back to home", self.app.home),
-                     secondary=("Back it up", lambda: self.app.go(CloneWizard)), extra=extra)
+                     secondary=("Image it now", self._image_now), extra=extra)
+
+    def _image_now(self):
+        self.app.preselect_path = self.target["dev"].path
+        self.app.go(CloneWizard)
 
     def _repair_confirm(self):
         body = self.step(2, "Repair bad sectors?", "Unreadable sectors are rewritten so the drive swaps them for "
@@ -1050,26 +1341,26 @@ class CloneWizard(Screen, _PickMixin):
     guide_topic = "clone"
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Back up / clone", steps=["Source", "Destination", "Confirm", "Copy"])
-        self.pick_step(0, "Back up / clone", "What should I copy? A whole drive or a single partition.")
+        super().__init__(master, app, "Image and clone", steps=["Source", "Destination", "Confirm", "Copy"])
+        self.pick_step(0, "Image and clone", "What should be copied? A whole drive or a single partition.")
 
     def _after_pick(self):
         body = self.step(1, "Where to?", f"Copying {self.target_name()}")
         grp = []
-        a = OptionCard(body, "Image file (.vhd)", "A single file you can open later — Windows can mount it "
+        a = OptionCard(body, "Image file (.vhd)", "A single file you can open later. Windows can mount it "
                                                  "directly in Disk Management.", "vhd", grp, icon="image",
                        badge_text="Recommended")
         a.pack(fill="x", pady=5)
         b = OptionCard(body, "Raw image (.img)", "Exact sector-by-sector copy. Works with any recovery tool.",
-                       "img", grp, icon="image", tone="violet")
+                       "img", grp, icon="image", tone="accent")
         b.pack(fill="x", pady=5)
-        c = OptionCard(body, "Another drive", "Clone straight onto a second drive — e.g. a new SSD / NVMe in a USB "
-                                              "enclosure. Everything on it will be replaced.", "disk", grp,
+        c = OptionCard(body, "Another drive", "Clone straight onto a second drive, for example a new SSD or NVMe in "
+                                              "a USB enclosure. Everything on it will be replaced.", "disk", grp,
                        icon="clone", tone="danger")
         c.pack(fill="x", pady=5)
-        dnet = OptionCard(body, "Several disks or another PC", "Clone to many disks at once — on this PC and/or "
+        dnet = OptionCard(body, "Several disks or another PC", "Clone to many disks at once, on this PC or on "
                                                               "linked PCs over the network.", "net", grp,
-                          icon="link", tone="violet")
+                          icon="netclone", tone="teal")
         dnet.pack(fill="x", pady=5)
         self._dgrp = grp
         a.select()
@@ -1120,31 +1411,31 @@ class CloneWizard(Screen, _PickMixin):
             self.app.mascot.set_mood("warn", "confirm")
             lines = [f"Copy {human_size(size)}", f"ALL data on {dst.describe()} will be replaced."]
             if self._live(src["dev"]):
-                lines.append("Windows is using this disk — a snapshot is taken first so the copy is consistent.")
+                lines.append("Windows is using this disk, so a snapshot is taken first to keep the copy consistent.")
             if src["kind"] == "disk" and dst.usable_size > size:
-                lines.append(f"The new disk is {human_size(dst.usable_size - size)} bigger — that space will be "
+                lines.append(f"The new disk is {human_size(dst.usable_size - size)} bigger. That space will be "
                              f"unallocated; extend C: in Disk Management afterwards.")
-            self.result_card(body, "clone", "danger", f"{src['dev'].name} → {dst.name}", lines)
+            self.result_card(body, "clone", "danger", f"{src['dev'].name} to {dst.name}", lines)
             self._smart_switch(body)
             go = self.buttons(primary=("Start cloning", lambda: self._go(src, start, count)))
-            go.configure(state="disabled", fg_color=P["danger"])
+            go.configure(state="disabled", fg_color=P["danger"], hover_color=P["danger_hover"])
             self.confirm_box(body, f"CLONE TO {dst.name.upper()}",
                              lambda ok: go.configure(state="normal" if ok else "disabled"))
         else:
             lines = [f"Copy {human_size(size)} from {self.target_name()}", f"Saving to {self.dest}",
                      "Unreadable sectors are skipped and logged. A SHA-256 hash is recorded."]
             if self._live(src["dev"]):
-                lines.append("Windows is using this disk — a snapshot is taken first so the copy is consistent.")
-            self.result_card(body, "image", "violet", os.path.basename(self.dest), lines)
+                lines.append("Windows is using this disk, so a snapshot is taken first to keep the copy consistent.")
+            self.result_card(body, "image", "accent", os.path.basename(self.dest), lines)
             self._smart_switch(body)
             self.buttons(primary=("Start backup", lambda: self._go(src, start, count)),
                          secondary=("Back", self._after_pick))
 
     def _smart_switch(self, body):
         self.smart = tk.BooleanVar(value=True)
-        ctk.CTkSwitch(body, text="Copy used space only — much faster (NTFS, FAT, exFAT, ext). Other filesystems and "
+        ctk.CTkSwitch(body, text="Copy used space only, much faster (NTFS, FAT, exFAT, ext). Other filesystems and "
                                  "OSes are copied sector by sector.", variable=self.smart,
-                      progress_color=P["accent"], font=theme.font(12)).pack(anchor="w", pady=(4, 4))
+                      font=theme.font_style("body")).pack(anchor="w", pady=(4, 4))
 
     @staticmethod
     def _live(dev):
@@ -1163,7 +1454,7 @@ class CloneWizard(Screen, _PickMixin):
             fmt = "raw"
         else:
             dst, fmt = self.dest, self.kind if self.kind == "vhd" else "raw"
-        _, panel = self.progress("Copying…", "Fast pass first, then any tricky sectors one by one.")
+        _, panel = self.progress("Copying\u2026", "Fast pass first, then any tricky sectors one by one.")
         self._draw_steps(3)
 
         def done(res):
@@ -1181,7 +1472,7 @@ class CloneWizard(Screen, _PickMixin):
             if res.get("sha256"):
                 lines.append(f"SHA-256: {res['sha256']}")
             self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
-                             "Backup finished" if ok else "Finished — some sectors were unreadable", lines)
+                             "Copy finished" if ok else "Finished, but some sectors were unreadable", lines)
             self.done_actions(os.path.dirname(self.dest) if self.kind != "disk" else None)
         def stopped(info):
             self.app._inventory = None
