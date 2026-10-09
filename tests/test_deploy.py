@@ -1232,5 +1232,141 @@ check(len(FarPC.restarts) == 1 and s_["summary"]["reboot"], "policy Suppress: ne
 check(Store(rstore.root).get("deployments", d_rb.id).reboot_policy == "suppress"
       and Store(rstore.root).get("packages", rb.id).reboot_codes == [5], "restart settings saved")
 
+# --- 14. Tasks as configuration: typed parameters, safe script text, secrets, the built-in library ----------------
+from sectorsmith.deploy import taskparams as TP, tasklib  # noqa: E402
+from sectorsmith.integrations import dpapi  # noqa: E402
+
+for bad, why in (([{"name": "bad name"}], "can't be a parameter name"), ([{"name": "SectorSmithX"}], "reserved"),
+                 ([{"name": "a"}, {"name": "A"}], "two parameters"), ([{"name": "c", "type": "choice"}], "option"),
+                 ([{"name": "n", "type": "number", "default": "ten"}], "should be a number"),
+                 ([{"name": "x", "type": "colour"}], "unknown type")):
+    try:
+        TP.tidy_parameters(bad)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check(why in msg, f"bad parameter refused: {msg}")
+num, yn = {"name": "n", "type": "number"}, {"name": "b", "type": "bool"}
+ch = {"name": "c", "type": "choice", "choices": ["Red", "Blue"]}
+check(TP.coerce(num, "12") == 12 and TP.coerce(num, "-1.5") == -1.5 and TP.coerce(yn, "yes") is True
+      and TP.coerce(yn, "0") is False and TP.coerce(ch, "Blue") == "Blue", "values coerced to their types")
+for p_, v_ in ((num, "1; Remove-Item C:\\"), (num, "$(whoami)"), (yn, "maybe"), (ch, "Green"),
+               ({"name": "s", "type": "secret"}, "plain text")):
+    try:
+        TP.coerce(p_, v_)
+        refused = False
+    except ValueError:
+        refused = True
+    check(refused, f"{p_['type']} value {v_!r} refused")
+evil = "a'; Remove-Item C:\\ -Recurse; '"
+hdr = TP.render("Write-Output $Name\n", {"Name": evil, "Count": 3, "Ratio": 0.5, "On": True, "Off": False},
+                context={"SectorSmithClient": "O'Brien Ltd"})
+check(hdr.splitlines()[:6] == ["$SectorSmithClient = 'O''Brien Ltd'", "$Name = 'a''; Remove-Item C:\\ -Recurse; '''",
+                               "$Count = 3", "$Ratio = 0.5", "$On = $true", "$Off = $false"]
+      and ps_balanced(hdr), "PowerShell header: quoted literals with quotes doubled, numbers and $true/$false bare")
+try:
+    TP.render("x", {"bad-name": 1})
+    refused = False
+except ValueError:
+    refused = True
+check(refused, "a variable name that isn't an identifier is refused")
+marker = os.path.join(W, "injected")
+ep = LocalEndpoint()
+val = f"x'; touch {marker}; echo '$(touch {marker})`touch {marker}`"
+r_ = ep.run_script(TP.render('printf "%s" "$Name"', {"Name": val}, "shell"), language="shell")
+check(r_["out"] == val and not os.path.exists(marker), "sh: a hostile value arrives intact and runs nothing")
+r_ = ep.run_script("echo hi", language="shell", params={"bad name": 1})
+check(r_["code"] == 127 and "letters" in r_["err"], "the endpoint refuses parameter names that aren't identifiers")
+
+# secrets: DPAPI only, so refused here and nothing written
+tstore = Store(os.path.join(W, "lib14"))
+try:
+    TP.save_secret(tstore.root, "hunter2")
+    refused = False
+except dpapi.SecretsUnavailable:
+    refused = True
+check(refused and not os.path.exists(os.path.join(tstore.root, TP.SECRETS)) if not dpapi.available() else True,
+      "without DPAPI a secret is refused and nothing is written")
+# a stand-in for DPAPI so the rest can run here
+_real = (dpapi.protect, dpapi.unprotect)
+dpapi.protect = lambda b: bytes(x ^ 0x5A for x in b)
+dpapi.unprotect = lambda b: bytes(x ^ 0x5A for x in b)
+ref = TP.save_secret(tstore.root, "hunter2-s3cret")
+with open(os.path.join(tstore.root, TP.SECRETS)) as _f:
+    check("hunter2" not in _f.read(), "secrets.json holds the encrypted value only")
+check(TP.load_secret(tstore.root, ref["secret"]) == "hunter2-s3cret", "a stored secret decrypts for the run")
+flag5 = os.path.join(W, "task5_flag")
+cfg = tstore.upsert("tasks", Task(name="Configured", language="shell",
+                                  parameters=[{"name": "Size", "type": "number", "default": 2},
+                                              {"name": "Mode", "type": "choice", "choices": ["a", "b"],
+                                               "default": "a"},
+                                              {"name": "Pw", "type": "secret"}],
+                                  test=f'echo "TEST size=$Size mode=$Mode pw=$Pw"; [ -f "{flag5}" ]',
+                                  set=f'echo "SET pw=$Pw"; echo "$Size $Mode" > "{flag5}"',
+                                  get=f'echo "GET $(cat "{flag5}") $SectorSmithComputer pw=$Pw"'))
+check([p_["type"] for p_ in cfg.parameters] == ["number", "choice", "secret"] and cfg.parameters[2]["default"] == "",
+      "typed parameters saved on the task")
+dcfg = tstore.upsert("deployments", Deployment("task", cfg.id, "enforce", params={"Size": 5, "Mode": "b", "Pw": ref}))
+
+
+class Recorder(LocalEndpoint):
+    scripts = []
+
+    def run_script(self, script, language="powershell", timeout=1800, params=None):
+        Recorder.scripts.append(script)
+        return super().run_script(script, language, timeout, params)
+
+
+s_ = core.run_session(Recorder(), tstore, Progress(1), mode="detect")
+a_ = s_["actions"][0]
+check(len(Recorder.scripts) == 1 and "TEST" in Recorder.scripts[0] and "SET" not in Recorder.scripts[0]
+      and a_["action"] == "set", "the check step runs Test only")
+check("size=5 mode=b" in a_["test_output"] and "hunter2" not in a_["test_output"] and "pw=********" in
+      a_["test_output"], "deployment values reach the script; the secret is masked in its output")
+s_ = core.run_session(Recorder(), tstore, Progress(1), mode="full")
+a_ = s_["actions"][0]
+with open(s_["path"]) as _f:
+    saved = _f.read()
+check(a_["status"] == "compliant" and a_["value"].startswith("GET 5 b " + host) and "hunter2" not in saved
+      and "pw=********" in a_["log"], "Set, Test again, then Get records the new state; the secret never lands in "
+                                      "the session")
+dcfg.params = {"Size": "lots"}
+tstore.upsert("deployments", dcfg)
+s_ = core.run_session(Recorder(), tstore, Progress(1), mode="detect")
+check(s_["actions"][0]["action"] == "audit" and "should be a number" in s_["actions"][0]["result"],
+      "a bad saved value is reported, not run")
+tstore.delete("deployments", dcfg.id)
+d2_ = tstore.upsert("deployments", Deployment("task", cfg.id, "enforce", params={"Pw": ref}))
+tstore.delete("deployments", d2_.id)
+check(ref["secret"] not in TP._load(tstore.root), "removing a deployment forgets its secrets")
+dpapi.protect, dpapi.unprotect = _real
+
+# the built-in library
+check(8 <= len(tasklib.LIBRARY) <= 12 and len({t["library_id"] for t in tasklib.LIBRARY}) == len(tasklib.LIBRARY),
+      f"{len(tasklib.LIBRARY)} built-in tasks")
+want_ids = {"rename-computer", "time-zone", "power-plan", "bitlocker", "local-admin", "windows-update",
+            "remove-bloatware", "defender", "fast-startup", "oem-info"}
+check(want_ids <= {t["library_id"] for t in tasklib.LIBRARY}, "the library covers renaming, time zone, power, "
+      "BitLocker, local admin, Windows Update, bloatware, Defender, fast startup and OEM support info")
+bad_scripts = []
+for entry_ in tasklib.LIBRARY:
+    t_ = tasklib.to_task(entry_)
+    vals = {p_["name"]: (p_["default"] if p_["default"] not in ("", None) else ("x" if p_["type"] != "secret"
+                                                                                  else TP.Revealed("pw")))
+            for p_ in t_.parameters}
+    for which in ("test", "get", "set"):
+        text = core.task_script(t_, which, vals, core.task_context(tstore, "PC-1"))
+        if not (getattr(t_, which).strip() and ps_balanced(text) and all(f"${n} = " in text for n in vals)):
+            bad_scripts.append(f"{t_.name} {which}")
+check(not bad_scripts, f"every built-in Test, Get and Set builds with its parameters and balances {bad_scripts}")
+check(all(t["test"].count("exit 0") or "exit 0" in t["test"] for t in tasklib.LIBRARY)
+      and "exit 3010" in tasklib.get("rename-computer")["set"], "Tests exit 0 when fine; renaming asks for a restart")
+check("RecoveryPassword" in tasklib.get("bitlocker")["set"] and "Write-Output $rp" not in tasklib.get("bitlocker")["set"]
+      and "never printed" in tasklib.get("bitlocker")["description"], "BitLocker never prints the recovery key")
+one = tasklib.add(tstore, "time-zone")
+check(tasklib.add(tstore, "time-zone").id == one.id and one.library_id == "time-zone" and one.get
+      and Store(tstore.root).get("tasks", one.id).parameters[0]["name"] == "TimeZone",
+      "adding a built-in task twice keeps one copy, with its parameters")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

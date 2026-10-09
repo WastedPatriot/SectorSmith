@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from ..deploy import catalogue, core, schedule, versions
+from ..deploy import catalogue, core, schedule, taskparams, tasklib, versions
 from ..util import Cancelled, Progress, cancel_scope, get_logger
 from . import theme
 from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, REBOOT_LABEL, \
@@ -542,6 +542,12 @@ class DeploymentsScreen(ManagePage):
         sections = []
         if d.item_type == "bundle":
             sections.append(("Packages", "\n".join(dep_items(self.store, d)) or "None left", False))
+        task = self.store.get("tasks", d.item_id) if d.item_type == "task" else None
+        if task is not None and task.parameters:
+            by = {p["name"]: p for p in task.parameters}
+            sections.append(("Settings", "\n".join(
+                f"{by[n].get('label') or n}: {taskparams.shown(by[n], d.params.get(n, by[n].get('default')))}"
+                for n in by), False))
         actions = [("Run now...", lambda: self.app.go(RunWizard, only=[d.id]), "primary")]
         if d.baseline:
             c = self.store.get("clients", d.target_value)
@@ -855,6 +861,7 @@ class TasksScreen(ManagePage):
         if self.store is None:
             return
         self.header_action("New task", lambda: app.go(TaskEditor), primary=True, width=120)
+        self.header_action("Task library", lambda: app.go(TaskLibraryScreen), width=130)
         inner = self.page("Tasks", search="Search tasks",
                           panel_empty=("No task selected", "Select a task to see its check and fix scripts.",
                                        "task"))
@@ -887,13 +894,21 @@ class TasksScreen(ManagePage):
 
     def _show(self, t):
         used = [d for d in self.store.deployments if d.item_type == "task" and d.item_id == t.id]
-        sections = [("Check", _short(t.test, 400), True)]
+        sections = [("Test", _short(t.test, 400), True)]
         if t.set:
-            sections.append(("Fix", _short(t.set, 400), True))
+            sections.append(("Set", _short(t.set, 400), True))
+        if t.get:
+            sections.append(("Get", _short(t.get, 300), True))
+        fields = [("Language", LANGUAGES.get(t.language, t.language))]
+        if t.parameters:
+            fields.append(("Parameters", ", ".join(f"{p['name']} ({taskparams.TYPES[p['type']].lower()})"
+                                                   for p in t.parameters)))
+        if t.library_id:
+            fields.append(("From", "The built-in task library"))
         self.panel.show("task", "success", t.name, t.description,
                         pills=[(f"In {_plural(len(used), 'deployment')}", "success") if used else
                                ("Not deployed", "neutral")],
-                        fields=[("Language", LANGUAGES.get(t.language, t.language))], sections=sections,
+                        fields=fields, sections=sections,
                         actions=[("Deploy...", lambda: self.app.go(DeploymentWizard, item=("task", t.id)), "primary"),
                                  ("Edit", lambda: self.app.go(TaskEditor, task=t), "secondary"),
                                  ("Remove", lambda: self._remove(t), "danger")])
@@ -905,6 +920,69 @@ class TasksScreen(ManagePage):
         if ok:
             self.app.toast(f"Removed {t.name}")
             self.fill()
+
+
+class TaskLibraryScreen(ManagePage):
+    """Built-in upkeep tasks (tasklib.py) to add to your own Tasks and deploy with your values."""
+
+    def __init__(self, master, app):
+        super().__init__(master, app, "Task library", "Common upkeep, ready to use: each has a Test, a Get and a "
+                                                      "Set, and settings you fill in per deployment.")
+        if self.store is None:
+            return
+        self.header_action("Tasks", lambda: app.go(TasksScreen), width=110)
+        inner = self.page("Built-in tasks", search="Search tasks",
+                          panel_empty=("Pick a task", "Select one to see what it checks, what it changes and its "
+                                                      "settings.", "task"))
+        self.table = DataTable(inner, [("name", "Task", 280), ("cat", "Area", 110), ("params", "Settings", 90, "e"),
+                                       ("have", "Added", 80)], height=9, on_select=self._show, on_open=self._add)
+        self.table.pack(fill="both", expand=True)
+        self.search_var.trace_add("write", lambda *_: self.fill())
+        self.fill()
+
+    def _have(self, entry):
+        return next((t for t in self.store.tasks if t.library_id == entry["library_id"]), None)
+
+    def fill(self, select=None):
+        self.table.clear()
+        q = self.search_var.get().lower().split()
+        sel = None
+        for e in tasklib.LIBRARY:
+            if not all(w in f"{e['name']} {e['description']} {e['category']}".lower() for w in q):
+                continue
+            iid = self.table.add((e["name"], e["category"], len(e["parameters"]) or "-",
+                                  "Added" if self._have(e) else ""), data=e)
+            if select == e["library_id"]:
+                sel = iid
+        self.table.done()
+        self.card_count.configure(text=_plural(len(tasklib.LIBRARY), "task"))
+        if sel:
+            self.table.tree.selection_set(sel)
+            self._show(self.table.rows[sel])
+
+    def _show(self, e):
+        have = self._have(e)
+        params = [f"{p.get('label') or p['name']}: {taskparams.TYPES[p.get('type', 'text')].lower()}"
+                  + (f", default {p['default']}" if p.get("default") not in (None, "") else "")
+                  for p in e["parameters"]]
+        sections = [("What it does", e["description"], False)]
+        if params:
+            sections.append(("Settings", "\n".join(params), False))
+        sections.append(("Test", _short(e["test"], 300), True))
+        if have is not None:
+            actions = [("Deploy...", lambda: self.app.go(DeploymentWizard, item=("task", have.id)), "primary"),
+                       ("Open in Tasks", lambda: self.app.go(TasksScreen, select=have.id), "secondary")]
+        else:
+            actions = [("Add to my tasks", lambda: self._add(e), "primary")]
+        self.panel.show("task", "success", e["name"], e["category"], pills=[("Added", "success")] if have else [],
+                        fields=[("Language", "PowerShell"), ("Restarts", "Set exits 3010 when one is needed")],
+                        sections=sections, actions=actions)
+
+    def _add(self, e):
+        ok, t = attempt(self.app, f"add {e['name']}", lambda: tasklib.add(self.store, e["library_id"]))
+        if ok:
+            self.app.toast(f"{t.name} is in your tasks. Deploy it to set its values.")
+            self.fill(select=e["library_id"])
 
 
 # ---------------------------------------------------------------------------- sessions
