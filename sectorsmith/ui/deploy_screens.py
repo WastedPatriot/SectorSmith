@@ -12,7 +12,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ..deploy import analyze, core, schedule, versions
+from ..deploy import analyze, core, schedule, taskparams, versions
 from ..util import Cancelled, get_logger, human_time
 from . import theme
 from .link_screens import MachinePicker
@@ -1025,6 +1025,11 @@ class DeploymentWizard(Screen):
         self.onboarding = tk.BooleanVar(value=False)
         ctk.CTkSwitch(opts, text="Only on new PCs (onboarding runs)", variable=self.onboarding,
                       font=theme.font_style("body")).pack(anchor="w")
+        self.values_form = None
+        if kind == "task" and obj is not None and obj.parameters:
+            caption(opts, "Settings for this deployment").pack(anchor="w", pady=(16, 4))
+            self.values_form = ValuesForm(opts, obj)
+            self.values_form.pack(anchor="w")
         caption(opts, "Restarts").pack(anchor="w", pady=(16, 4))
         reboot_help = ctk.CTkLabel(opts, text="", font=theme.font_style("small"), text_color=P["muted"],
                                    anchor="w", justify="left", wraplength=520)
@@ -1073,11 +1078,12 @@ class DeploymentWizard(Screen):
             return
         try:
             sched = self.schedule_editor.value()
-        except ValueError as e:
+            params = self.values_form.value(self.store.root) if self.values_form is not None else {}
+        except Exception as e:  # noqa: BLE001  (a bad value, or DPAPI refusing a secret)
             self.app.toast(str(e), "warn")
             return
-        common = dict(desired=desired, version=version, target_kind=self.target[0], target_value=self.target[1],
-                      onboarding_only=bool(self.onboarding.get()), schedule=sched,
+        common = dict(params=params, desired=desired, version=version, target_kind=self.target[0],
+                      target_value=self.target[1], onboarding_only=bool(self.onboarding.get()), schedule=sched,
                       allow_downgrade=desired == "version" and bool(self.downgrade.get()),
                       reboot_policy=_key(REBOOT_LABEL, self.reboot_seg.get()))
         if len(self.picked) > 1:
@@ -1183,20 +1189,151 @@ class ClientEditor(Screen):
 
 
 # ---------------------------------------------------------------------------
+class ParamEditor(ctk.CTkFrame):
+    """A task's typed parameters: name, type, default and (for a choice) its options."""
+
+    def __init__(self, master, params):
+        super().__init__(master, fg_color="transparent")
+        self.rows = []
+        self.list = ctk.CTkFrame(self, fg_color="transparent")
+        self.list.pack(fill="x")
+        for p in params:
+            self.add(p)
+        soft_button(self, "+ Add parameter", lambda: self.add({}), width=150).pack(anchor="w", pady=(6, 0))
+
+    def add(self, p):
+        # two lines per parameter: name, type and remove; then its default and (for a choice) the options
+        row = ctk.CTkFrame(self.list, fg_color=P["surface_2"], corner_radius=8)
+        row.pack(fill="x", pady=3, padx=(0, 8))
+        name = ctk.CTkEntry(row, width=150, height=30, font=theme.mono(12), placeholder_text="Name")
+        kind = ctk.CTkOptionMenu(row, values=list(taskparams.TYPES.values()), width=110, height=30,
+                                 font=theme.font_style("small"))
+        kind.set(taskparams.TYPES.get(p.get("type", "text")))
+        default = ctk.CTkEntry(row, width=150, height=30, font=theme.font_style("body"), placeholder_text="Default")
+        choices = ctk.CTkEntry(row, width=150, height=30, font=theme.font_style("body"),
+                               placeholder_text="Options: a, b, c")
+        d = p.get("default", "")
+        d = ("yes" if d else "no") if isinstance(d, bool) else str(d if d is not None else "")
+        for w, text in ((name, p.get("name", "")), (default, d), (choices, ", ".join(p.get("choices") or []))):
+            if text:
+                w.insert(0, text)
+        name.grid(row=0, column=0, padx=(8, 6), pady=(8, 3), sticky="w")
+        kind.grid(row=0, column=1, padx=(0, 6), pady=(8, 3), sticky="w")
+        default.grid(row=1, column=0, padx=(8, 6), pady=(3, 8), sticky="w")
+        choices.grid(row=1, column=1, columnspan=2, padx=(0, 6), pady=(3, 8), sticky="w")
+        entry = {"frame": row, "name": name, "type": kind, "default": default, "choices": choices,
+                 "label": p.get("label", ""), "help": p.get("help", ""), "required": p.get("required", False)}
+        small_button(row, "x", lambda: self._remove(entry), "danger", width=28).grid(row=0, column=2, pady=(8, 3))
+        self.rows.append(entry)
+
+    def _remove(self, entry):
+        entry["frame"].destroy()
+        self.rows.remove(entry)
+
+    def value(self):
+        """The parameter list, checked. Raises ValueError."""
+        out = []
+        for r in self.rows:
+            name = r["name"].get().strip()
+            if not name:
+                continue
+            out.append({"name": name, "type": _key(taskparams.TYPES, r["type"].get()), "label": r["label"] or name,
+                        "help": r["help"], "required": r["required"], "default": r["default"].get().strip(),
+                        "choices": [c.strip() for c in r["choices"].get().split(",") if c.strip()]})
+        return taskparams.tidy_parameters(out)
+
+
+class ValuesForm(ctk.CTkFrame):
+    """A deployment's values for a task's typed parameters. Secrets are typed here and stored encrypted (DPAPI);
+    where DPAPI isn't available the secret boxes are switched off."""
+
+    def __init__(self, master, task, values=None):
+        super().__init__(master, fg_color="transparent")
+        self.task, self.given = task, dict(values or {})
+        self.widgets = {}
+        from ..integrations import dpapi
+        self.can_secret = dpapi.available()
+        for i, p in enumerate(task.parameters):
+            ctk.CTkLabel(self, text=p.get("label") or p["name"], font=theme.font_style("body_strong"),
+                         text_color=P["text"], anchor="w", width=150).grid(row=i * 2, column=0, sticky="w",
+                                                                         pady=(6, 0))
+            cur = self.given.get(p["name"], p.get("default", ""))
+            kind = p["type"]
+            if kind == "bool":
+                var = tk.BooleanVar(value=bool(cur))
+                w = ctk.CTkSwitch(self, text="", variable=var, width=46)
+                w.var = var
+            elif kind == "choice":
+                w = ctk.CTkOptionMenu(self, values=p["choices"], width=220, height=32, font=theme.font_style("body"))
+                w.set(cur if cur in p["choices"] else p["choices"][0])
+            else:
+                w = ctk.CTkEntry(self, width=260, height=32, font=theme.font_style("body"),
+                                 show="•" if kind == "secret" else "",
+                                 placeholder_text=("Stored encrypted. Leave empty to keep it" if cur else
+                                                   "Stored encrypted") if kind == "secret" else "")
+                if kind == "secret" and not self.can_secret:
+                    w.configure(state="disabled", placeholder_text="Needs Windows (DPAPI)")
+                elif kind != "secret" and cur not in ("", None):
+                    w.insert(0, str(cur))
+            w.grid(row=i * 2, column=1, sticky="w", pady=(6, 0))
+            hint = p.get("help") or ""
+            if kind == "secret" and not self.can_secret:
+                hint = "Secrets are only stored with Windows DPAPI, so this can't be set on this computer."
+            if hint:
+                ctk.CTkLabel(self, text=hint, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                             justify="left", wraplength=420).grid(row=i * 2 + 1, column=1, sticky="w")
+            self.widgets[p["name"]] = (p, w)
+        if not task.parameters:
+            ctk.CTkLabel(self, text="This task has no settings.", font=theme.font_style("body"),
+                         text_color=P["muted"]).grid(row=0, column=0, sticky="w")
+
+    def value(self, root):
+        """The values to save on the deployment, checked, with new secrets encrypted into the library at root.
+        Raises ValueError (or dpapi.SecretsUnavailable)."""
+        out = {}
+        for name, (p, w) in self.widgets.items():
+            if p["type"] == "bool":
+                out[name] = bool(w.var.get())
+            elif p["type"] == "choice":
+                out[name] = w.get()
+            elif p["type"] == "secret":
+                text = w.get() if self.can_secret else ""
+                old = self.given.get(name)
+                if text:
+                    out[name] = taskparams.save_secret(root, text, ref=old["secret"] if isinstance(old, dict)
+                                                       else None)
+                elif isinstance(old, dict):
+                    out[name] = old
+            else:
+                text = w.get().strip()
+                if text:
+                    out[name] = taskparams.coerce(p, text)
+        taskparams.values_for(self.task.parameters, self.task.params, out)  # required ones present
+        return out
+
+
 class TaskEditor(Screen):
     guide_topic = "deploy"
 
     def __init__(self, master, app, task=None):
         super().__init__(master, app, "Edit task" if task else "New upkeep task",
-                         "A check script says whether the PC is fine (exit code 0). The fix script runs when it "
-                         "isn't.", badge=BADGE)
+                         "Test says whether the PC is fine (exit code 0), Set fixes it, Get prints the current "
+                         "state. Parameters become variables in all three.", badge=BADGE)
         self.task = task
         body = self.new_body()
         self.store = open_store(self, body)
         if self.store is None:
             return
-        card = _form_card(body, expand=True)
-        card.grid_rowconfigure((3, 4), weight=1)
+        cols = ctk.CTkFrame(body, fg_color="transparent")
+        cols.pack(fill="both", expand=True)
+        cols.grid_columnconfigure(0, weight=3, uniform="t")
+        cols.grid_columnconfigure(1, weight=2, uniform="t")
+        cols.grid_rowconfigure(0, weight=1)
+        outer = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        outer.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        card = AutoScroll(outer)
+        card.pack(fill="both", expand=True, padx=2, pady=(2, 8))
+        card.grid_columnconfigure(1, weight=1)
         _form_label(card, 0, "Name", top=True)
         self.name = ctk.CTkEntry(card, height=34, placeholder_text="e.g. Print Spooler running")
         self.name.grid(row=0, column=1, sticky="ew", padx=(0, 20), pady=(20, 6))
@@ -1207,20 +1344,35 @@ class TaskEditor(Screen):
         self.lang = segmented(card, list(LANGUAGES.values()), height=30)
         self.lang.set(LANGUAGES.get(task.language if task else "powershell", LANGUAGES["powershell"]))
         self.lang.grid(row=2, column=1, sticky="w", padx=(0, 20), pady=6)
-        _form_label(card, 3, "Check", "nw")
+        _form_label(card, 3, "Test", "nw")
         self.test = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
         self.test.grid(row=3, column=1, sticky="nsew", padx=(0, 20), pady=6)
-        _form_label(card, 4, "Fix", "nw")
+        _form_label(card, 4, "Set", "nw")
         self.fix = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
         self.fix.grid(row=4, column=1, sticky="nsew", padx=(0, 20), pady=6)
-        ctk.CTkLabel(card, text="Both scripts run as administrator on the PC. Exit with 0 from Check when "
-                                "everything is fine.", font=theme.font_style("small"), text_color=P["muted"],
-                     anchor="w").grid(row=5, column=1, sticky="w", padx=(0, 20), pady=(0, 16))
+        _form_label(card, 5, "Get", "nw")
+        self.get_box = ctk.CTkTextbox(card, height=60, font=theme.mono(12), border_color=P["control_border"])
+        self.get_box.grid(row=5, column=1, sticky="nsew", padx=(0, 20), pady=6)
+        ctk.CTkLabel(card, text="All three run as administrator on the PC. The check step runs Test only; Get runs "
+                                "after a fix to record the new state.", font=theme.font_style("small"),
+                     text_color=P["muted"], anchor="w", justify="left", wraplength=420).grid(
+            row=6, column=1, sticky="w", padx=(0, 20), pady=(0, 16))
+        side = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        side.grid(row=0, column=1, sticky="nsew")
+        caption(side, "Parameters").pack(anchor="w", padx=18, pady=(16, 4))
+        ctk.CTkLabel(side, text="Each deployment of the task gives its own values. Secrets are stored encrypted "
+                                "and shown masked.", font=theme.font_style("small"), text_color=P["muted"],
+                     anchor="w", justify="left", wraplength=360).pack(anchor="w", padx=18)
+        scroll = AutoScroll(side)
+        scroll.pack(fill="both", expand=True, padx=(18, 6), pady=(8, 12))
+        self.params = ParamEditor(scroll, task.parameters if task else [])
+        self.params.pack(fill="x")
         if task:
             self.name.insert(0, task.name)
             self.desc.insert(0, task.description)
             self.test.insert("1.0", task.test)
             self.fix.insert("1.0", task.set)
+            self.get_box.insert("1.0", task.get)
         self.buttons(primary=("Save task", self._save),
                      secondary=("Back", lambda: go_manage(self.app, "Tasks")))
 
@@ -1230,10 +1382,16 @@ class TaskEditor(Screen):
             self.app.toast("Give the task a name.", "warn")
             return
         if not test:
-            self.app.toast("Add a check script. It should exit with 0 when the PC is fine.", "warn")
+            self.app.toast("Add a Test script. It should exit with 0 when the PC is fine.", "warn")
+            return
+        try:
+            params = self.params.value()
+        except ValueError as e:
+            self.app.toast(str(e), "warn")
             return
         t = self.task or core.Task(name=name)
         t.name, t.test, t.set = name, test, self.fix.get("1.0", "end-1c").strip()
+        t.get, t.parameters = self.get_box.get("1.0", "end-1c").strip(), params
         t.description, t.language = self.desc.get().strip(), _key(LANGUAGES, self.lang.get())
         ok, _ = attempt(self.app, "save the task", lambda: self.store.upsert("tasks", t))
         if ok:

@@ -371,10 +371,50 @@ scr.desc.insert(0, "Makes sure the flag file is there")
 scr.lang.set(D.LANGUAGES["shell"])
 scr.test.insert("1.0", f'test -f "{flag}"')
 scr.fix.insert("1.0", f'sleep 3; touch "{flag}"')  # slow enough to catch the live status
+scr.get_box.insert("1.0", f'ls "{flag}"')
+scr.params.add({"name": "bad name"})
+press("Save task")
+assert not store().tasks, "a parameter name with a space is refused"
+scr.params.rows[-1]["name"].delete(0, "end")
+scr.params.rows[-1]["name"].insert(0, "Greeting")
+scr.params.rows[-1]["default"].insert(0, "hi")
+scr.params.add({"name": "Tries", "type": "number", "default": 3})
+pump(.3)
 shot("task_editor")
 press("Save task")
 task = store().tasks[0]
-assert task.language == "shell"
+assert task.language == "shell" and task.get and [p["name"] for p in task.parameters] == ["Greeting", "Tries"]
+assert task.parameters[1]["default"] == 3
+
+# --- the built-in task library: add one, deploy it with its own settings --------------------------------------
+app.go(MS.TaskLibraryScreen)
+pump(.5)
+scr = app.screen
+assert len(scr.table.rows) >= 8
+iid = next(i for i, e in scr.table.rows.items() if e["library_id"] == "local-admin")
+scr.table.tree.selection_set(iid)
+pump(.3)
+press("Add to my tasks", scr.panel)
+admin = next(t for t in store().tasks if t.library_id == "local-admin")
+assert [p["type"] for p in admin.parameters] == ["text", "choice", "secret"]
+shot("task_library_light")
+press("Deploy...", scr.panel)
+scr = app.screen
+press("Next")
+press("Next")
+vf = scr.values_form
+assert vf is not None and set(vf.widgets) == {"Account", "State", "Password"}
+vf.widgets["State"][1].set("Enabled")
+if not vf.can_secret:
+    assert vf.widgets["Password"][1].cget("state") == "disabled", "no DPAPI here: the secret box is off"
+shot("deployment_task_values")
+press("Save deployment")
+dadmin = next(d for d in store().deployments if d.item_id == admin.id)
+assert dadmin.params == {"Account": "Administrator", "State": "Enabled"}, dadmin.params
+app.screen.table.select(dadmin)
+pump(.3)
+shot("deployment_task_panel")
+store().delete("deployments", dadmin.id)
 
 # --- deployments: script package to the client, task to this PC, Fake App installed, a two-package bundle ---
 app.go(D.DeploymentWizard, item=("software", handy.id))
@@ -400,7 +440,16 @@ pump(.3)
 assert scr.machine_entry.get() == host
 shot("deployment_where")
 press("Next")
+scr.values_form.widgets["Greeting"][1].delete(0, "end")
+scr.values_form.widgets["Greeting"][1].insert(0, "hello there")
+scr.values_form.widgets["Tries"][1].insert(0, "x")
 press("Save deployment")
+assert not [d for d in store().deployments if d.item_id == task.id], "a number that isn't one is refused"
+scr.values_form.widgets["Tries"][1].delete(0, "end")
+scr.values_form.widgets["Tries"][1].insert(0, "4")
+press("Save deployment")
+assert next(d for d in store().deployments if d.item_id == task.id).params == {"Greeting": "hello there",
+                                                                               "Tries": 4}
 
 app.go(D.DeploymentWizard, item=("software", pkg.id))
 pump(.5)

@@ -65,8 +65,12 @@ class Task:
     set: str = ""                          # makes it compliant
     language: str = "powershell"
     description: str = ""
-    params: dict = field(default_factory=dict)
+    params: dict = field(default_factory=dict)       # older untyped defaults (name -> value)
     id: str = field(default_factory=_id)
+    get: str = ""                          # optional: prints the current state, run after a fix
+    parameters: list = field(default_factory=list)   # typed parameters, see taskparams.py
+    category: str = ""
+    library_id: str = ""                   # set when it came from the built-in task library (tasklib.py)
 
 
 @dataclass
@@ -148,6 +152,9 @@ class Store:
         return next((x for x in self.data[kind] if x.id == id_), None)
 
     def upsert(self, kind, obj):
+        if kind == "tasks":
+            from .taskparams import tidy_parameters
+            obj.parameters = tidy_parameters(obj.parameters)
         if kind == "packages":
             loop = dependency_loop(self, obj)
             if loop:
@@ -164,6 +171,12 @@ class Store:
         return obj
 
     def delete(self, kind, id_):
+        if kind == "deployments":
+            gone = self.get("deployments", id_)
+            for v in (gone.params.values() if gone is not None else []):
+                if isinstance(v, dict) and v.get("secret"):
+                    from .taskparams import forget_secret
+                    forget_secret(self.root, v["secret"])
         self.data[kind] = [x for x in self.data[kind] if x.id != id_]
         if kind == "packages":
             shutil.rmtree(os.path.join(self.root, "files", id_), ignore_errors=True)
@@ -739,14 +752,46 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
                                 "desired": "ignore", "current": "not checked", "action": "none",
                                 "result": "ignored on this PC"})
                 continue
-            r = ep.run_script(script=task.test, language=task.language, params={**task.params, **d.params},
-                              timeout=600)
+            ctx = task_context(store, hostname)
+            base = {"type": "task", "deployment": d.id, "item": task.id, "name": task.name, "desired": d.desired,
+                    "context": ctx}
+            try:
+                values = task_values(store, task, d)
+                script = task_script(task, "test", values, ctx)
+            except ValueError as e:
+                actions.append(dict(base, current="not checked", action="audit", result=f"can't run: {e}"))
+                continue
+            # the check step only ever runs Test
+            r = ep.run_script(script=script, language=task.language, timeout=600)
             ok = r["code"] == 0
             act = "none" if ok else ("set" if d.desired == "enforce" else "audit")
-            actions.append({"type": "task", "deployment": d.id, "item": task.id, "name": task.name,
-                            "desired": d.desired, "current": "compliant" if ok else "not compliant",
-                            "action": act, "test_output": (r["out"] + r["err"])[-500:]})
+            actions.append(dict(base, current="compliant" if ok else "not compliant", action=act,
+                                test_output=mask_output(r["out"] + r["err"], values)[-500:]))
     return actions
+
+
+def task_context(store: Store, hostname: str) -> dict:
+    """Variables every task script gets besides its own parameters."""
+    return {"SectorSmithComputer": hostname,
+            "SectorSmithClient": ", ".join(c.name for c in store.clients_of(hostname))}
+
+
+def task_values(store: Store, task: Task, dep: Deployment | None) -> dict:
+    """The task's parameter values for a deployment, checked, with secrets decrypted. Raises ValueError."""
+    from . import taskparams as TP
+    values = TP.values_for(task.parameters, task.params, dep.params if dep is not None else {})
+    return TP.reveal(store.root, values)
+
+
+def task_script(task: Task, which: str, values: dict, context: dict | None = None) -> str:
+    """Test, Get or Set with the parameters set at the top as quoted literals."""
+    from . import taskparams as TP
+    return TP.render({"test": task.test, "set": task.set, "get": task.get}[which], values, task.language, context)
+
+
+def mask_output(text: str, values: dict) -> str:
+    from . import taskparams as TP
+    return TP.mask(text or "", TP.secret_values(values))
 
 
 def idle_status(a: dict) -> str:
@@ -763,6 +808,7 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     log_lines = []
     dep = store.get("deployments", source_id(a.get("deployment", "")))
     policy = dep.reboot_policy if dep is not None else "never"
+    secrets: list = []   # decrypted task secrets, masked in the saved log
 
     def run(cmd):
         for attempt in range(BUSY_TRIES):
@@ -858,16 +904,26 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             if task is None:
                 a.update(status="failed", result="the task was deleted before it could run")
                 return a
-            params = {**task.params, **(dep.params if dep else {})}
+            values = task_values(store, task, dep)
+            secrets.extend(str(v) for v in values.values() if v.__class__.__name__ == "Revealed")
+            ctx = a.get("context") or {}
             if a["action"] == "set":
-                r = ep.run_script(script=task.set, language=task.language, params=params, timeout=1800)
+                r = ep.run_script(script=task_script(task, "set", values, ctx), language=task.language,
+                                  timeout=1800)
                 log_lines.append(f"[set] exit {r['code']}\n{r['out']}{r['err']}")
                 if r["code"] in (3010, 1641):
                     a["reboot"] = True
-                t = ep.run_script(script=task.test, language=task.language, params=params, timeout=600)
+                t = ep.run_script(script=task_script(task, "test", values, ctx), language=task.language,
+                                  timeout=600)
                 log_lines.append(f"[test] exit {t['code']}\n{t['out']}{t['err']}")
                 a.update(status="compliant" if t["code"] == 0 else "failed",
                          result="fixed" if t["code"] == 0 else "still not compliant after set")
+                if task.get.strip():
+                    g = ep.run_script(script=task_script(task, "get", values, ctx), language=task.language,
+                                      timeout=600)
+                    log_lines.append(f"[get] exit {g['code']}\n{g['out']}{g['err']}")
+                    if g["code"] == 0 and g["out"].strip():
+                        a["value"] = mask_output(g["out"].strip(), values)[-300:]
             else:
                 a.update(status="non-compliant", result="audit only, not changed")
     except Cancelled as c:
@@ -877,7 +933,10 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         a.update(status="failed", result=str(e))
     finally:
-        a["log"] = "\n".join(log_lines)[-8000:]
+        text = "\n".join(log_lines)
+        for sec in sorted(set(x for x in secrets if x), key=len, reverse=True):
+            text = text.replace(sec, "********")
+        a["log"] = text[-8000:]
         a["seconds"] = round(time.time() - t0, 1)
     return a
 

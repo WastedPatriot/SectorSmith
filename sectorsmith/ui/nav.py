@@ -90,7 +90,7 @@ EXTRA = {
     "Home": ("home", None), "WelcomeScreen": ("home", None),
     "PackageBuilder": ("manage", "library"), "DeploymentWizard": ("manage", "deployments"),
     "ClientEditor": ("manage", "clients"), "TaskEditor": ("manage", "tasks"), "SessionView": ("manage", "sessions"),
-    "BaselineEditor": ("manage", "clients"),
+    "BaselineEditor": ("manage", "clients"), "TaskLibraryScreen": ("manage", "tasks"),
 }
 
 

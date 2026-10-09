@@ -624,6 +624,10 @@ class LocalEndpoint:
 
         def unavailable(msg):
             return {"code": 127, "out": "", "err": msg, "seconds": 0}
+        import re
+        bad = [k for k in params if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))]
+        if bad:
+            return unavailable(f"Parameter names can only use letters, digits and _: {bad[0]!r}")
         if language == "powershell":
             exe = "powershell.exe" if win else shutil.which("pwsh")
             if not exe:
