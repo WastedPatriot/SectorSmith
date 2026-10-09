@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 import customtkinter as ctk
 
@@ -32,6 +33,8 @@ TOKENS = {
     "on_accent": ("#FFFFFF", "#0D0E12"),
     "brand_pink": ("#E0407A", "#FF5C99"),    # Mossbit's cheeks only, never UI chrome
     "focus": ("#5747E0", "#A197FF"),
+    "focus_ring": ("#3B2DC4", "#B8B0FF"),      # keyboard focus ring, 2 px
+    "focus_ring_fill": ("#14161F", "#FFFFFF"),   # the ring on filled buttons, in contrast to their fill
     # status
     "success": ("#0A7650", "#3DD39B"),
     "success_soft": ("#E3F5EC", "#10291F"),
@@ -87,7 +90,8 @@ PERSONALITIES = ("Full", "Subtle", "Off")
 TAGLINE = "The bench toolkit for MSP technicians."
 
 _listeners: list = []
-_state = {"personality": None, "presentation": False}
+_state = {"personality": None, "presentation": False, "reduce_motion": None, "system_motion": (None, 0.0)}
+UI_SIZES = (90, 100, 115, 130)
 _families: dict = {}
 
 
@@ -166,17 +170,83 @@ def mask(text: str, keep: int = 4) -> str:
     return "•" * max(0, min(8, len(text) - keep)) + text[-keep:]
 
 
-def reduced_motion() -> bool:
-    """Follow Windows 'Show animations in Windows'."""
+def reduce_motion_setting() -> bool:
+    """Settings > Accessibility > Reduce motion."""
+    if _state["reduce_motion"] is None:
+        _state["reduce_motion"] = bool(_settings().get("reduce_motion"))
+    return _state["reduce_motion"]
+
+
+def set_reduce_motion(on: bool):
+    from .guide import save_settings
+    _state["reduce_motion"] = bool(on)
+    save_settings(reduce_motion=bool(on))
+    _notify()
+
+
+def _system_reduced_motion() -> bool:
+    """Windows 'Show animations in Windows' turned off. Checked at most every few seconds."""
     if sys.platform != "win32":
         return False
+    val, at = _state["system_motion"]
+    if val is not None and time.monotonic() - at < 5:
+        return val
     try:
         import ctypes
-        val = ctypes.c_bool(True)
-        ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(val), 0)  # SPI_GETCLIENTAREAANIMATION
-        return not val.value
+        on = ctypes.c_bool(True)
+        ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0)  # SPI_GETCLIENTAREAANIMATION
+        val = not on.value
     except Exception:  # noqa: BLE001
-        return False
+        val = False
+    _state["system_motion"] = (val, time.monotonic())
+    return val
+
+
+def reduced_motion() -> bool:
+    """No slides, sweeps or roaming: the Reduce motion setting, or Windows animations turned off."""
+    return reduce_motion_setting() or _system_reduced_motion()
+
+
+# ---------------------------------------------------------------- interface size and DPI
+def ui_size() -> int:
+    """Settings > Interface size, in percent."""
+    try:
+        v = int(_settings().get("ui_size") or 100)
+    except (TypeError, ValueError):
+        v = 100
+    return v if v in UI_SIZES else 100
+
+
+def apply_ui_size(percent: int | None = None):
+    """Scale every CustomTkinter widget by the interface size. It multiplies the monitor's own DPI scaling, which
+    CustomTkinter tracks per monitor."""
+    ctk.set_widget_scaling((percent or ui_size()) / 100)
+
+
+def scaling(widget=None) -> float:
+    """Pixels per design pixel right now: monitor DPI times the interface size."""
+    try:
+        return ctk.ScalingTracker.get_widget_scaling(widget)
+    except Exception:  # noqa: BLE001  widget not tracked yet
+        return ctk.ScalingTracker.widget_scaling
+
+
+def enable_dpi_awareness():
+    """Make the process per-monitor DPI aware before Tk starts, so text stays sharp on scaled displays and
+    CustomTkinter rescales when the window moves to another monitor. Windows 8.1 and later get per-monitor
+    awareness; older Windows falls back to system awareness. Safe to call more than once."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        return
+    except (AttributeError, OSError):
+        pass  # no shcore.dll before Windows 8.1
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass  # very old Windows: Tk scales as before
 
 
 # ---------------------------------------------------------------- fonts
@@ -334,11 +404,13 @@ def style_ttk(root):
     if "clam" in st.theme_names():
         st.theme_use("clam")
     surf, surf2, text, muted = c("surface"), c("surface_2"), c("text"), c("muted")
-    st.configure("Smith.Treeview", background=surf, fieldbackground=surf, foreground=text, rowheight=36,
-                 borderwidth=0, relief="flat", font=(family(), 10))
+    k = scaling(root)  # negative font sizes are pixels, so tables follow DPI and the interface size like CTk
+    st.configure("Smith.Treeview", background=surf, fieldbackground=surf, foreground=text, rowheight=round(36 * k),
+                 borderwidth=0, relief="flat", font=(family(), -round(13 * k)))
     st.map("Smith.Treeview", background=[("selected", c("selected"))], foreground=[("selected", text)])
     st.configure("Smith.Treeview.Heading", background=surf2, foreground=muted, relief="flat",
-                 font=(family(), 9, "bold"), borderwidth=0, padding=(8, 8), lightcolor=surf2, darkcolor=surf2,
+                 font=(family(), -round(12 * k), "bold"), borderwidth=0, padding=(round(8 * k), round(8 * k)),
+                 lightcolor=surf2, darkcolor=surf2,
                  bordercolor=c("border"))
     st.map("Smith.Treeview.Heading", background=[("active", c("hover"))])
     st.layout("Smith.Treeview", [("Smith.Treeview.treearea", {"sticky": "nswe"})])
@@ -349,6 +421,7 @@ def style_ttk(root):
         st.layout(name, [(f"{orient}.Scrollbar.trough", {"sticky": side, "children": [
             (f"{orient}.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
         st.configure(name, background=thumb, troughcolor=surf, bordercolor=surf, lightcolor=thumb, darkcolor=thumb,
-                     arrowcolor=muted, gripcount=0, relief="flat", borderwidth=0, width=8, arrowsize=8)
+                     arrowcolor=muted, gripcount=0, relief="flat", borderwidth=0, width=round(8 * k),
+                     arrowsize=round(8 * k))
         st.map(name, background=[("active", c("control_border")), ("pressed", c("control_border"))],
                lightcolor=[("active", c("control_border"))], darkcolor=[("active", c("control_border"))])

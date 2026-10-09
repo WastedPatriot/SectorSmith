@@ -110,7 +110,6 @@ def take_screenshots():
     shot("welcome")
     press("Skip")
     app.set_client("Northwind Dental")
-    app.set_ticket("48213")
     # hide the unreadable sandbox disks so the drive list looks like a real PC
     real = app.inventory()
     app._inventory = []
@@ -257,7 +256,7 @@ def framed(name, width=1200, src=None, out=None, dark=None):
     bar_bg, fg = ((32, 29, 44, 255), (190, 184, 210)) if dark else ((236, 233, 243, 255), (90, 84, 112))
     win = Image.new("RGBA", (im.width, im.height + bar_h), bar_bg)
     d = ImageDraw.Draw(win)
-    icon = Image.open(os.path.join(ASSETS, "icon.png")).convert("RGBA").resize((20, 20), Image.NEAREST)
+    icon = Image.open(os.path.join(ASSETS, "mark_32.png")).convert("RGBA").resize((20, 20), Image.LANCZOS)
     win.alpha_composite(icon, (12, 7))
     d.text((40, 17), "SectorSmith", fill=fg, font=font("sb", 14), anchor="lm")
     x = im.width - 22

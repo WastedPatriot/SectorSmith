@@ -13,6 +13,7 @@ import customtkinter as ctk
 from .. import carver, ntfs, partitions, partscan, surface, wipe
 from ..report import wipe_certificate
 from ..util import get_logger, human_size, human_time, is_admin
+from .shell import TICKETS
 from . import theme
 from .shell import branding, machine_status, technician
 from .widgets import AutoScroll, Card, DrivePicker, DropZone, EmptyState, Icon, IconBadge, OptionCard, Pill, \
@@ -97,6 +98,12 @@ class Screen(ctk.CTkFrame):
     def header_action(self, text, command, primary=False, width=0):
         b = (primary_button if primary else secondary_button)(self.actions, text, command, width=width or 140)
         b.pack(side="right", padx=(10, 0))
+        # packed right to left: stack each new one under the last, so Tab goes left to right (never under the
+        # frame's own canvas, which would hide it)
+        last = getattr(self, "_last_action", None)
+        if last is not None and last.winfo_exists():
+            b.lower(last)
+        self._last_action = b
         return b
 
     def _open_guide(self):
@@ -172,15 +179,16 @@ class Screen(ctk.CTkFrame):
 
     def buttons(self, primary=None, secondary=None, extra=None):
         """primary/secondary: (text, command). Returns primary button."""
-        pb = None
-        if primary:
-            pb = primary_button(self.footer, primary[0], primary[1], width=180, height=40)
+        # created left to right, so Tab visits them in the order they appear: extra, secondary, primary
+        xb = secondary_button(self.footer, extra[0], extra[1], width=150, height=40) if extra else None
+        sb = secondary_button(self.footer, secondary[0], secondary[1], width=130, height=40) if secondary else None
+        pb = primary_button(self.footer, primary[0], primary[1], width=180, height=40) if primary else None
+        if pb is not None:
             pb.pack(side="right")
-        if secondary:
-            secondary_button(self.footer, secondary[0], secondary[1], width=130, height=40).pack(side="right",
-                                                                                                   padx=10)
-        if extra:
-            secondary_button(self.footer, extra[0], extra[1], width=150, height=40).pack(side="left")
+        if sb is not None:
+            sb.pack(side="right", padx=10)
+        if xb is not None:
+            xb.pack(side="left")
         return pb
 
     def progress(self, title, subtitle):
@@ -343,7 +351,7 @@ class Home(Screen):
              "Link a PC to work on it remotely",
              "success", lambda: app.open_target("machines", "linked")),
             ("Jobs today", len(today), f"{done} finished  ·  {running} running" if today else
-             "Stamped with client and ticket", "accent", lambda: app.open_target("jobs", "history")),
+             "Stamped with client and technician", "accent", lambda: app.open_target("jobs", "history")),
             ("Drives on This PC", "-", "Counting drives", "info", lambda: app.open_target("drives", "all")),
             ("Software library", "-", "Manage preview", "amber", lambda: app.open_target("manage", "library")),
         ]
@@ -393,10 +401,10 @@ class Home(Screen):
         card.head.pack_configure(padx=20)
         jobs = list(reversed(self.app.jobs))[:5]
         if not jobs:
-            EmptyState(card.body, "No jobs yet", "Jobs you run show up here with their client, ticket and result.",
+            EmptyState(card.body, "No jobs yet", "Jobs you run show up here with their client and result.",
                        icon="jobs").pack(pady=(4, 18))
             return card
-        cols = (("Task", 0), ("Machine", 140), ("Ticket", 90), ("Result", 130))
+        cols = (("Task", 0), ("Machine", 140), ("Ticket" if TICKETS else "Client", 90), ("Result", 130))
         head = ctk.CTkFrame(card.body, fg_color=P["surface_2"], corner_radius=0, height=34)
         head.pack(fill="x")
         for i, (name, w) in enumerate(cols):
@@ -414,7 +422,8 @@ class Home(Screen):
                 side="left")
             ctk.CTkLabel(r, text=j["machine"], font=theme.font_style("body"), text_color=P["text_2"], width=140,
                          anchor="w").grid(row=0, column=1, sticky="w", padx=(0, 12))
-            ctk.CTkLabel(r, text=f"#{j['ticket']}" if j["ticket"] else "-", font=theme.mono(12),
+            third = (f"#{j['ticket']}" if j["ticket"] else "-") if TICKETS else (j.get("client") or "-")
+            ctk.CTkLabel(r, text=third, font=theme.mono(12) if TICKETS else theme.font_style("body"),
                          text_color=P["text_2"], width=90, anchor="w").grid(row=0, column=2, sticky="w", padx=(0, 12))
             pill = ctk.CTkFrame(r, fg_color="transparent", width=130)
             pill.grid(row=0, column=3, sticky="w", padx=(0, 12))
@@ -1057,7 +1066,7 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
                      f"{dev.bus}  \u00b7  {human_size(count * dev.sector_size)} will be erased",
                      [("Serial", theme.mask(dev.serial) if dev.serial else "-"), ("Method", method),
                       ("Client", ctx.get("client") or "Not set"),
-                      ("Ticket", f"#{ctx['ticket']}" if ctx.get("ticket") else "Not set"),
+                      *([("Ticket", f"#{ctx['ticket']}" if ctx.get("ticket") else "Not set")] if TICKETS else []),
                       ("Certificate", "Saved from the last step"), ("Technician", technician() or "-")],
                      note="The drive erases itself and this can't be stopped once it starts. Sample sectors are "
                           "marked first and checked afterwards." if hw else
@@ -1160,6 +1169,7 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         if not p:
             return
         cid = wipe_certificate(p, self.certificate_info(), branding())
+        self.app.attach_job_file(p, getattr(self, "record", {}).get("id"))  # Jobs can open it again later
         self.app.toast(f"Certificate {cid} saved. Open it and print to PDF.")
         self.app.open_folder(p)
 

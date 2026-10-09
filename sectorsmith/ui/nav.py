@@ -60,15 +60,17 @@ CATEGORIES = [
                         hint="clone one to many", destructive=True)]),
     ], working_on=True, shortcut="Ctrl+5"),
     Category("manage", "Manage", "manage", "Manage", "Software and upkeep on your linked PCs (preview)", [
-        ("Software", [Item("library", "Library", "package", "deploy_screens:DeployScreen", {"tab": "Library"},
-                           hint="deploy packages installers"),
-                      Item("deployments", "Deployments", "deploy", "deploy_screens:DeployScreen",
-                           {"tab": "Deployments"}, hint="deploy rollout"),
+        ("Software", [Item("library", "Packages", "package", "manage_screens:PackagesScreen",
+                           hint="deploy library installers msi exe"),
+                      Item("catalogue", "Catalogue", "search", "manage_screens:CatalogueScreen",
+                           hint="winget chocolatey apps add chrome 7-zip"),
+                      Item("deployments", "Deployments", "deploy", "manage_screens:DeploymentsScreen",
+                           hint="deploy rollout schedule daily weekly"),
                       Item("run", "Run maintenance", "play", "deploy_screens:RunWizard", hint="deploy apply")]),
-        ("Endpoints", [Item("clients", "Clients", "building", "deploy_screens:DeployScreen", {"tab": "Clients"}),
-                       Item("tasks", "Tasks", "task", "deploy_screens:DeployScreen", {"tab": "Tasks"},
-                            hint="scripts upkeep"),
-                       Item("sessions", "Sessions", "clock", "deploy_screens:DeployScreen", {"tab": "Sessions"},
+        ("Endpoints", [Item("clients", "Clients", "building", "manage_screens:ClientsScreen",
+                            hint="baseline onboarding new pc"),
+                       Item("tasks", "Tasks", "task", "manage_screens:TasksScreen", hint="scripts upkeep"),
+                       Item("sessions", "Sessions", "clock", "manage_screens:SessionsScreen",
                             hint="history results")]),
     ], shortcut="Ctrl+6"),
     Category("jobs", "Jobs", "jobs", "Jobs", "What ran, where and for whom", [
@@ -88,6 +90,7 @@ EXTRA = {
     "Home": ("home", None), "WelcomeScreen": ("home", None),
     "PackageBuilder": ("manage", "library"), "DeploymentWizard": ("manage", "deployments"),
     "ClientEditor": ("manage", "clients"), "TaskEditor": ("manage", "tasks"), "SessionView": ("manage", "sessions"),
+    "BaselineEditor": ("manage", "clients"),
 }
 
 

@@ -349,7 +349,7 @@ class WinCodes(LocalEndpoint):
 
     def run_command(self, cmd, timeout=3600, cwd=None, env=None):
         r = super().run_command(cmd, timeout, cwd, env)
-        r["code"] = {1603 & 255: 1603, 3010 & 255: 3010}.get(r["code"], r["code"])
+        r["code"] = {1603 & 255: 1603, 3010 & 255: 3010, 1618 & 255: 1618}.get(r["code"], r["code"])
         return r
 
 
@@ -500,6 +500,87 @@ check(r["code"] == 127 and "Windows" in r["err"], "cmd scripts refused off Windo
 r = ep.run_script("exit 0", language="cobol")
 check(r["code"] == 127 and "Unknown" in r["err"], "unknown script language refused")
 
+# msiexec 1618 (another installation in progress) is waited out and retried
+busy_n = os.path.join(W, "busy_count")
+busy = store.upsert("packages", Package(
+    name="Busy App", kind="script", version="1.0",
+    install=f'"{PY}" -c "import os,sys; p=r\'{busy_n}\'; n=os.path.exists(p); open(p,\'a\').write(\'x\'); '
+            f'sys.exit(0 if n else 1618)" && "{PY}" "{FAKEINST}" add "Busy App" 1.0',
+    detection={"method": "registry", "value": "Busy App"}))
+core.BUSY_WAIT = 0
+r = core.execute(WinCodes(), store, {"type": "software", "item": busy.id, "action": "install", "desired": "installed",
+                                     "deployment": "x", "name": "Busy App"})
+core.BUSY_WAIT = 20
+with open(busy_n) as _f:
+    _tries = _f.read()
+check(r["status"] == "compliant" and r["log"].count("exit 1618") == 1 and _tries == "xx",
+      f"installer exit 1618 (another install running) waited out and retried ({r['status']}, {r.get('result')})")
+
+# installed_software reads the 64-bit registry view, so a 32-bit process still sees 64-bit apps
+import types  # noqa: E402
+
+_UN = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+_REG = {_UN + "\\{A64}": {"DisplayName": "App64", "DisplayVersion": "6.4"},
+        _UN.replace("SOFTWARE", "SOFTWARE\\WOW6432Node") + "\\{B32}": {"DisplayName": "App32",
+                                                                       "DisplayVersion": "3.2"}}
+
+
+class _Key:
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _open(key, sub, reserved=0, access=0x20019):
+    if isinstance(key, _Key):
+        path = f"{key.path}\\{sub}"
+    elif key == "HKU":
+        return _Key("HKU")
+    else:  # what WOW64 does for a 32-bit process: HKLM\SOFTWARE goes to WOW6432Node unless the 64-bit view is asked for
+        path = sub
+        if not access & 0x100 and path.upper().startswith("SOFTWARE\\") \
+                and not path.upper().startswith("SOFTWARE\\WOW6432NODE"):
+            path = "SOFTWARE\\WOW6432Node\\" + path[9:]
+    if not any(k.lower().startswith(path.lower()) for k in _REG):
+        raise OSError(2, "not found")
+    return _Key(path)
+
+
+def _enum(k, i):
+    kids = sorted({x[len(k.path) + 1:].split("\\")[0] for x in _REG if x.lower().startswith(k.path.lower() + "\\")})
+    if i >= len(kids):
+        raise OSError(259, "no more items")
+    return kids[i]
+
+
+def _query(k, name):
+    try:
+        return _REG[k.path][name], 1
+    except KeyError:
+        raise OSError(2, "no value") from None
+
+
+_fake = types.ModuleType("winreg")
+_fake.__dict__.update(HKEY_LOCAL_MACHINE="HKLM", HKEY_USERS="HKU", KEY_READ=0x20019, KEY_WOW64_64KEY=0x100,
+                      OpenKey=_open, EnumKey=_enum, QueryValueEx=_query)
+_saved = sys.platform, sys.modules.get("winreg"), os.environ.pop("SECTORSMITH_FAKE_SOFTWARE")
+sys.modules["winreg"], sys.platform = _fake, "win32"
+try:
+    _got = LocalEndpoint().installed_software()
+finally:
+    sys.platform, os.environ["SECTORSMITH_FAKE_SOFTWARE"] = _saved[0], _saved[2]
+    if _saved[1] is None:
+        sys.modules.pop("winreg", None)
+    else:
+        sys.modules["winreg"] = _saved[1]
+check(sorted((e["name"], e["scope"]) for e in _got) == [("App32", "machine32"), ("App64", "machine")],
+      f"Add/Remove Programs read in the 64-bit view, each app once {[(e['name'], e['scope']) for e in _got]}")
+
 # --- 5. a session on a linked PC -------------------------------------------------------------
 from sectorsmith.link.server import LinkServer  # noqa: E402
 
@@ -630,6 +711,233 @@ remote.close()
 ag.wait(30)
 check(ag.returncode == 0, "agent exits cleanly")
 srv.stop()
+
+# --- 8. Bundles, client baselines and onboarding a new PC -------------------------------------------
+from sectorsmith.deploy import catalogue as cat, schedule as sch  # noqa: E402
+
+set_inventory(entry("Have Already", "1.0"))
+bstore = Store(os.path.join(W, "lib6"))
+ba = installer_pkg(bstore, "Base A", "1.0")
+bb = installer_pkg(bstore, "Base B", "2.0")
+bc = installer_pkg(bstore, "Have Already", "1.0")
+outside = installer_pkg(bstore, "Not In Baseline", "1.0")
+deploy(bstore, outside)  # every PC, but not part of an onboarding run
+newco = bstore.upsert("clients", Client(name="NewCo"))
+check(bstore.baseline_for(newco.id) is None, "a new client has no baseline")
+base = bstore.set_baseline(newco.id, [ba.id, bb.id, bc.id, "no-such-package"])
+check(base.item_type == "bundle" and base.items == [ba.id, bb.id, bc.id] and base.onboarding_only and base.baseline
+      and Store(bstore.root).baseline_for(newco.id).items == base.items,
+      "baseline saved as an onboarding-only bundle for the client (unknown ids dropped)")
+check(bstore.set_baseline(newco.id, [ba.id, bb.id, bc.id], "latest").id == base.id and len(bstore.deployments) == 2
+      and bstore.baseline_for(newco.id).desired == "latest", "saving the baseline again updates it in place")
+check(not core.applicable(bstore, host, True, only=[base.id]), "a baseline doesn't apply to PCs outside the client")
+check(len(bstore.used_by(ba.id)) == 1 and len(bstore.used_by(outside.id)) == 1,
+      "used_by counts bundles as well as single deployments")
+try:
+    core.onboard(WinCodes(), bstore, bstore.upsert("clients", Client(name="Empty")).id, Progress(1))
+    no_base = False
+except ValueError as e:
+    no_base = "no baseline" in str(e)
+check(no_base, "onboarding a client without a baseline is refused with a clear message")
+ob = core.onboard(WinCodes(), bstore, newco.id, Progress(1))
+byo = {a["name"]: a for a in ob["actions"]}
+inv = inventory()
+check(set(byo) == {"Base A", "Base B", "Have Already"} and byo["Base A"]["status"] == "compliant"
+      and byo["Have Already"]["action"] == "none" and inv.get("Base B") == "2.0",
+      f"onboarding installs the baseline ({sorted(byo)})")
+check("Not In Baseline" not in inv, "onboarding runs only the baseline, not every deployment")
+check(host.lower() in [m.lower() for m in bstore.get("clients", newco.id).machines] and ob["trigger"] == "onboarding"
+      and ob["onboarding"], "the new PC joins the client and the session is marked as onboarding")
+check(all(core.source_id(a["deployment"]) == base.id for a in ob["actions"]), "baseline actions point at the baseline")
+res = core.deployment_results(bstore.sessions())
+check(res[base.id]["compliant"] == 3 and res[base.id]["failed"] == 0 and res[base.id]["machine"] == host,
+      "latest result per deployment read back from sessions")
+oc = bstore.upsert("clients", Client(name="OtherCo"))
+bstore.set_baseline(oc.id, [ba.id])
+try:
+    core.onboard(WinCodes(), bstore, oc.id, Progress(1))
+    refused = False
+except ValueError as e:
+    refused = "NewCo" in str(e)
+check(refused, "onboarding refuses a PC that's already in another client")
+bstore.delete("packages", bb.id)
+check(bstore.baseline_for(newco.id).items == [ba.id, bc.id], "deleting a package takes it out of baselines")
+check(bstore.set_baseline(oc.id, []) is None and bstore.baseline_for(oc.id) is None, "an empty baseline is removed")
+mach = bstore.upsert("deployments", Deployment("software", ba.id, "uninstalled", target_kind="machine",
+                                               target_value=host))
+check([d.desired for d in core.applicable(bstore, host, True, only=[bstore.baseline_for(newco.id).id])
+       if d.item_id == ba.id] == ["uninstalled"], "a PC's own deployment still wins over its client's baseline")
+bstore.delete("deployments", mach.id)
+
+# --- 9. Schedules ------------------------------------------------------------------------------------
+noon = time.mktime((2026, 10, 7, 12, 0, 0, 0, 0, -1))  # a Wednesday, local time
+daily = Deployment("software", ba.id, schedule=sch.make("daily", "9:00", now=noon - 2 * 86400))
+check(daily.schedule["time"] == "09:00" and sch.due_for(daily, "PC-1", noon, "start"),
+      "daily schedule is due once a 09:00 has passed since it was set")
+daily.last_runs = {"pc-1": noon - 3600}
+check(not sch.due_for(daily, "PC-1", noon, "start") and sch.due_for(daily, "PC-2", noon, "start"),
+      "not due again on a PC that ran today, still due on the others")
+check(sch.due_for(daily, "pc-1", noon + 86400, "connect"), "due again the next day (at start or on connect)")
+weekly = Deployment("software", ba.id, schedule=sch.make("weekly", "08:30", day=4, now=noon))
+nxt = time.localtime(sch.next_due(weekly))
+check((nxt.tm_wday, nxt.tm_hour, nxt.tm_min) == (4, 8, 30) and 0 < sch.next_due(weekly) - noon < 7 * 86400
+      and not sch.due_for(weekly, "PC-1", noon, "start"), "weekly schedule: next Friday 08:30, not due yet")
+conn = Deployment("software", ba.id, schedule=sch.make("connect"))
+check(sch.due_for(conn, "x", noon, "connect") and not sch.due_for(conn, "x", noon, "start"),
+      "on-connect schedule runs only when a PC connects")
+check(sch.describe(weekly) == "Fridays at 08:30" and sch.describe(conn) == "When a PC connects"
+      and sch.describe(Deployment("task", "t")) == "" and sch.next_text(conn) == "Next connect",
+      "schedules described in words")
+off = Deployment("software", ba.id, enabled=False, schedule=sch.make("daily", now=noon - 2 * 86400))
+check(not sch.due_for(off, "PC-1", noon, "start") and sch.make("") == {}, "switched-off and empty schedules never run")
+for bad in ("25:00", "9:75", "noon"):
+    try:
+        sch.parse_time(bad)
+        ok_bad = False
+    except ValueError:
+        ok_bad = True
+    check(ok_bad, f"bad time {bad!r} refused")
+set_inventory()
+sstore = Store(os.path.join(W, "lib7"))
+s_all = installer_pkg(sstore, "Sched All", "1.0")
+s_me = installer_pkg(sstore, "Sched Me", "1.0")
+s_conn = installer_pkg(sstore, "Sched Conn", "1.0")
+s_chk = installer_pkg(sstore, "Sched Check", "1.0")
+d_all = deploy(sstore, s_all, schedule=sch.make("daily", now=noon - 2 * 86400))
+d_me = deploy(sstore, s_me, target_kind="machine", target_value=host, schedule=sch.make("daily", now=noon - 2 * 86400))
+d_conn = deploy(sstore, s_conn, schedule=sch.make("connect"))
+d_chk = deploy(sstore, s_chk, target_kind="machine", target_value=host,
+               schedule=sch.make("daily", mode="detect", now=noon - 2 * 86400))
+deploy(sstore, installer_pkg(sstore, "Unscheduled", "1.0"))
+due = sch.due_runs(sstore, [host, "REMOTE-1"], "start", now=noon, local_host=host)
+check(sorted(due.get(host, [])) == sorted([d_me.id, d_chk.id]) and due.get("REMOTE-1") == [d_all.id],
+      f"due at start: Every PC schedules skip the technician's own PC ({due})")
+due = sch.due_runs(sstore, ["REMOTE-1"], "connect", now=noon, local_host=host)
+check(sorted(due["REMOTE-1"]) == sorted([d_all.id, d_conn.id]), "due when a linked PC connects")
+runs = sch.run_due(WinCodes(), sstore, [d_me.id, d_chk.id], Progress(1))
+inv = inventory()
+check(len(runs) == 2 and all(r["trigger"] == "schedule" for r in runs) and inv.get("Sched Me") == "1.0"
+      and "Sched Check" not in inv and "Unscheduled" not in inv and "Sched All" not in inv,
+      "scheduled run changes only its own deployments; a check-only schedule changes nothing")
+check({a["name"]: a["status"] for r in runs for a in r["actions"]} == {"Sched Me": "compliant",
+                                                                        "Sched Check": "pending"},
+      "check-only schedule reports what it would change")
+sch.mark_ran(sstore, [d_me.id, d_chk.id], host.upper(), when=noon)
+again = Store(sstore.root)
+check(again.get("deployments", d_me.id).last_runs == {host.lower(): noon}
+      and not sch.due_runs(again, [host], "start", now=noon + 60, local_host=host),
+      "last run saved per PC, so it isn't due again until the next slot")
+
+# --- 10. Package catalogue and winget search -----------------------------------------------------------
+import re  # noqa: E402
+import threading  # noqa: E402,F811
+from sectorsmith.util import check_cancel  # noqa: E402
+
+apps = cat.load()
+wids = [a["winget"] for a in apps if a.get("winget")]
+check(len(apps) >= 60 and all(a.get("category") and a.get("publisher") and a.get("detect") and
+                              (a.get("winget") or a.get("placeholder")) for a in apps),
+      f"curated catalogue has {len(apps)} apps, each with a category, publisher, detection and winget ID "
+      "(or marked as needing your own installer)")
+check(len(set(wids)) == len(wids) and all(cat.WINGET_ID.match(w) for w in wids), "winget IDs unique and well formed")
+bad_rx = [a["name"] for a in apps if (a["detect"].get("value") or "").startswith("re:")
+          and not re.compile(a["detect"]["value"][3:])]
+check(not bad_rx, "every regular expression detection compiles")
+for want in ("Google Chrome", "Mozilla Firefox", "7-Zip", "Adobe Acrobat Reader", "Office Deployment Tool",
+             "Microsoft Teams", "Zoom Workplace", "VLC media player", "Notepad++", "PuTTY", "WinSCP", "Greenshot",
+             "RMM agent", "Antivirus or EDR agent"):
+    check(any(a["name"] == want for a in apps), f"catalogue has {want}")
+check(cat.search(apps, "7zip")[0]["name"] == "7-Zip" and cat.search(apps, "mozilla firefox")[0]["name"] ==
+      "Mozilla Firefox" and all(a["category"] == "Browsers" for a in cat.search(apps, "", "Browsers")),
+      "catalogue search by words, IDs and category")
+chrome = next(a for a in apps if a["name"] == "Google Chrome")
+p = cat.to_package(chrome)
+scripts_ = core.render_scripts(p)
+check(p.kind == "winget" and p.winget_id == "Google.Chrome" and p.uninstall and p.version == ""
+      and p.detection == {"method": "registry", "value": "Google Chrome"} and p.category == "Browsers"
+      and "winget install --id Google.Chrome -e --silent" in scripts_["Install.ps1"]
+      and "Google Chrome" in scripts_["Detect.ps1"], "catalogue app becomes a silent winget package with detection")
+pc = cat.to_package(chrome, "choco")
+check(pc.install == "choco install googlechrome -y --no-progress" and "choco uninstall" in pc.uninstall,
+      "Chocolatey variant when the app has a Chocolatey ID")
+for a, src in ((next(a for a in apps if a.get("placeholder")), "winget"),
+               (next(a for a in apps if a.get("winget") and not a.get("choco")), "choco")):
+    try:
+        cat.to_package(a, src)
+        refused = False
+    except ValueError:
+        refused = True
+    check(refused, f"{a['name']} via {src} refused with a reason")
+cstore7 = Store(os.path.join(W, "lib8"))
+first = cat.add(cstore7, chrome)
+check(cat.add(cstore7, chrome).id == first.id and len(cstore7.packages) == 1
+      and cat.in_library(cstore7, chrome) is first, "adding an app twice keeps one library package")
+SAMPLE = ("   - \r   \\ \r\r"
+          "Name                 Id                          Version     Match       Source\n"
+          "-------------------------------------------------------------------------------\n"
+          "7-Zip                7zip.7zip                   24.08                   winget\n"
+          "7-Zip ZS             mcmilk.7zip-zstd            24.08.0.1   Tag: 7zip   winget\n"
+          "NanaZip Preview…     M2Team.NanaZip.Preview      5.0.1252.0  Tag: 7-zip  winget\n"
+          "Ünïcödé Ärchiver     Some.Archiver               1.0                     winget\n")
+calls = []
+
+
+def fake(args, timeout):
+    calls.append(list(args))
+    return 0, SAMPLE
+
+
+rows = cat.winget_search("zip", runner=fake)
+check(calls and calls[0][1:3] == ["search", "zip"] and calls[0][3:5] == ["--source", "winget"],
+      "winget search runs 'winget search <query> --source winget' as an argument list (no shell)")
+check([r_["winget"] for r_ in rows] == ["7zip.7zip", "mcmilk.7zip-zstd", "M2Team.NanaZip.Preview", "Some.Archiver"]
+      and rows[2]["name"] == "NanaZip Preview" and rows[1]["version"] == "24.08.0.1"
+      and rows[0]["detect"] == {"method": "registry", "value": "7-Zip"}, "winget output parsed defensively")
+check(cat.parse_search("No package found matching input criteria.\n") == [] and cat.parse_search("") == []
+      and cat.winget_search("  ", runner=fake) == [] and len(calls) == 1, "no results and empty queries handled")
+check(cat.to_package(rows[3]).winget_id == "Some.Archiver", "a live winget result can be added to the library")
+
+
+def stuck(args, timeout):
+    while True:
+        check_cancel()
+        time.sleep(.05)
+
+
+prog = Progress(1)
+threading.Timer(.3, prog.cancel).start()
+t0 = time.time()
+try:
+    with cancel_scope(prog.check):
+        cat.winget_search("zip", runner=stuck)
+    stopped = False
+except Cancelled:
+    stopped = True
+check(stopped and time.time() - t0 < 3, "Cancel stops a winget search")
+prog = Progress(1)
+threading.Timer(.3, prog.cancel).start()
+t0 = time.time()
+try:
+    with cancel_scope(prog.check):
+        cat.run_process([PY, "-c", "import time; time.sleep(30)"])
+    stopped = False
+except Cancelled:
+    stopped = True
+check(stopped and time.time() - t0 < 5, "Cancel kills the running search process")
+try:
+    cat.run_process([PY, "-c", "import time; time.sleep(30)"], timeout=.5)
+    timed = False
+except TimeoutError:
+    timed = True
+check(timed, "a search that hangs times out")
+check(cat.run_process([PY, "-c", "print('hi')"]) == (0, "hi\n"), "search runner returns exit code and output")
+if not cat.winget_path():
+    try:
+        cat.winget_search("zip")
+        missing = False
+    except FileNotFoundError:
+        missing = True
+    check(missing, "no winget on this PC: search says so (the UI falls back to the curated list)")
 
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

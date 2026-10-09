@@ -10,6 +10,8 @@ Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Prop
 - `sectorsmith/link/` SectorSmith Link: TLS with a pinned cert and token, PowerShell one-liner connector, listen mode
   (USB/WinPE). endpoint.py holds the ops a linked PC exposes. migrate.py moves a user to a new PC.
   netclone.py clones one disk to one or many disks across PCs.
+- `sectorsmith/integrations/` optional integrations, off until set up (see docs/INTEGRATIONS.md): screenconnect.py,
+  ad.py (domain user lookup via ADSI), dpapi.py (secrets via Windows DPAPI). UI glue in ui/integrations_ui.py
 - `sectorsmith/deploy/` SectorSmith Deploy (desired-state software deployment):
   analyze.py (MSI/EXE to silent switches and detection), core.py (Store, Package/Task/Client/Deployment,
   detect, execute, re-check sessions, export of Install/Uninstall/Detect.ps1)
@@ -20,6 +22,7 @@ Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Prop
 - `tools/` make_sprites.py, make_docs.py (README screenshots and GIFs), make_usb.ps1 (WinPE stick)
 - `tests/` test_core.py, test_link.py and test_deploy.py (run `python tests/build_test_disk.py <dir>` first),
   test_sanitize.py (hardware erase on fake drives, certificate and QR; no fixture needed, qr_decode.py reads codes back),
+  test_integrations.py (ScreenConnect URLs, AD lookup with a fake PowerShell, LDAP escaping, DPAPI; no fixture),
   test_windows.py (CI only), ui_smoke.py, ui_link_smoke.py and ui_deploy_smoke.py (need a display, use xvfb on Linux)
 
 ## Rules

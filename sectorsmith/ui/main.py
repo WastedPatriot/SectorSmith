@@ -16,11 +16,12 @@ import customtkinter as ctk
 
 from .. import partitions
 from ..device import list_disks, open_image, volume_letters_for
+from ..jobs import JobStore
 from ..util import APP_NAME, Cancelled, Progress, cancel_scope, get_logger
 from . import nav, theme
 from .mascot import MascotHub
 from .shell import ContextBar, Rail, SubNav, technician
-from .widgets import Toast
+from .widgets import Toast, install_keyboard_support
 
 log = get_logger()
 P = theme.PALETTE
@@ -64,6 +65,9 @@ class ModeVar:
 
 class MainWindow(*_Base):
     def __init__(self):
+        theme.enable_dpi_awareness()  # before Tk starts; CustomTkinter then scales each monitor itself
+        theme.apply_ui_size()
+        install_keyboard_support()
         super().__init__()
         if _DND:
             try:
@@ -78,6 +82,8 @@ class MainWindow(*_Base):
         self.configure(fg_color=P["bg"])
         theme.style_ttk(self)
         theme.on_theme_change(lambda: theme.style_ttk(self))
+        # tables are ttk, which CustomTkinter doesn't scale: restyle them when the monitor or interface size changes
+        ctk.ScalingTracker.add_widget(lambda *_a: theme.style_ttk(self), self)
 
         from .guide import load_settings
         settings = load_settings()
@@ -92,7 +98,8 @@ class MainWindow(*_Base):
         self.job: Progress | None = None
         self.job_panel = None
         self.job_record = None
-        self.jobs: list[dict] = []          # this session's jobs, newest last
+        self.job_store = JobStore()
+        self.jobs: list[dict] = self._load_jobs()  # history across sessions, newest last
         self.recent: list[str] = []         # palette entries opened, newest last
         self._job_screen = None
         self._job_title = ""
@@ -136,6 +143,8 @@ class MainWindow(*_Base):
             self.go(WelcomeScreen, animate=False)
         self._set_icon()
         self.after(120, self._poll)
+        from .manage_schedule import start as start_schedules
+        start_schedules(self)  # due deployment schedules run after start-up and when a linked PC connects
         self.protocol("WM_DELETE_WINDOW", self._quit)
         self.after(400, lambda: self.mascot.set_mood("idle", "hello"))
 
@@ -292,6 +301,22 @@ class MainWindow(*_Base):
     def _set_mode(self, value):  # older name
         self.set_appearance(value)
 
+    def set_reduce_motion(self, on):
+        theme.set_reduce_motion(on)
+        self.subnav.refresh_bottom()
+        self.toast("Motion reduced. Screens switch without sliding and Mossbit stays still." if on
+                   else "Animations are back on.")
+
+    def set_interface_size(self, percent):
+        from .guide import save_settings
+        if percent not in theme.UI_SIZES:
+            return
+        save_settings(ui_size=percent)
+        theme.apply_ui_size(percent)
+        theme.style_ttk(self)
+        self._refresh_screen()
+        self.toast(f"Interface size set to {percent}%.")
+
     def _refresh_screen(self):
         """Rebuild the current screen if it only shows state (Home, lists, Settings); wizards keep their place."""
         cls, kw = self._route
@@ -383,12 +408,13 @@ class MainWindow(*_Base):
             self.after(200, self._quit_when_stopped)
 
     def _set_icon(self):
+        """The product mark (tools/make_icon.py), never Mossbit: it shows in the taskbar and Alt+Tab."""
         from .mascot import ASSETS
         try:
-            self._icon = tk.PhotoImage(file=os.path.join(ASSETS, "icon.png"))
-            self.iconphoto(True, self._icon)
+            self._icons = [tk.PhotoImage(file=os.path.join(ASSETS, f"mark_{s}.png")) for s in (256, 64, 48, 32, 16)]
+            self.iconphoto(True, *self._icons)
             if sys.platform == "win32":  # CustomTkinter resets the icon shortly after start
-                self.after(300, lambda: self.iconbitmap(os.path.join(ASSETS, "icon.ico")))
+                self.after(300, lambda: self.iconbitmap(os.path.join(ASSETS, "mark.ico")))
         except tk.TclError:
             pass
 
@@ -527,11 +553,13 @@ class MainWindow(*_Base):
             detail = self.screen.target_name() if hasattr(self.screen, "target_name") else ""
         except Exception:  # noqa: BLE001  the screen may not have a target yet
             detail = ""
-        # every job is stamped with client, ticket and technician (kept for this session; Jobs shows them)
-        self.job_record = dict(task=TASK_NAMES.get(title, title), title=title, started=time.time(), ended=None,
-                               client=self.context.get("client") or "", ticket=self.context.get("ticket") or "",
-                               technician=technician(), machine="This PC", detail=detail, result="Running")
+        # every job is stamped with client, ticket and technician, and written to the history when it starts
+        self.job_record = self.job_store.start(task=TASK_NAMES.get(title, title), title=title, started=time.time(),
+                                               client=self.context.get("client") or "",
+                                               ticket=self.context.get("ticket") or "", technician=technician(),
+                                               machine="This PC", detail=detail)
         self.jobs.append(self.job_record)
+        del self.jobs[:-self.job_store.cap]
         self._job_screen = self.screen
         self._job_title = title
         self.mascot.set_mood("working", "working")
@@ -563,11 +591,29 @@ class MainWindow(*_Base):
                 pass  # panel already gone; the cancel still goes through
             self.mascot.say(text="Stopping safely, one moment...")
 
-    def _finish_record(self, result):
+    def _load_jobs(self):
+        try:
+            return self.job_store.load()
+        except Exception as e:  # noqa: BLE001  a bad history file must not stop the app
+            log.warning("job history not readable: %s", e)
+            return []
+
+    def _finish_record(self, result, value=None):
+        """Write the job's end to the history. A result that names a report file (migration) is kept with it."""
         if self.job_record is not None:
-            self.job_record["result"] = result
-            self.job_record["ended"] = time.time()
+            report = value.get("report") if isinstance(value, dict) else None
+            self.job_store.finish(self.job_record, result, report=report if isinstance(report, str) else None)
             self.job_record = None
+
+    def attach_job_file(self, path, job_id=None):
+        """Remember a report or certificate a job produced after it ended (Save certificate). job_id: the 'id' of
+        the job record; the latest job when not given."""
+        if job_id:
+            rec = next((j for j in reversed(self.jobs) if j.get("id") == job_id), None)
+        else:
+            rec = self.jobs[-1] if self.jobs else None
+        if rec is not None and path:
+            self.job_store.attach(rec, os.path.abspath(path))
 
     def _poll(self):
         try:
@@ -601,7 +647,7 @@ class MainWindow(*_Base):
         self.job = None
         self.job_panel = None
         self.mascot.progress = 0
-        self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"))
+        self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"), value)
         self.bar.update_jobs(None)
         scr = self._job_screen
         # the screen that started the job may be gone (Home, guide, Connect): don't draw on a dead widget
@@ -671,5 +717,6 @@ class MainWindow(*_Base):
 
 
 def run():
+    theme.enable_dpi_awareness()
     win = MainWindow()
     win.mainloop()
