@@ -40,6 +40,12 @@ STATE_HELP = {
     "audit": "Runs the check and reports. Nothing is changed.",
 }
 TASK_STATES = {"enforce": "Check and fix", "audit": "Check only"}
+REBOOT_LABEL = {"never": "Never", "end": "At the end if needed", "suppress": "Suppress"}
+REBOOT_HELP = {"never": "SectorSmith never restarts the PC. Sessions say when one is needed.",
+               "end": "When something asked for a restart, the PC restarts after the run with a two minute "
+                      "warning. Never the PC SectorSmith runs on.",
+               "suppress": "MSI installers are told not to restart by themselves. The PC isn't restarted; sessions "
+                           "still say when it needs one."}
 FIXED_VERSION = "Fixed: the version above"
 SOURCE_LABEL = {"": FIXED_VERSION, **versions.KINDS}
 DETECTION = {"registry": "Name in Add/Remove Programs", "msi_product_code": "MSI product code",
@@ -439,6 +445,7 @@ class PackageBuilder(Screen):
         self.v = {k: tk.StringVar(value=str(s.get(k) or "")) for k in
                   ("name", "version", "publisher", "install", "uninstall", "winget_id", "product_code")}
         self.v["codes"] = tk.StringVar(value=", ".join(str(c) for c in s.get("success_codes") or [0]))
+        self.v["reboot_codes"] = tk.StringVar(value=", ".join(str(c) for c in s.get("reboot_codes", [3010, 1641])))
         self._row = 0
         self._field("Name", "name", placeholder="As it shows in Add/Remove Programs")
         self._field("Version", "version", placeholder="e.g. 24.08")
@@ -465,6 +472,7 @@ class PackageBuilder(Screen):
         self.det_script = det.get("value", "") if det.get("method") == "script" else ""
         self.lang = s.get("language") or "powershell"
         self._field("Success codes", "codes", hint="Installer exit codes that count as success.")
+        self._field("Restart codes", "reboot_codes", hint="Exit codes that mean it worked but the PC needs a restart.")
         self._det_changed()
         self._source_rows(s.get("version_source") or {})
         self._needs_row(s.get("prerequisites") or [])
@@ -715,6 +723,12 @@ class PackageBuilder(Screen):
             if strict:
                 raise ValueError("Success codes should be numbers, like 0, 3010.") from None
             f["success_codes"] = [0]
+        try:
+            f["reboot_codes"] = [int(x) for x in re.split(r"[,\s]+", f["reboot_codes"]) if x]
+        except ValueError:
+            if strict:
+                raise ValueError("Restart codes should be numbers, like 3010, 1641.") from None
+            f["reboot_codes"] = [3010, 1641]
         f["detection"] = self._detection()
         f["version_source"] = self._version_source(strict)
         if strict:
@@ -738,7 +752,7 @@ class PackageBuilder(Screen):
 
     def _apply(self, pkg, f):
         for k in ("name", "version", "publisher", "install", "uninstall", "winget_id", "product_code",
-                  "success_codes", "detection", "version_source"):
+                  "success_codes", "reboot_codes", "detection", "version_source"):
             setattr(pkg, k, f[k])
         pkg.language = self.lang
         pkg.prerequisites = list(getattr(self, "needs", pkg.prerequisites))
@@ -1011,6 +1025,15 @@ class DeploymentWizard(Screen):
         self.onboarding = tk.BooleanVar(value=False)
         ctk.CTkSwitch(opts, text="Only on new PCs (onboarding runs)", variable=self.onboarding,
                       font=theme.font_style("body")).pack(anchor="w")
+        caption(opts, "Restarts").pack(anchor="w", pady=(16, 4))
+        reboot_help = ctk.CTkLabel(opts, text="", font=theme.font_style("small"), text_color=P["muted"],
+                                   anchor="w", justify="left", wraplength=520)
+        self.reboot_seg = segmented(opts, list(REBOOT_LABEL.values()), height=30,
+                                    command=lambda v: reboot_help.configure(text=REBOOT_HELP[_key(REBOOT_LABEL, v)]))
+        self.reboot_seg.set(REBOOT_LABEL["never"])
+        self.reboot_seg.pack(anchor="w")
+        reboot_help.configure(text=REBOOT_HELP["never"])
+        reboot_help.pack(anchor="w", pady=(4, 0))
         right = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
         right.grid(row=0, column=1, sticky="new")
         from .manage_screens import ScheduleEditor
@@ -1055,7 +1078,8 @@ class DeploymentWizard(Screen):
             return
         common = dict(desired=desired, version=version, target_kind=self.target[0], target_value=self.target[1],
                       onboarding_only=bool(self.onboarding.get()), schedule=sched,
-                      allow_downgrade=desired == "version" and bool(self.downgrade.get()))
+                      allow_downgrade=desired == "version" and bool(self.downgrade.get()),
+                      reboot_policy=_key(REBOOT_LABEL, self.reboot_seg.get()))
         if len(self.picked) > 1:
             d = core.Deployment(item_type="bundle", item_id="", items=[i for _k, i in self.picked],
                                 name=self.name.get().strip(), **common)
@@ -1410,6 +1434,10 @@ class RunWizard(Screen):
             if not s.get("actions") and not s.get("error"):
                 add_action_row(table, (s["machine"], "No deployments for this PC", "", "", ""))
         self.table, self.tree = table, table.tree
+        waiting = [(s["machine"], s["pending_reboot"]) for _m, s in results if s.get("pending_reboot")]
+        for host, why in waiting[:3]:
+            self.note(body, f"{host} is waiting for a restart: {why[0]}. Installs may fail until it restarts.",
+                      "warn").pack(anchor="w", pady=(8, 0))
         if n:
             self.buttons(primary=("Apply changes", self._confirm), secondary=("Back", self._pcs))
         else:
@@ -1470,7 +1498,6 @@ class RunWizard(Screen):
         acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in core.IDLE]
         failed = [a for a in acts if a.get("status") == "failed"]
         errors = [s for _m, s in results if s.get("error")]
-        reboot = any(s.get("summary", {}).get("reboot") for _m, s in results)
         ok = not failed and not errors
         body = self.step(3, "All done" if ok else "Done, with problems", "")
         self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "error")
@@ -1479,8 +1506,11 @@ class RunWizard(Screen):
             lines.append(f"{len(failed)} failed. Select a row on the Sessions page to see the installer output.")
         if errors:
             lines.append(f"Couldn't reach {_plural(len(errors), 'PC')}.")
-        if reboot:
-            lines.append("Some installers asked for a restart.")
+        for _m, s in results:
+            if s.get("restart"):
+                lines.append(f"{s['machine']}: {s['restart']}.")
+            elif s.get("summary", {}).get("reboot"):
+                lines.append(f"{s['machine']} needs a restart.")
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          f"Maintenance finished on {_plural(len(results), 'PC')}", lines)
         table = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("plan", "Plan", 120),
@@ -1519,6 +1549,9 @@ class SessionView(Screen):
                                     if x), badge=BADGE)
         self.s = s
         body = self.new_body()
+        if s.get("restart") or s.get("pending_reboot"):
+            why = s.get("restart") or "needs a restart: " + "; ".join(s["pending_reboot"][:2])
+            self.note(body, f"Restart: {why}", "warn").pack(anchor="w", pady=(0, 8))
         table = action_tree(body, [("item", "Item", 200), ("want", "Wanted", 140), ("found", "Found", 130),
                                    ("plan", "Plan", 110), ("status", "Status", 110), ("result", "Result", 200)],
                             height=7)

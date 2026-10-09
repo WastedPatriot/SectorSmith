@@ -1149,5 +1149,88 @@ dstore.delete("packages", mid.id)
 check(dstore.get("packages", top.id).prerequisites == [] and Store(dstore.root).get("packages", top.id).prerequisites
       == [], "deleting a package takes it off the lists of packages that needed it")
 
+# --- 13. Exit codes, pending restarts and the restart policy ---------------------------------------------------------
+from sectorsmith.link import endpoint as E  # noqa: E402
+
+pk = Package(name="Codes", success_codes=[0, 7], reboot_codes=[3010, 5])
+check([core.exit_outcome(pk, c) for c in (0, 7, 3010, 5, 1603, 1641)] == ["ok", "ok", "reboot", "reboot", "failed",
+                                                                           "failed"],
+      "exit codes: success codes, restart codes (success plus a restart) and the rest failed")
+check(core.suppress_reboot('msiexec.exe /i "a.msi" /qn') == 'msiexec.exe /i "a.msi" /qn REBOOT=ReallySuppress'
+      and core.suppress_reboot('"C:\\Windows\\System32\\msiexec.exe" /x {X} /qn').endswith("REBOOT=ReallySuppress")
+      and core.suppress_reboot("msiexec /i a.msi REBOOT=Force") == "msiexec /i a.msi REBOOT=Force"
+      and core.suppress_reboot('"setup.exe" /S') == '"setup.exe" /S', "suppress adds REBOOT=ReallySuppress to msiexec only")
+
+
+class FakeReg:
+    def __init__(self, keys=(), renames=None):
+        self.keys, self.renames = set(keys), renames
+
+    def key_exists(self, path):
+        return path in self.keys
+
+    def value(self, path, name):
+        return self.renames if path == E.RENAME_KEY and name == "PendingFileRenameOperations" else None
+
+
+check(E.pending_reboot_reasons(FakeReg()) == [] and E.pending_reboot_reasons(FakeReg(renames=["", " "])) == [],
+      "no pending restart on a clean registry")
+r_ = E.pending_reboot_reasons(FakeReg([k for k, _w in E.REBOOT_KEYS], ["\\??\\C:\\old.dll", ""]))
+check(len(r_) == 3 and "CBS" in r_[0] and "Windows Update" in r_[1] and "PendingFileRenameOperations" in r_[2],
+      "pending restart read from CBS, Windows Update and PendingFileRenameOperations")
+check(set(LocalEndpoint().pending_reboot()) == {"pending", "reasons"}, "this PC answers pending_reboot")
+
+
+class FarPC(WinCodes):
+    """Another PC as far as the session is concerned. Restart commands are recorded, never run."""
+    is_local = False
+    pending = []
+    restarts = []
+
+    def info(self):
+        return dict(super().info(), hostname="FAR-PC", os="Windows-11-10.0.26100")
+
+    def pending_reboot(self):
+        return {"pending": bool(self.pending), "reasons": list(self.pending)}
+
+    def run_command(self, cmd, timeout=3600, cwd=None, env=None):
+        if cmd.lower().startswith(("shutdown", "restart-computer")):
+            FarPC.restarts.append(cmd)
+            return {"code": 0, "out": "", "err": "", "seconds": 0}
+        return super().run_command(cmd, timeout, cwd, env)
+
+
+rstore = Store(os.path.join(W, "lib13"))
+set_inventory()
+rb = installer_pkg(rstore, "Reboot Me", "1.0", " --exit 5", reboot_codes=[5], success_codes=[0])
+d_rb = deploy(rstore, rb, "installed")
+FarPC.pending = ["Windows Update installed updates that need a restart"]
+s_ = core.run_session(FarPC(), rstore, Progress(1), mode="detect")
+check(s_["pending_reboot"] == FarPC.pending and s_["summary"]["reboot"], "the check step reports a pending restart")
+FarPC.pending = []
+s_ = core.run_session(FarPC(), rstore, Progress(1), mode="full")
+a_ = s_["actions"][0]
+check(a_["status"] == "compliant" and a_.get("reboot") and s_["summary"]["reboot"] and not FarPC.restarts
+      and "restart" not in s_, "policy Never: exit 5 (a restart code) works, says a restart is needed, doesn't restart")
+d_rb.reboot_policy = "end"
+rstore.upsert("deployments", d_rb)
+set_inventory()
+s_ = core.run_session(FarPC(), rstore, Progress(1), mode="full")
+check(len(FarPC.restarts) == 1 and FarPC.restarts[0].startswith("shutdown.exe /r /t 120") and
+      "restarting" in s_["restart"], f"policy At the end: one restart with a warning, at the end ({s_.get('restart')})")
+set_inventory()
+s_ = core.run_session(WinCodes(), rstore, Progress(1), mode="full")
+check(len(FarPC.restarts) == 1 and "skipped" in s_["restart"] and s_["summary"]["reboot"],
+      "the technician's own PC is never restarted automatically, only told")
+s_ = core.run_session(FarPC(), rstore, Progress(1), mode="full")
+check(len(FarPC.restarts) == 1 and "restart" not in s_, "nothing to do and nothing pending: no restart")
+d_rb.reboot_policy = "suppress"
+rstore.upsert("deployments", d_rb)
+set_inventory()
+s_ = core.run_session(FarPC(), rstore, Progress(1), mode="full")
+check(len(FarPC.restarts) == 1 and s_["summary"]["reboot"], "policy Suppress: never restarts, still reports it")
+check(Store(rstore.root).get("deployments", d_rb.id).reboot_policy == "suppress"
+      and Store(rstore.root).get("packages", rb.id).reboot_codes == [5], "restart settings saved")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

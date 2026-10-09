@@ -38,7 +38,7 @@ OPS = {"info", "list_disks", "list_profiles", "scan_tree", "dir_size", "read_fil
        "write_files", "mkdirs", "free_space", "path_exists", "disk_open", "disk_read", "disk_write", "disk_close",
        "ping", "list_dir", "disk_fix_gpt", "disk_plan", "make_folder",
        "installed_software", "put_file", "run_command", "run_script", "file_version", "remove_path", "deploy_dir",
-       "list_volumes", "offline_profiles", "apps_on_disk"}
+       "list_volumes", "offline_profiles", "apps_on_disk", "pending_reboot"}
 # ops that can take a while: inside a cancel_scope a controller runs these as background jobs on the agent,
 # polls them and can cancel them (see Session)
 LONG_OPS = {"scan_tree", "dir_size", "run_command", "run_script", "disk_open", "disk_plan", "installed_software",
@@ -664,6 +664,15 @@ class LocalEndpoint:
             except OSError:
                 pass
 
+    def pending_reboot(self):
+        """Is Windows waiting for a restart? {"pending": bool, "reasons": [...]} from Component Based Servicing,
+        Windows Update and PendingFileRenameOperations (on Linux: /var/run/reboot-required)."""
+        if sys.platform == "win32":
+            reasons = pending_reboot_reasons(_WinReg())
+        else:
+            reasons = ["A package update asked for a restart"] if os.path.exists("/var/run/reboot-required") else []
+        return {"pending": bool(reasons), "reasons": reasons}
+
     def file_version(self, path):
         if not os.path.exists(path):
             return None
@@ -694,6 +703,48 @@ class LocalEndpoint:
 
 
 # ---------------------------------------------------------------------------
+REBOOT_KEYS = [
+    (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+     "Windows servicing (CBS) has changes waiting for a restart"),
+    (r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+     "Windows Update installed updates that need a restart"),
+]
+RENAME_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager"
+
+
+def pending_reboot_reasons(reg) -> list[str]:
+    """Why Windows wants a restart, read through ``reg`` (key_exists(path), value(path, name)) so tests can fake
+    the registry. All paths are under HKLM."""
+    out = [why for key, why in REBOOT_KEYS if reg.key_exists(key)]
+    renames = reg.value(RENAME_KEY, "PendingFileRenameOperations")
+    if renames and any(str(x).strip() for x in (renames if isinstance(renames, list) else [renames])):
+        out.append("Files are waiting to be replaced at the next restart (PendingFileRenameOperations)")
+    return out
+
+
+class _WinReg:
+    """HKLM reads for pending_reboot_reasons, always the 64-bit view."""
+
+    def _open(self, path):
+        import winreg
+        return winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+
+    def key_exists(self, path):
+        try:
+            self._open(path).Close()
+            return True
+        except OSError:
+            return False
+
+    def value(self, path, name):
+        import winreg
+        try:
+            with self._open(path) as k:
+                return winreg.QueryValueEx(k, name)[0]
+        except OSError:
+            return None
+
+
 BLOB_ARG_OPS = {"write_file", "write_files", "disk_write", "put_file"}
 
 

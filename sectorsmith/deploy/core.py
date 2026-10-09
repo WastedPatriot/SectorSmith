@@ -24,6 +24,10 @@ STATES = {"latest": "Latest", "version": "Specific version", "installed": "Any v
           "uninstalled": "Uninstalled", "ignore": "Ignore"}
 # planned actions that change nothing on the PC
 IDLE = ("none", "audit", "refused")
+# what a deployment does about restarts: never restart (report it), restart at the end when needed, or tell
+# installers not to restart (MSI REBOOT=ReallySuppress) and report it
+REBOOT_POLICIES = {"never": "Never restart", "end": "Restart at the end if needed", "suppress": "Suppress restarts"}
+REBOOT_DELAY = 120   # seconds of warning a signed-in user gets before a restart
 
 
 def _id():
@@ -41,6 +45,7 @@ class Package:
     uninstall: str = ""                    # may use {registry_uninstall}
     detection: dict = field(default_factory=lambda: {"method": "registry", "value": ""})
     success_codes: list = field(default_factory=lambda: [0, 3010, 1641])
+    reboot_codes: list = field(default_factory=lambda: [3010, 1641])  # exit codes that mean "restart needed"
     language: str = "powershell"           # for script detection
     product_code: str = ""
     upgrade_code: str = ""
@@ -89,6 +94,7 @@ class Deployment:
     schedule: dict = field(default_factory=dict)   # see schedule.py: kind daily|weekly|connect, time, day, mode
     last_runs: dict = field(default_factory=dict)  # hostname (lower case) -> when its schedule last ran there
     allow_downgrade: bool = False          # specific version older than the installed one: remove and reinstall
+    reboot_policy: str = "never"           # see REBOOT_POLICIES
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +422,51 @@ def expand(template: str, pkg: Package, installer: str = "", registry_uninstall:
             .replace("{registry_uninstall}", registry_uninstall))
 
 
+def exit_outcome(pkg: Package, code: int) -> str:
+    """'reboot' (worked, needs a restart), 'ok' or 'failed' for an installer's exit code."""
+    if code in (pkg.reboot_codes or []):
+        return "reboot"
+    return "ok" if code in (pkg.success_codes or [0]) else "failed"
+
+
+def suppress_reboot(cmd: str) -> str:
+    """An msiexec command told not to restart by itself (other commands as they are)."""
+    if re.match(r'^\s*"?(?:[^"]*\\)?msiexec(?:\.exe)?"?\s', cmd, re.I) and "reboot=" not in cmd.lower():
+        return cmd.rstrip() + " REBOOT=ReallySuppress"
+    return cmd
+
+
+def is_this_pc(ep) -> bool:
+    """The technician's own PC (never restarted automatically): this endpoint, or an agent on the same host."""
+    import socket
+    if getattr(ep, "is_local", False):
+        return True
+    try:
+        host = (ep.info() or {}).get("hostname") or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return host.lower() == socket.gethostname().lower()
+
+
+def pending_reboot(ep) -> dict | None:
+    """{"pending", "reasons"} from the PC, or None when it can't say (an older agent, or an error)."""
+    try:
+        r = ep.pending_reboot()
+    except Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.info("Couldn't read pending restarts: %s", e)
+        return None
+    return r if isinstance(r, dict) else None
+
+
+def restart_command(os_name: str) -> str:
+    if "windows" in (os_name or "").lower() or not os_name:
+        return (f'shutdown.exe /r /t {REBOOT_DELAY} /d p:4:1 /c "SectorSmith maintenance finished and this PC needs a '
+                'restart. Save your work."')
+    return f"shutdown -r +{max(1, REBOOT_DELAY // 60)}"
+
+
 def vtuple(v: str | None):
     if not v:
         return ()
@@ -710,6 +761,8 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     t0 = time.time()
     a = dict(a)
     log_lines = []
+    dep = store.get("deployments", source_id(a.get("deployment", "")))
+    policy = dep.reboot_policy if dep is not None else "never"
 
     def run(cmd):
         for attempt in range(BUSY_TRIES):
@@ -744,7 +797,11 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                     return a
                 if prog:
                     prog.set_detail(f"Removing {pkg.name}")
-                run(cmd)
+                if policy == "suppress":
+                    cmd = suppress_reboot(cmd)
+                r = run(cmd)
+                if r["code"] in (pkg.reboot_codes or []):
+                    a["reboot"] = True
             if a["action"] in ("install", "upgrade", "reinstall"):
                 found = a.get("source") or {}
                 local = store.installer_path(pkg)
@@ -769,17 +826,19 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                 try:
                     if prog:
                         prog.set_detail(f"Installing {pkg.name} {inst.version}")
-                    r = run(expand(cmd_t, inst, installer=remote))
+                    cmd = expand(cmd_t, inst, installer=remote)
+                    r = run(suppress_reboot(cmd) if policy == "suppress" else cmd)
                 finally:
                     if remote:
                         try:
                             ep.remove_path(path=remote[:-len(os.path.basename(local)) - 1])
                         except Exception as e:  # noqa: BLE001
                             log.warning("Couldn't remove the uploaded installer %s: %s", remote, e)
-                if r["code"] not in pkg.success_codes:
+                outcome = exit_outcome(pkg, r["code"])
+                if outcome == "failed":
                     a.update(status="failed", result=f"Installer exit code {r['code']}")
                     return a
-                if r["code"] in (3010, 1641):
+                if outcome == "reboot":
                     a["reboot"] = True
             inv = ep.installed_software()
             installed, ver, _ = detect(ep, pkg, inv)
@@ -799,11 +858,12 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             if task is None:
                 a.update(status="failed", result="the task was deleted before it could run")
                 return a
-            dep = store.get("deployments", a["deployment"])
             params = {**task.params, **(dep.params if dep else {})}
             if a["action"] == "set":
                 r = ep.run_script(script=task.set, language=task.language, params=params, timeout=1800)
                 log_lines.append(f"[set] exit {r['code']}\n{r['out']}{r['err']}")
+                if r["code"] in (3010, 1641):
+                    a["reboot"] = True
                 t = ep.run_script(script=task.test, language=task.language, params=params, timeout=600)
                 log_lines.append(f"[test] exit {t['code']}\n{t['out']}{t['err']}")
                 a.update(status="compliant" if t["code"] == 0 else "failed",
@@ -840,6 +900,9 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
     if only is not None:
         sess["only"] = list(only)
     prog.reset(1, f"Detecting on {host}…")
+    before = pending_reboot(ep)
+    if before is not None:
+        sess["pending_reboot"] = before.get("reasons") or []
     inv = ep.installed_software()
     actions = plan(ep, store, host, inv, onboarding, only)
     sess["detected"] = [dict(a, entry=None) for a in actions]
@@ -870,7 +933,37 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
             raise
         sess["actions"] = [dict(done.get(a["deployment"]) or dict(a, status=idle_status(a)), entry=None)
                            for a in actions]
+        _restart(ep, store, sess, info)
     return _finish(store, sess)
+
+
+def _restart(ep, store, sess, info):
+    """After the changes: does the PC need a restart, and does a deployment that ran say to restart it?"""
+    after = pending_reboot(ep)
+    reasons = list((after or {}).get("reasons") or [])
+    if any(a.get("reboot") for a in sess["actions"]):
+        reasons.insert(0, "An installer or fix asked for a restart")
+    sess["pending_reboot"] = reasons
+    if not reasons:
+        return
+    ran = [a for a in sess["actions"] if a.get("status") in ("compliant", "failed") and a["action"] not in IDLE]
+    deps = [store.get("deployments", source_id(a["deployment"])) for a in ran]
+    if not any(d is not None and d.reboot_policy == "end" for d in deps):
+        return
+    if is_this_pc(ep):
+        sess["restart"] = "skipped: this is the PC SectorSmith runs on, restart it yourself"
+        return
+    cmd = restart_command(info.get("os", ""))
+    try:
+        r = ep.run_command(cmd=cmd, timeout=60)
+        ok = r["code"] == 0
+        sess["restart"] = (f"restarting in {REBOOT_DELAY // 60} minutes" if ok else
+                           f"couldn't start the restart (exit {r['code']}): {(r['err'] or r['out']).strip()[:200]}")
+    except Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        sess["restart"] = f"couldn't start the restart: {e}"
+    log.info("Deploy session %s on %s: restart %s", sess["id"], sess["machine"], sess["restart"])
 
 
 def _finish(store, sess, cancelled=False):
@@ -879,7 +972,7 @@ def _finish(store, sess, cancelled=False):
     sess["summary"] = {"compliant": st.count("compliant"), "failed": st.count("failed"),
                        "pending": st.count("pending"), "non_compliant": st.count("non-compliant"),
                        "cancelled": st.count("cancelled"), "ignored": st.count("ignored"),
-                       "reboot": any(a.get("reboot") for a in sess["actions"])}
+                       "reboot": any(a.get("reboot") for a in sess["actions"]) or bool(sess.get("pending_reboot"))}
     if cancelled:
         sess["cancelled"] = True
     sess["path"] = store.save_session(sess)
