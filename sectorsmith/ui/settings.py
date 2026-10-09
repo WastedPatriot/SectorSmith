@@ -131,6 +131,8 @@ class SettingsScreen(Screen):
                      font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
                      wraplength=640).pack(fill="x", pady=(8, 0))
 
+        integrations_section(col, app)
+
         card = Card(col, "Keyboard")
         card.pack(fill="x", pady=(0, 16))
         for keys, what in SHORTCUTS:
@@ -219,3 +221,118 @@ class SettingsScreen(Screen):
         save_settings(technician=name)
         self.app.rail.avatar.configure(text=initials(name or "Technician"))
         self.app.toast("Saved. New jobs are stamped with this name.")
+
+
+# ---------------------------------------------------------------------------- integrations
+def integrations_section(col, app):
+    """ScreenConnect instance (plus a per-client one) and the Active Directory check. Everything is off until set
+    up, and nothing here stores a password or API key."""
+    from ..integrations import ad, screenconnect as sc
+    from .integrations_ui import local_client_lines
+    from .widgets import Pill, divider
+
+    card = Card(col, "Integrations")
+    card.pack(fill="x", pady=(0, 16))
+    st = load_settings()
+    client = app.context.get("client")
+
+    def label(row, text):
+        ctk.CTkLabel(row, text=text, font=theme.font_style("body_strong"), text_color=P["text"], width=140,
+                     anchor="w").pack(side="left")
+
+    def small(text, tone="muted", pady=(8, 0)):
+        ctk.CTkLabel(card.body, text=text, font=theme.font_style("small"), text_color=P[tone], anchor="w",
+                     justify="left", wraplength=640).pack(fill="x", pady=pady)
+
+    head = ctk.CTkFrame(card.body, fg_color="transparent")
+    head.pack(fill="x", pady=(0, 8))
+    ctk.CTkLabel(head, text="ScreenConnect", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
+        side="left")
+    state = Pill(head, "On" if sc.configured(st) else "Off", "success" if sc.configured(st) else "neutral")
+    state.pack(side="left", padx=8)
+
+    def entry_row(text, value, placeholder, on_save, on_clear):
+        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 8))
+        label(row, text)
+        var = tk.StringVar(value=value or "")
+        ctk.CTkEntry(row, textvariable=var, width=320, height=34, placeholder_text=placeholder).pack(side="left")
+        primary_button(row, "Save", lambda: on_save(var), width=80, height=34).pack(side="left", padx=(10, 0))
+        secondary_button(row, "Clear", lambda: on_clear(var), width=70, height=34).pack(side="left", padx=(8, 0))
+
+    def refresh_state():
+        on = sc.configured(load_settings())
+        state.configure(text="On" if on else "Off", fg_color=P["success_soft" if on else "neutral_soft"],
+                        text_color=P["success" if on else "neutral"])
+
+    def save_default(var):
+        try:
+            url = sc.normalize_url(var.get())
+        except ValueError as e:
+            app.toast(str(e), "warn")
+            return
+        var.set(url)
+        save_settings(**{sc.KEY_URL: url})
+        refresh_state()
+        app.toast("Saved. Machines and Ctrl+K now offer Connect with ScreenConnect.")
+
+    def clear_default(var):
+        var.set("")
+        save_settings(**{sc.KEY_URL: ""})
+        refresh_state()
+        app.toast("ScreenConnect address removed.")
+
+    def save_client(var):
+        per = dict(load_settings().get(sc.KEY_CLIENTS) or {})
+        try:
+            per[client] = sc.normalize_url(var.get())
+        except ValueError as e:
+            app.toast(str(e), "warn")
+            return
+        var.set(per[client])
+        save_settings(**{sc.KEY_CLIENTS: per})
+        refresh_state()
+        app.toast(f"Saved. {client} machines open on this instance.")
+
+    def clear_client(var):
+        per = dict(load_settings().get(sc.KEY_CLIENTS) or {})
+        per.pop(client, None)
+        var.set("")
+        save_settings(**{sc.KEY_CLIENTS: per})
+        refresh_state()
+        app.toast(f"{client} uses the default instance again.")
+
+    entry_row("Instance address", st.get(sc.KEY_URL), "https://control.example.com", save_default, clear_default)
+    if client:
+        entry_row(f"For {client}"[:20], (st.get(sc.KEY_CLIENTS) or {}).get(client), "Uses the address above",
+                  save_client, clear_client)
+    small("Adds Connect with ScreenConnect to Machines and Ctrl+K. It opens your host page in the browser and "
+          "searches for the machine name; you sign in to ScreenConnect as usual. No API key is stored."
+          + ("" if client else " Choose a client (Ctrl+Shift+C) to give that client its own instance."), pady=(0, 0))
+    for line in local_client_lines():
+        small(f"This PC has the ScreenConnect client:  {line}", "text_2")
+
+    divider(card.body).pack(fill="x", pady=16)
+    head = ctk.CTkFrame(card.body, fg_color="transparent")
+    head.pack(fill="x")
+    ctk.CTkLabel(head, text="Active Directory", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
+        side="left")
+    Pill(head, "This PC's domain", "neutral").pack(side="left", padx=8)
+    result = ctk.CTkLabel(head, text="", font=theme.font_style("small"), text_color=P["muted"])
+
+    def check():
+        result.configure(text="Checking...", text_color=P["muted"])
+        name = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+
+        def done(res):
+            if result.winfo_exists():
+                ok = res.status in ("ok", "not_found")
+                text = f"Domain {res.domain} answers" if ok and res.domain else res.text()
+                result.configure(text=text, text_color=P["success" if ok else "muted"])
+        app.background(lambda: ad.lookup_user(name, timeout=20), done,
+                       lambda e: result.winfo_exists() and result.configure(text=str(e), text_color=P["warn"]))
+    secondary_button(head, "Check this PC", check, width=120, height=30).pack(side="right")
+    result.pack(side="right", padx=10)
+    small("Migrate user shows the domain account it is moving: name, email, department, groups, last logon, home "
+          "drive and logon script. It asks the domain this PC is joined to, as you, through ADSI. No credentials "
+          "are stored, and it stays quiet on PCs that aren't domain joined.")
