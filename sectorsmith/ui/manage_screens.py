@@ -79,10 +79,14 @@ def dep_title(store, d):
 def dep_target(app, store, d):
     if d.target_kind == "client":
         c = store.get("clients", d.target_value)
-        return "Client: " + (client_text(app, c.name) if c else "missing")
-    if d.target_kind == "machine":
-        return "PC: " + host_text(app, store, d.target_value)
-    return "Every PC"
+        text = "Client: " + (client_text(app, c.name) if c else "missing")
+    elif d.target_kind == "machine":
+        text = "PC: " + host_text(app, store, d.target_value)
+    else:
+        text = "Every PC"
+    if d.tags:
+        text += " tagged " + ", ".join(d.tags)
+    return text + (" (filtered)" if d.filter_script.strip() else "")
 
 
 def dep_state(d):
@@ -538,10 +542,14 @@ class DeploymentsScreen(ManagePage):
                   ("New PCs only", "Yes" if d.onboarding_only else "No"),
                   ("Schedule", schedule.describe(d) or "When you run maintenance"),
                   ("Restarts", REBOOT_LABEL.get(d.reboot_policy, d.reboot_policy)),
+                  ("Applies to", _plural(len(core.applies_to(self.store, d)), "known PC")
+                   + (", if its filter says so" if d.filter_script.strip() else "")),
                   ("Next run", schedule.next_text(d)), ("Last result", last)]
         sections = []
         if d.item_type == "bundle":
             sections.append(("Packages", "\n".join(dep_items(self.store, d)) or "None left", False))
+        if d.filter_script.strip():
+            sections.append(("Filter script", _short(d.filter_script, 300), True))
         task = self.store.get("tasks", d.item_id) if d.item_type == "task" else None
         if task is not None and task.parameters:
             by = {p["name"]: p for p in task.parameters}

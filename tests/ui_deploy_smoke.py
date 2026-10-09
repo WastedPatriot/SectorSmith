@@ -48,8 +48,8 @@ from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.deploy import schedule as sch  # noqa: E402
 from sectorsmith.deploy.versions import KINDS as versions_kinds  # noqa: E402
-from sectorsmith.ui import deploy_screens as D, main as M, manage_schedule as MSch, manage_screens as MS, nav, \
-    theme  # noqa: E402
+from sectorsmith.ui import deploy_screens as D, main as M, manage_inventory as MI, manage_schedule as MSch, \
+    manage_screens as MS, nav, theme  # noqa: E402
 from sectorsmith.ui.guide import save_settings  # noqa: E402
 from sectorsmith.util import Cancelled, check_cancel  # noqa: E402
 
@@ -170,7 +170,8 @@ def store():
 
 
 PAGES = [("library", MS.PackagesScreen), ("catalogue", MS.CatalogueScreen), ("deployments", MS.DeploymentsScreen),
-         ("clients", MS.ClientsScreen), ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen)]
+         ("clients", MS.ClientsScreen), ("inventory", MI.InventoryScreen), ("tasks", MS.TasksScreen),
+         ("sessions", MS.SessionsScreen)]
 host = socket.gethostname()
 pump(1)
 shot("home_light")
@@ -182,7 +183,7 @@ for key, cls in PAGES:
     pump(.5)
     assert type(app.screen) is cls, (key, type(app.screen))
     assert app.rail.items["manage"].selected and nav.locate(cls) == ("manage", key)
-    if key != "catalogue":
+    if key not in ("catalogue", "inventory"):
         assert not app.screen.table.rows, key
 shot("sessions_empty")
 
@@ -385,6 +386,32 @@ press("Save task")
 task = store().tasks[0]
 assert task.language == "shell" and task.get and [p["name"] for p in task.parameters] == ["Greeting", "Tries"]
 assert task.parameters[1]["default"] == 3
+
+# --- inventory: tag this PC, then a deployment aimed at that tag shows who it applies to ------------------------
+app.open_target("manage", "inventory")
+pump(.5)
+scr = app.screen
+iid = next(i for i, h in scr.table.rows.items() if h.lower() == host.lower())
+scr.table.tree.selection_set(iid)
+pump(.3)
+scr.tag_entry.insert(0, "Reception, laptops, Reception")
+press("Save tags", scr.panel)
+assert store().tags_of(host) == ["Reception", "laptops"], store().tags_of(host)
+assert "Reception, laptops" in json.dumps(table_text(app.screen))
+shot("inventory_tags_light")
+app.go(D.DeploymentWizard, item=("software", handy.id))
+pump(.5)
+scr = app.screen
+press("Next")
+press("Next")
+scr.tags.insert(0, "reception")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 1 known PC"), scr.applies_lbl.cget("text")
+scr.tags.delete(0, "end")
+scr.tags.insert(0, "Nobody")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 0 known PCs"), scr.applies_lbl.cget("text")
+shot("deployment_narrow")
 
 # --- the built-in task library: add one, deploy it with its own settings --------------------------------------
 app.go(MS.TaskLibraryScreen)
