@@ -48,8 +48,8 @@ from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.deploy import schedule as sch  # noqa: E402
 from sectorsmith.deploy.versions import KINDS as versions_kinds  # noqa: E402
-from sectorsmith.ui import deploy_screens as D, main as M, manage_inventory as MI, manage_licences as ML, \
-    manage_schedule as MSch, manage_screens as MS, nav, theme  # noqa: E402
+from sectorsmith.ui import deploy_screens as D, main as M, manage_audit as MA, manage_inventory as MI, \
+    manage_licences as ML, manage_schedule as MSch, manage_screens as MS, nav, theme  # noqa: E402
 from sectorsmith.ui.guide import save_settings  # noqa: E402
 from sectorsmith.util import Cancelled, check_cancel  # noqa: E402
 
@@ -171,7 +171,7 @@ def store():
 
 PAGES = [("library", MS.PackagesScreen), ("catalogue", MS.CatalogueScreen), ("deployments", MS.DeploymentsScreen),
          ("clients", MS.ClientsScreen), ("inventory", MI.InventoryScreen), ("licences", ML.LicencesScreen),
-         ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen)]
+         ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen), ("audit", MA.AuditScreen)]
 host = socket.gethostname()
 pump(1)
 shot("home_light")
@@ -696,6 +696,27 @@ scr.tree.selection_set(first)
 pump(.4)
 assert scr.out.get("1.0", "end").strip() != ""
 shot("session_view_dark")
+
+# --- audit log: library changes and session actions, filter, search, export --------------------------------------
+app.open_target("manage", "audit")
+pump(.5)
+scr = app.screen
+text = json.dumps(table_text(scr))
+assert "added package" in text and "added deployment" in text and "maintenance" in text, text[:400]
+scr.filter.set("Sessions")
+scr.fill()
+assert all("added" not in r[2] for r in table_text(scr))
+scr.search_var.set("Spooler")
+pump(.2)
+assert table_text(scr) and all("Spooler" in r[3] for r in table_text(scr)), table_text(scr)
+scr.table.tree.selection_set(next(iter(scr.table.rows)))
+pump(.3)
+shot("audit_dark")
+csv_out = os.path.join(W, "audit.csv")
+filedialog.asksaveasfilename = lambda **k: csv_out
+press("Export CSV...", scr.actions)
+with open(csv_out, encoding="utf-8-sig") as fh:
+    assert fh.readline().startswith("When,Who,Action") and len(fh.readlines()) == len(scr.table.rows)
 
 # --- Deployments page shows the latest result of each deployment --------------------------------------------
 app.open_target("manage", "deployments")

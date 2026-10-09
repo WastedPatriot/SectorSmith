@@ -150,6 +150,9 @@ class Store:
                     raw = json.load(f)
             names = {f.name for f in dataclasses.fields(cls)}
             self.data[k] = [cls(**{a: b for a, b in r.items() if a in names}) for r in raw]
+        # what was last saved of each object, so the audit log can say what changed
+        self._saved = {(k, x.id): dataclasses.asdict(x) for k in self.KINDS for x in self.data[k]}
+        self.actor = None   # who makes the changes (a name, or a function giving one); the UI sets the technician
 
     def save(self, kind=None):
         for k in ([kind] if kind else self.KINDS):
@@ -244,9 +247,41 @@ class Store:
         else:
             lst.append(obj)
         self.save(kind)
+        self._audit_change(kind, obj)
         return obj
 
+    def audit_name(self, kind, obj) -> str:
+        if kind == "machines":
+            return obj.hostname
+        if kind == "deployments":
+            if obj.item_type == "bundle":
+                return obj.name or "Bundle"
+            item = self.get("packages" if obj.item_type == "software" else "tasks", obj.item_id)
+            return item.name if item else obj.item_id
+        if kind == "licences":
+            p, c = self.get("packages", obj.package_id), self.get("clients", obj.client_id)
+            return f"{p.name if p else '?'} for {c.name if c else 'every client'}"
+        return getattr(obj, "name", "") or obj.id
+
+    def _audit_change(self, kind, obj):
+        from . import audit
+        after = dataclasses.asdict(obj)
+        before = self._saved.get((kind, obj.id))
+        self._saved[(kind, obj.id)] = after
+        if before is None:
+            audit.record(self, "first seen" if kind == "machines" else "added", kind, obj.id,
+                         self.audit_name(kind, obj))
+            return
+        detail = audit.describe_change(kind, before, after)
+        if detail:
+            audit.record(self, "changed", kind, obj.id, self.audit_name(kind, obj), detail)
+
     def delete(self, kind, id_):
+        gone_obj = self.get(kind, id_)
+        if gone_obj is not None:
+            from . import audit
+            audit.record(self, "removed", kind, id_, self.audit_name(kind, gone_obj))
+            self._saved.pop((kind, id_), None)
         if kind in ("packages", "clients"):
             for lic in [x for x in self.licences if id_ in (x.package_id, x.client_id)]:
                 self.delete("licences", lic.id)
@@ -1193,11 +1228,13 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
                 prog.set_label(f"{a['action'].capitalize()}: {a['name']}")
                 r = execute(ep, store, a, prog)
                 done[a["deployment"]] = r
+                _audit_action(store, sess, r)
                 prog.update(i + 1)
         except Cancelled as c:
             if c.info.get("action"):
                 part = c.info.pop("action")
                 done[part["deployment"]] = part
+                _audit_action(store, sess, part)
             sess["actions"] = [dict(done.get(a["deployment"]) or
                                     (dict(a, status="cancelled", result="not run: cancelled")
                                      if a["action"] not in IDLE else dict(a, status=idle_status(a))),
@@ -1240,6 +1277,19 @@ def _restart(ep, store, sess, info):
     log.info("Deploy session %s on %s: restart %s", sess["id"], sess["machine"], sess["restart"])
 
 
+DONE_WORDS = {"install": "installed", "upgrade": "updated", "reinstall": "rolled back", "uninstall": "removed",
+              "set": "fixed"}
+
+
+def _audit_action(store, sess, a):
+    from . import audit
+    st = a.get("status", "")
+    what = DONE_WORDS.get(a["action"], a["action"]) if st == "compliant" else \
+        f"{'stopped' if st == 'cancelled' else 'failed'}: {a['action']}"
+    audit.record(store, what, "session", sess["id"], f"{a['name']} on {sess['machine']}",
+                 (a.get("result") or "")[:300])
+
+
 def _finish(store, sess, cancelled=False):
     sess["finished"] = time.time()
     st = [a["status"] for a in sess["actions"]]
@@ -1250,6 +1300,12 @@ def _finish(store, sess, cancelled=False):
     if cancelled:
         sess["cancelled"] = True
     sess["path"] = store.save_session(sess)
+    from . import audit
+    sm = sess["summary"]
+    audit.record(store, ("check" if sess["mode"] == "detect" else "maintenance") + (" stopped" if cancelled else ""),
+                 "session", sess["id"], sess["machine"],
+                 f"{sess.get('trigger', 'manual')}: {sm['compliant']} OK, {sm['failed']} failed, {sm['pending']} to "
+                 f"change, {sm['non_compliant']} not OK" + (", restart needed" if sm["reboot"] else ""))
     log.info("Deploy session %s on %s%s: %s", sess["id"], sess["machine"], " (cancelled)" if cancelled else "",
              sess["summary"])
     return sess

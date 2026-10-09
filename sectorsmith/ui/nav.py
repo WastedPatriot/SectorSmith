@@ -75,7 +75,9 @@ CATEGORIES = [
                             hint="licence license keys files per client"),
                        Item("tasks", "Tasks", "task", "manage_screens:TasksScreen", hint="scripts upkeep"),
                        Item("sessions", "Sessions", "clock", "manage_screens:SessionsScreen",
-                            hint="history results")]),
+                            hint="history results"),
+                       Item("audit", "Audit log", "jobs", "manage_audit:AuditScreen",
+                            hint="who changed what history export csv")]),
     ], shortcut="Ctrl+6"),
     Category("jobs", "Jobs", "jobs", "Jobs", "What ran, where and for whom", [
         (None, [Item("history", "Job history", "jobs", "workspace:JobsScreen", hint="audit log certificates")]),
