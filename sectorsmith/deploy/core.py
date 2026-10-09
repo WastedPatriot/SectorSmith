@@ -91,6 +91,19 @@ class Machine:
 
 
 @dataclass
+class Licence:
+    """A client's licence key or file for a package (client_id "" = every client without its own). See licences.py."""
+    package_id: str
+    client_id: str = ""
+    kind: str = "key"                      # key | file
+    secret: dict = field(default_factory=dict)     # {"secret": ref} into the encrypted secrets
+    hint: str = ""                         # last characters of the key, for telling licences apart
+    file_name: str = ""
+    notes: str = ""
+    id: str = field(default_factory=_id)
+
+
+@dataclass
 class Deployment:
     item_type: str                         # software | task | bundle (several packages, ids in items)
     item_id: str
@@ -119,7 +132,8 @@ class Deployment:
 class Store:
     """JSON-backed library under %LOCALAPPDATA%\\SectorSmith\\deploy (or a given folder)."""
 
-    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment, "machines": Machine}
+    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment, "machines": Machine,
+             "licences": Licence}
 
     def __init__(self, root: str | None = None):
         self.root = root or str(app_dir() / "deploy")
@@ -165,6 +179,10 @@ class Store:
     @property
     def machines(self):
         return self.data["machines"]
+
+    @property
+    def licences(self):
+        return self.data["licences"]
 
     def machine(self, hostname: str, create=False) -> Machine | None:
         h = (hostname or "").lower()
@@ -229,6 +247,14 @@ class Store:
         return obj
 
     def delete(self, kind, id_):
+        if kind in ("packages", "clients"):
+            for lic in [x for x in self.licences if id_ in (x.package_id, x.client_id)]:
+                self.delete("licences", lic.id)
+        if kind == "licences":
+            gone = self.get("licences", id_)
+            if gone is not None:
+                from .licences import forget
+                forget(self, gone)
         if kind == "deployments":
             gone = self.get("deployments", id_)
             for v in (gone.params.values() if gone is not None else []):
@@ -893,6 +919,10 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
                  "current": ver or "not installed", "action": act, "entry": entry}
             if found:
                 a["source"] = found
+            from .licences import for_host
+            lic = for_host(store, pkg.id, hostname)
+            if lic is not None:
+                a["licence"] = lic.id
             if note:
                 a["result"] = note
             actions.append(a)
@@ -963,9 +993,9 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     policy = dep.reboot_policy if dep is not None else "never"
     secrets: list = []   # decrypted task secrets, masked in the saved log
 
-    def run(cmd):
+    def run(cmd, env=None):
         for attempt in range(BUSY_TRIES):
-            r = ep.run_command(cmd=cmd, timeout=3600)
+            r = ep.run_command(cmd=cmd, timeout=3600, env=env) if env else ep.run_command(cmd=cmd, timeout=3600)
             log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
             if r["code"] != BUSY_CODE or attempt == BUSY_TRIES - 1:
                 return r
@@ -1022,17 +1052,24 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                         and "--version" not in cmd_t:
                     cmd_t += " --version {version}"
                 remote = _upload(ep, local, pkg, prog) if local else ""
+                lic_file = ""
                 try:
+                    env = _licence(ep, store, pkg, a, secrets, log_lines)
+                    lic_file = env.get("SECTORSMITH_LICENCE_FILE", "")
                     if prog:
                         prog.set_detail(f"Installing {pkg.name} {inst.version}")
                     cmd = expand(cmd_t, inst, installer=remote)
-                    r = run(suppress_reboot(cmd) if policy == "suppress" else cmd)
+                    cmd = cmd.replace("{licence_key}", env.get("SECTORSMITH_LICENCE_KEY", "")).replace(
+                        "{licence_file}", lic_file)
+                    r = run(suppress_reboot(cmd) if policy == "suppress" else cmd, env)
                 finally:
-                    if remote:
-                        try:
-                            ep.remove_path(path=remote[:-len(os.path.basename(local)) - 1])
-                        except Exception as e:  # noqa: BLE001
-                            log.warning("Couldn't remove the uploaded installer %s: %s", remote, e)
+                    lic_dir = lic_file[:max(lic_file.rfind("\\"), lic_file.rfind("/"))] if lic_file else ""
+                    for path in (remote[:-len(os.path.basename(local)) - 1] if remote else "", lic_dir):
+                        if path:
+                            try:
+                                ep.remove_path(path=path)
+                            except Exception as e:  # noqa: BLE001
+                                log.warning("Couldn't remove %s from the PC: %s", path, e)
                 outcome = exit_outcome(pkg, r["code"])
                 if outcome == "failed":
                     a.update(status="failed", result=f"Installer exit code {r['code']}")
@@ -1092,6 +1129,26 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
         a["log"] = text[-8000:]
         a["seconds"] = round(time.time() - t0, 1)
     return a
+
+
+def _licence(ep, store: Store, pkg: Package, a: dict, secrets: list, log_lines: list) -> dict:
+    """The licence for this install as environment variables (the file copied to the PC first). {} for none."""
+    lic = store.get("licences", a.get("licence") or "")
+    if lic is None:
+        return {}
+    from . import licences
+    if lic.kind == "key":
+        key = licences.key_of(store, lic)
+        secrets.append(str(key))
+        log_lines.append(f"licence: {licences.masked(lic)}")
+        return {licences.ENV_KEY: str(key)}
+    data = licences.file_of(store, lic)
+    remote_dir = ep.deploy_dir()
+    sep = "\\" if "\\" in remote_dir else "/"
+    dest = f"{remote_dir}{sep}lic-{lic.id}{sep}{lic.file_name or 'licence.lic'}"
+    ep.put_file(path=dest, offset=0, total=len(data), blob=data)
+    log_lines.append(f"licence: {licences.masked(lic)}, copied to the PC for the install")
+    return {licences.ENV_FILE: dest}
 
 
 def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding: bool = False,

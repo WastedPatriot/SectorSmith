@@ -71,6 +71,8 @@ CATEGORIES = [
                             hint="baseline onboarding new pc"),
                        Item("inventory", "Inventory", "pc", "manage_inventory:InventoryScreen",
                             hint="pcs tags hardware serial model bitlocker"),
+                       Item("licences", "Licences", "lock", "manage_licences:LicencesScreen",
+                            hint="licence license keys files per client"),
                        Item("tasks", "Tasks", "task", "manage_screens:TasksScreen", hint="scripts upkeep"),
                        Item("sessions", "Sessions", "clock", "manage_screens:SessionsScreen",
                             hint="history results")]),
@@ -93,6 +95,7 @@ EXTRA = {
     "PackageBuilder": ("manage", "library"), "DeploymentWizard": ("manage", "deployments"),
     "ClientEditor": ("manage", "clients"), "TaskEditor": ("manage", "tasks"), "SessionView": ("manage", "sessions"),
     "BaselineEditor": ("manage", "clients"), "TaskLibraryScreen": ("manage", "tasks"),
+    "LicenceEditor": ("manage", "licences"),
 }
 
 

@@ -265,6 +265,10 @@ class PackagesScreen(ManagePage):
                               + (f", {found['version']} when last asked" if found else ", not asked yet")))
         if p.category:
             fields.append(("Category", p.category))
+        lics = [x for x in self.store.licences if x.package_id == p.id]
+        if lics:
+            fields.append(("Licences", _plural(len(lics), "client") if all(x.client_id for x in lics) else
+                           f"{_plural(len(lics), 'licence')}, one for every client"))
         needs = [x.name for x in (self.store.get("packages", i) for i in p.prerequisites) if x is not None]
         if needs:
             fields.append(("Needs", ", ".join(needs)))
@@ -729,6 +733,9 @@ class ClientsScreen(ManagePage):
         names = [p.name for p in (self.store.get("packages", i) for i in (base.items if base else [])) if p]
         pcs = "Hidden while presenting" if hidden else (", ".join(c.machines) or "None yet")
         fields = [("PCs", pcs), ("Baseline", _plural(len(names), "package") if base else "Not set")]
+        lics = [x for x in self.store.licences if x.client_id == c.id]
+        if lics:
+            fields.append(("Licences", _plural(len(lics), "package")))
         if base:
             fields.append(("Wants", SOFTWARE_STATES.get(base.desired, base.desired)))
         sections = [("Baseline packages", "\n".join(names), False)] if names else []

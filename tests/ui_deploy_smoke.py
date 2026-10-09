@@ -48,8 +48,8 @@ from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.deploy import schedule as sch  # noqa: E402
 from sectorsmith.deploy.versions import KINDS as versions_kinds  # noqa: E402
-from sectorsmith.ui import deploy_screens as D, main as M, manage_inventory as MI, manage_schedule as MSch, \
-    manage_screens as MS, nav, theme  # noqa: E402
+from sectorsmith.ui import deploy_screens as D, main as M, manage_inventory as MI, manage_licences as ML, \
+    manage_schedule as MSch, manage_screens as MS, nav, theme  # noqa: E402
 from sectorsmith.ui.guide import save_settings  # noqa: E402
 from sectorsmith.util import Cancelled, check_cancel  # noqa: E402
 
@@ -170,8 +170,8 @@ def store():
 
 
 PAGES = [("library", MS.PackagesScreen), ("catalogue", MS.CatalogueScreen), ("deployments", MS.DeploymentsScreen),
-         ("clients", MS.ClientsScreen), ("inventory", MI.InventoryScreen), ("tasks", MS.TasksScreen),
-         ("sessions", MS.SessionsScreen)]
+         ("clients", MS.ClientsScreen), ("inventory", MI.InventoryScreen), ("licences", ML.LicencesScreen),
+         ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen)]
 host = socket.gethostname()
 pump(1)
 shot("home_light")
@@ -433,6 +433,36 @@ scr.conditions.insert("end", "; colour = red")
 scr._applies()
 assert "isn't something" in scr.applies_lbl.cget("text"), scr.applies_lbl.cget("text")
 shot("deployment_narrow")
+
+# --- licences: refused without DPAPI; with a stand-in for it, saved encrypted and shown masked ----------------------
+from sectorsmith.integrations import dpapi  # noqa: E402
+
+app.go(ML.LicenceEditor)
+pump(.5)
+scr = app.screen
+if not dpapi.available():
+    assert scr.save_btn.cget("state") == "disabled", "no DPAPI here: licences can't be saved"
+real_dpapi = (dpapi.available, dpapi.protect, dpapi.unprotect)
+dpapi.available = lambda: True
+dpapi.protect = dpapi.unprotect = lambda b: bytes(x ^ 0x33 for x in b)
+app.go(ML.LicenceEditor)
+pump(.5)
+scr = app.screen
+scr.client.set("Front office")
+scr.package.set("Handy tool")
+scr.key.insert(0, "AAAAA-BBBBB-CCCCC-9Z8Y")
+scr.notes.insert(0, "25 seats")
+shot("licence_editor")
+press("Save licence")
+assert isinstance(app.screen, ML.LicencesScreen)
+lic = store().licences[0]
+assert lic.client_id == store().client_of(host).id and lic.package_id == handy.id and lic.hint == "9Z8Y"
+assert "Key ending 9Z8Y" in json.dumps(table_text(app.screen)) and "AAAAA" not in json.dumps(table_text(app.screen))
+app.screen.table.tree.selection_set(next(iter(app.screen.table.rows)))
+pump(.3)
+shot("licences_light")
+dpapi.available, dpapi.protect, dpapi.unprotect = real_dpapi
+store().delete("licences", lic.id)
 
 # --- the built-in task library: add one, deploy it with its own settings --------------------------------------
 app.go(MS.TaskLibraryScreen)
