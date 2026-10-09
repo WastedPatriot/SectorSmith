@@ -512,14 +512,30 @@ class MigrateWizard(Screen):
             for w in area.winfo_children():
                 w.destroy()
             self._profile_list(area, m, pick_profile)
+            show_domain(None)
 
         def pick_profile(path, kind):
             self.src_root = path
             self.src_offline = kind != "profile"
             nb.configure(state="normal")
+            show_domain(path)
         self.mpick = MachinePicker(body, self.app, pick_machine)
         self.mpick.pack(anchor="w")
+
+        # integrations: the domain account behind the picked user (quiet on PCs that aren't domain joined).
+        # self.domain_user (ADUser or None) keeps the answer; its migration_notes() name home drive and logon script.
+        dom = ctk.CTkFrame(body, fg_color="transparent")
+        self.domain_user = None
+
+        def show_domain(path):
+            from .integrations_ui import DomainUserCard
+            for w in dom.winfo_children():
+                w.destroy()
+            self.domain_user = None
+            if path:
+                DomainUserCard(dom, self.app, path, lambda u: setattr(self, "domain_user", u)).pack(fill="x")
         area.pack(fill="both", expand=True)
+        dom.pack(fill="x")
         self.note(area, "Old PC won't start? Put its disk or NVMe in a USB caddy, plug it into this PC (or the new "
                         "one), pick that PC, then the user under 'On other drives'. "
                   + ("Tip: link the new PC first (+ Link another PC)." if len(self.app.machines()) == 1 else ""),

@@ -126,6 +126,13 @@ class CommandPalette(ctk.CTkFrame):
             sub = "" if m.is_local else getattr(m, "address", "")
             out.append(Entry("Machines", label, lambda: app.open_target("machines", "linked"), "pc",
                              "Machines", f"{sub} machine"))
+        from .integrations_ui import machine_name, open_screenconnect, sc_instance
+        if sc_instance(app):  # only once ScreenConnect is set up in Settings
+            for m in app.machines():
+                name = machine_name(m)
+                out.append(Entry("Machines", f"Connect with ScreenConnect: {name}",
+                                 lambda n=name: open_screenconnect(app, n), "link", "ScreenConnect",
+                                 "remote control connectwise screenconnect"))
         cur = app.context.get("client")
         for n in app.client_names():
             if pres and n != cur:

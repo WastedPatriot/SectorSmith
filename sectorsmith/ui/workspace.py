@@ -8,6 +8,7 @@ import customtkinter as ctk
 from ..util import human_size
 from . import theme
 from .screens import CloneWizard, HealthWizard, Screen, WipeWizard, _columns
+from .integrations_ui import local_client_lines, machine_name, open_screenconnect, sc_instance
 from .shell import machine_status
 from .widgets import Card, DataTable, EmptyState, IconBadge, Skeleton, StatusPill, TaskCard, caption, divider, \
     secondary_button
@@ -144,7 +145,8 @@ class MachinesScreen(Screen):
         card.pack(fill="both", expand=True, pady=(16, 0))
         head = ctk.CTkFrame(card.body, fg_color=P["surface_2"], corner_radius=0, height=34)
         head.pack(fill="x")
-        cols = (("Machine", 0), ("Address", 150), ("User", 130), ("Status", 120))
+        sc = sc_instance(app)  # ScreenConnect column only once it is set up in Settings
+        cols = (("Machine", 0), ("Address", 150), ("User", 130), ("Status", 120)) + ((("Remote", 210),) if sc else ())
         for i, (name, _w) in enumerate(cols):
             caption(head, name).grid(row=0, column=i, sticky="w", padx=(20 if i == 0 else 0, 12), pady=9)
         _columns(head, cols)
@@ -170,7 +172,15 @@ class MachinesScreen(Screen):
             pill = ctk.CTkFrame(r, fg_color="transparent", width=120)
             pill.grid(row=0, column=3, sticky="w", padx=(0, 12))
             StatusPill(pill, machine_status(m)).pack(anchor="w")
+            if sc:
+                secondary_button(r, "Connect with ScreenConnect", lambda n=machine_name(m): open_screenconnect(app, n),
+                                 width=210, height=30).grid(row=0, column=4, sticky="w", padx=(0, 12))
             _columns(r, cols)
+        for line in local_client_lines() if sc else ():
+            divider(card.body).pack(fill="x")
+            ctk.CTkLabel(card.body, text=f"ScreenConnect client on This PC:  {line}", font=theme.font_style("small"),
+                         text_color=P["muted"], anchor="w", justify="left", wraplength=860).pack(fill="x", padx=20,
+                                                                                                  pady=8)
         if len(ms) == 1:
             divider(card.body).pack(fill="x")
             EmptyState(card.body, "No other machines linked yet", "Run one PowerShell command on another PC, or "
