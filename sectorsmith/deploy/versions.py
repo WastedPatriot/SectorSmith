@@ -35,7 +35,8 @@ def fetch(url: str, timeout: float = TIMEOUT, headers: dict | None = None) -> by
     _https(url)
     req = urllib.request.Request(url, headers={"User-Agent": "SectorSmith", **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310  (https only, checked above)
+        # the scheme was checked above: https only
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
             return r.read(16 * 1024 * 1024)
     except OSError as e:
         raise SourceError(f"couldn't fetch {url}: {e}") from e
@@ -48,7 +49,7 @@ def download(url: str, dest: str, timeout: float = TIMEOUT, progress=None):
     tmp = dest + ".part"
     got = 0
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r, open(tmp, "wb") as f:  # nosec B310  (https only)
+        with urllib.request.urlopen(req, timeout=timeout) as r, open(tmp, "wb") as f:  # nosec B310
             total = int(r.headers.get("Content-Length") or 0)
             while True:
                 check_cancel()

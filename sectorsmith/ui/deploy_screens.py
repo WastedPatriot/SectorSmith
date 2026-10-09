@@ -467,6 +467,7 @@ class PackageBuilder(Screen):
         self._field("Success codes", "codes", hint="Installer exit codes that count as success.")
         self._det_changed()
         self._source_rows(s.get("version_source") or {})
+        self._needs_row(s.get("prerequisites") or [])
 
         side = ctk.CTkFrame(cols, fg_color="transparent")
         side.grid(row=0, column=1, sticky="nsew")
@@ -557,8 +558,52 @@ class PackageBuilder(Screen):
             hint = ("Its version is read from the file." if method == "file" else
                     "Matches part of the name. Start with re: for a regular expression.")
         ctk.CTkLabel(self.det_box, text=hint, font=theme.font_style("small"), text_color=P["muted"],
-                     anchor="w").grid(row=2, column=1, sticky="w", padx=(0, 18))
+                     anchor="w", justify="left", wraplength=380).grid(row=2, column=1, sticky="w", padx=(0, 18))
         self._preview_soon()
+
+    # -- other packages this one needs ---------------------------------------
+    def _needs_row(self, ids):
+        self.needs = [i for i in ids if self.store.get("packages", i) is not None]
+        self._label("Needs")
+        self.needs_box = ctk.CTkFrame(self.form, fg_color="transparent")
+        self.needs_box.grid(row=self._row, column=1, sticky="ew", padx=(0, 18), pady=(6, 0))
+        self._row += 1
+        ctk.CTkLabel(self.form, text="Installed before this one, and removed after it.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w").grid(
+            row=self._row, column=1, sticky="w", padx=(0, 18), pady=(0, 12))
+        self._row += 1
+        self._needs_draw()
+
+    def _needs_draw(self):
+        for w in self.needs_box.winfo_children():
+            w.destroy()
+        for pid in self.needs:
+            chip = ctk.CTkFrame(self.needs_box, fg_color=P["accent_soft"], corner_radius=8)
+            chip.pack(side="left", padx=(0, 6), pady=2)
+            ctk.CTkLabel(chip, text=self.store.get("packages", pid).name, font=theme.font_style("small"),
+                         text_color=P["accent"]).pack(side="left", padx=(8, 2))
+            small_button(chip, "x", lambda pid=pid: self._needs_remove(pid), "accent", width=22).pack(side="left")
+        me = self.pkg.id if self.pkg is not None else None
+        others = sorted((p for p in self.store.packages if p.id not in self.needs and p.id != me),
+                        key=lambda p: p.name.lower())
+        if others:
+            names = [p.name for p in others]
+            self.needs_menu = ctk.CTkOptionMenu(self.needs_box, values=names, width=150, height=28,
+                                                font=theme.font_style("small"),
+                                                command=lambda n: self._needs_add(others[names.index(n)].id))
+            self.needs_menu.set("Add a package...")
+            self.needs_menu.pack(side="left", pady=2)
+        elif not self.needs:
+            ctk.CTkLabel(self.needs_box, text="Nothing else in the library yet", font=theme.font_style("small"),
+                         text_color=P["muted"]).pack(side="left")
+
+    def _needs_add(self, pid):
+        self.needs.append(pid)
+        self._needs_draw()
+
+    def _needs_remove(self, pid):
+        self.needs = [x for x in self.needs if x != pid]
+        self._needs_draw()
 
     # -- where the newest version comes from (versions.py) --------------------
     def _source_rows(self, src):
@@ -683,6 +728,10 @@ class PackageBuilder(Screen):
                 raise ValueError("Say how to detect it: add the file path or detection script.")
             if f["detection"]["method"] == "msi_product_code" and not f["product_code"]:
                 raise ValueError("Add the MSI product code, or pick another way to detect it.")
+            if self.pkg is not None:
+                loop = core.dependency_loop(self.store, dataclasses.replace(self.pkg, prerequisites=self.needs))
+                if loop:
+                    raise ValueError("That makes a loop: " + " needs ".join(loop) + ". Take one of them off Needs.")
             if f["version_source"].get("kind") == "winget" and self.kind == "winget" and not f["winget_id"]:
                 f["winget_id"] = f["version_source"]["id"]
         return f
@@ -692,6 +741,7 @@ class PackageBuilder(Screen):
                   "success_codes", "detection", "version_source"):
             setattr(pkg, k, f[k])
         pkg.language = self.lang
+        pkg.prerequisites = list(getattr(self, "needs", pkg.prerequisites))
         return pkg
 
     def _preview_soon(self):

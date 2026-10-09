@@ -261,6 +261,12 @@ class PackagesScreen(ManagePage):
                               + (f", {found['version']} when last asked" if found else ", not asked yet")))
         if p.category:
             fields.append(("Category", p.category))
+        needs = [x.name for x in (self.store.get("packages", i) for i in p.prerequisites) if x is not None]
+        if needs:
+            fields.append(("Needs", ", ".join(needs)))
+        needed = [x.name for x in self.store.packages if p.id in x.prerequisites]
+        if needed:
+            fields.append(("Needed by", ", ".join(needed)))
         sections = [("Install", _short(p.install, 240), True)]
         if used:
             sections.append(("Used by", "\n".join(f"{dep_title(self.store, d)}  ·  {dep_target(self.app, self.store, d)}"
