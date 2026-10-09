@@ -1490,5 +1490,77 @@ s_ = core.run_session(InvPC(), istore, Progress(1), mode="detect")
 check([a["name"] for a in s_["actions"]] == ["Old Viewer"] and "ram_gb >= 32" in s_["filtered"][0]["why"],
       "a PC that no longer matches is left out, and the session says why")
 
+# --- 17. Licences: per client, encrypted, handed to the installer, masked everywhere ---------------------------------
+from sectorsmith.deploy import licences as LIC  # noqa: E402
+
+lstore = Store(os.path.join(W, "lib17"))
+acme = lstore.upsert("clients", Client(name="Acme", machines=[host]))
+other_c = lstore.upsert("clients", Client(name="Other", machines=["PC-OTHER"]))
+key_out = os.path.join(W, "licence_key_seen")
+file_out = os.path.join(W, "licence_file_seen")
+lk = lstore.upsert("packages", Package(name="Key App", kind="script", version="1.0", language="shell",
+                                       install=f'echo "{{licence_key}}|$SECTORSMITH_LICENCE_KEY" > "{key_out}"; '
+                                               'echo "installing with {licence_key}"',
+                                       detection={"method": "script", "value": f'[ -f "{key_out}" ] && echo 1.0'}))
+lf = lstore.upsert("packages", Package(name="File App", kind="script", version="1.0", language="shell",
+                                       install=f'cp "{{licence_file}}" "{file_out}" && [ "$SECTORSMITH_LICENCE_FILE" = '
+                                               '"{licence_file}" ]',
+                                       detection={"method": "script", "value": f'[ -f "{file_out}" ] && echo 1.0'}))
+KEY = "ABCDE-12345-FGHIJ-7Q2X"
+if not dpapi.available():
+    try:
+        LIC.save(lstore, core.Licence(package_id=lk.id, client_id=acme.id), key=KEY)
+        refused = False
+    except dpapi.SecretsUnavailable:
+        refused = True
+    check(refused and not lstore.licences and not os.path.exists(os.path.join(lstore.root, TP.SECRETS)),
+          "without DPAPI a licence key is refused and nothing is kept")
+dpapi.protect = lambda b: bytes(x ^ 0x5A for x in b)
+dpapi.unprotect = lambda b: bytes(x ^ 0x5A for x in b)
+lic_k = LIC.save(lstore, core.Licence(package_id=lk.id, client_id=acme.id), key=KEY)
+fallback = LIC.save(lstore, core.Licence(package_id=lk.id), key="EVERY-ONE-ELSE-0000")
+lic_src = os.path.join(W, "site.lic")
+with open(lic_src, "wb") as _f:
+    _f.write(b"LICENSE acme seats=25\n\x00\x01binary")
+lic_f = LIC.save(lstore, core.Licence(package_id=lf.id, client_id=acme.id, kind="file"), file_path=lic_src)
+try:
+    LIC.save(lstore, core.Licence(package_id=lk.id, client_id=acme.id), key="dupe")
+    dup = ""
+except ValueError as e:
+    dup = str(e)
+check("already has a licence" in dup, "one licence per client and package")
+with open(os.path.join(lstore.root, TP.SECRETS)) as _f:
+    raw_secrets = _f.read()
+with open(os.path.join(lstore.root, "licences.json")) as _f:
+    raw_lic = _f.read()
+check(KEY not in raw_secrets and KEY not in raw_lic and b"seats" not in open(os.path.join(
+    lstore.root, "licences", lic_f.id, "licence.bin"), "rb").read(), "keys and files are stored encrypted")
+check(LIC.masked(lic_k) == "Key ending 7Q2X" and LIC.masked(lic_f) == "File site.lic",
+      "licences shown masked: the key's last four characters only")
+check(LIC.for_host(lstore, lk.id, host).id == lic_k.id and LIC.for_host(lstore, lk.id, "PC-OTHER").id == fallback.id
+      and LIC.for_host(lstore, lf.id, "PC-OTHER") is None, "a PC gets its client's licence, else the every-client one")
+deploy(lstore, lk, "installed")
+deploy(lstore, lf, "installed")
+s_ = core.run_session(LocalEndpoint(), lstore, Progress(1), mode="full")
+by = {a["name"]: a for a in s_["actions"]}
+with open(key_out) as _f:
+    seen_key = _f.read().strip()
+with open(file_out, "rb") as _f:
+    seen_file = _f.read()
+with open(s_["path"]) as _f:
+    sess_text = _f.read()
+check(by["Key App"]["status"] == "compliant" and seen_key == f"{KEY}|{KEY}",
+      "the key reaches the installer as {licence_key} and SECTORSMITH_LICENCE_KEY")
+check(KEY not in sess_text and "********" in by["Key App"]["log"] and "Key ending 7Q2X" in by["Key App"]["log"],
+      "the key never appears in the session or its log, only masked")
+check(by["File App"]["status"] == "compliant" and seen_file == b"LICENSE acme seats=25\n\x00\x01binary"
+      and not [n for n in os.listdir(LocalEndpoint().deploy_dir()) if n.startswith("lic-")],
+      "the licence file is copied next to the install, passed as {licence_file}, then removed from the PC")
+lstore.delete("clients", acme.id)
+check([x.id for x in lstore.licences] == [fallback.id] and lic_k.secret["secret"] not in TP._load(lstore.root)
+      and not os.path.exists(os.path.join(lstore.root, "licences", lic_f.id)),
+      "removing a client removes its licences and their encrypted keys and files")
+dpapi.protect, dpapi.unprotect = _real
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)
