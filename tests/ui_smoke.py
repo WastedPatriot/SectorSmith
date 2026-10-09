@@ -430,12 +430,18 @@ assert pal.shown and pal.shown[0].label == "Erase and certify", [e.label for e i
 pal._run()
 pump(0.6)
 assert type(app.screen) is S.WipeWizard
+from sectorsmith.ui import shell as SH  # noqa: E402
 app.open_palette()
 pump(0.3)
 app._smith_overlays[-1].var.set("#777")
 pump(0.2)
 app._smith_overlays[-1]._run()
-assert app.context["ticket"] == "777"
+if SH.TICKETS:
+    assert app.context["ticket"] == "777"
+else:  # tickets on hold: the chip is hidden and '#' is an ordinary search
+    assert app.context["ticket"] == "48213" and not app.bar.ticket.winfo_ismapped()
+    app.home()
+    pump(0.3)
 
 # presentation mode: Mossbit off, serials masked, chip shown; personality Off gives a plain progress bar
 app.home()

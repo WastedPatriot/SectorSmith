@@ -246,7 +246,7 @@ def enable_dpi_awareness():
     try:
         ctypes.windll.user32.SetProcessDPIAware()
     except (AttributeError, OSError):
-        pass
+        pass  # very old Windows: Tk scales as before
 
 
 # ---------------------------------------------------------------- fonts

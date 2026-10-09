@@ -120,7 +120,7 @@ class RowTable(ctk.CTkFrame):
         try:
             frame.configure(fg_color=P["selected"] if sel else P["hover"] if hot else "transparent")
         except tk.TclError:
-            pass
+            pass  # row destroyed during a refresh
 
     def select(self, data, fire=True):
         self.selected = data

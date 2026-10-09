@@ -9,6 +9,7 @@ import customtkinter as ctk
 
 from .. import jobs
 from ..util import human_size
+from .shell import TICKETS
 from . import theme
 from .screens import CloneWizard, HealthWizard, Screen, WipeWizard, _columns
 from .integrations_ui import local_client_lines, machine_name, open_screenconnect, sc_instance
@@ -239,7 +240,7 @@ class JobsScreen(Screen):
     refreshable = True
 
     def __init__(self, master, app):
-        super().__init__(master, app, "Job history", "Every job run on this PC, stamped with client, ticket and "
+        super().__init__(master, app, "Job history", "Every job run on this PC, stamped with client and "
                                                      "technician.", show_back=False)
         self.header_action("Export CSV", self._export, width=120)
         # filters last for the session, so leaving the page and coming back keeps them
@@ -256,10 +257,12 @@ class JobsScreen(Screen):
         card.pack(fill="both", expand=True)
         self.count = ctk.CTkLabel(card.head, text="", font=theme.font_style("small"), text_color=P["muted"])
         self.count.pack(side="left", padx=(8, 0), pady=(3, 0))
-        self.table = DataTable(card.body, [("when", "When", 130), ("task", "Task", 180), ("detail", "Target", 190),
-                                           ("client", "Client", 120), ("ticket", "Ticket", 75),
-                                           ("tech", "Technician", 100), ("result", "Result", 90),
-                                           ("report", "Report", 90)], height=9,
+        cols = [("when", "When", 130), ("task", "Task", 180), ("detail", "Target", 190), ("client", "Client", 120),
+                ("ticket", "Ticket", 75), ("tech", "Technician", 100), ("result", "Result", 90),
+                ("report", "Report", 90)]
+        if not TICKETS:
+            cols = [c for c in cols if c[0] != "ticket"]
+        self.table = DataTable(card.body, cols, height=9,
                                on_open=self._open_report, on_select=self._select)
         self.table.pack(fill="both", expand=True)
         bar = ctk.CTkFrame(card.body, fg_color="transparent")
@@ -317,7 +320,8 @@ class JobsScreen(Screen):
     def _filters(self, body):
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(0, 12))
-        self.search = _Field(row, self.f["text"], "Search task, target, ticket, technician", 280, self._soon)
+        hint = "Search task, target, ticket, technician" if TICKETS else "Search task, target, technician"
+        self.search = _Field(row, self.f["text"], hint, 280, self._soon)
         self.search.entry.pack(side="left")
         clients = sorted({j.get("client") for j in self.all if j.get("client")}, key=str.lower)
         if theme.presentation():
@@ -391,12 +395,15 @@ class JobsScreen(Screen):
         filtered = len(self.shown) != len(self.all)
         t._empty_spec = ("No matching jobs", "Change or clear the filters to see more.", ("Clear filters", self._clear),
                          "jobs") if self.all else \
-            ("No jobs yet", "Every job you run is listed here with its client, ticket and result, and stays after "
+            ("No jobs yet", "Every job you run is listed here with its client and result, and stays after "
                             "SectorSmith closes.", None, "jobs")
         for j in reversed(self.shown[-SHOW_MAX:]):
-            t.add((_when(j["started"]), j["task"], j.get("detail") or "-", j.get("client") or "-",
+            row = [_when(j["started"]), j["task"], j.get("detail") or "-", j.get("client") or "-",
                    f"#{j['ticket']}" if j.get("ticket") else "-", j.get("technician") or "-", j["result"],
-                   _report_kind(j.get("report"))), data=j)
+                   _report_kind(j.get("report"))]
+            if not TICKETS:
+                del row[4]
+            t.add(tuple(row), data=j)
         t.done()
         n, total = len(self.shown), len(self.all)
         text = f"{n} of {total} job{'s' if total != 1 else ''}" if filtered else \

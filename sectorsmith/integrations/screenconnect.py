@@ -128,7 +128,7 @@ def _service_image_paths():
                 except OSError:
                     continue
     except OSError:
-        pass
+        pass  # no ScreenConnect service key on this PC
     return out
 
 

@@ -9,6 +9,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from .shell import TICKETS
 from . import nav, theme
 from .widgets import Icon, Shadow, _install_overlay_handlers, bind_all, caption, divider, place_sized
 
@@ -76,7 +77,7 @@ class CommandPalette(ctk.CTkFrame):
         self.list.pack(fill="x", padx=8, pady=6)
         divider(self).pack(fill="x")
         ctk.CTkLabel(self, text="Up and Down to move  ·  Enter to open  ·  > commands  ·  @ clients  "
-                                "·  ! machines  ·  # ticket", font=theme.font_style("small"),
+                                "·  ! machines" + ("  ·  # ticket" if TICKETS else ""), font=theme.font_style("small"),
                      text_color=P["muted"], anchor="w", height=34).pack(fill="x", padx=16)
         self.var.trace_add("write", lambda *_: self._filter())
         e = self.entry._entry
@@ -148,7 +149,7 @@ class CommandPalette(ctk.CTkFrame):
     def _filter(self):
         q = self.var.get()
         groups = None
-        if q[:1] in (">", "@", "!", "#"):
+        if q[:1] in (">", "@", "!") or (TICKETS and q[:1] == "#"):
             pre, q = q[0], q[1:]
             if pre == "#":
                 t = q.strip().lstrip("#")

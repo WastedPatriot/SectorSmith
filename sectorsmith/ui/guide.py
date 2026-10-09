@@ -80,7 +80,7 @@ GUIDES = {
                                     "dropdown."),
             ("Type to confirm", "Type the exact phrase shown (for example WIPE DISK 2). This stops accidents."),
             ("Save the certificate", "When it finishes, save the certificate and print it to PDF. It carries your "
-                                     "company name and logo (Settings, Branding), client, ticket, drive, method, "
+                                     "company name and logo (Settings, Branding), client, drive, method, "
                                      "NIST category, verification and a QR code with its ID and hash."),
         ],
         "tips": ["One verified pass is enough for modern hard drives. Extra passes mostly add time.",
@@ -190,8 +190,8 @@ GUIDES = {
             ("Run it, then run it again", "The first run copies everything. Later runs copy only new or changed "
                                            "files, so you can pre-stage the day before and do a quick final sync."),
         ],
-        "tips": ["Close the user's apps (or sign them out) on the old PC for a clean copy. Open files are listed "
-                 "in the report so you can re-run.",
+        "tips": [("Close the user's apps (or sign them out) on the old PC for a clean copy. Open files are listed "
+                  "in the report so you can re-run."),
                  "Chrome/Edge saved passwords are locked to the old PC by Windows. Export them first (or rely on "
                  "browser sync).",
                  "OneDrive folders are off by default; they re-sync on their own when the user signs in.",

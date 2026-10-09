@@ -87,7 +87,8 @@ check(c and c["properties"] == [("Company", "Acme Ltd"), ("Site", "London"), ("D
 check(c and "k" not in c and "BgIAAA" not in json.dumps(c), "client: key value not kept")
 check(sc.parse_client_imagepath("Other", '"C:\\x.exe" -service') is None, "not a ScreenConnect command line")
 found = sc.local_clients(reader=lambda: [("ScreenConnect Client (0a1b2c3d4e5f6789)", IMG), ("x", "nothing")])
-check(len(found) == 1 and "relay.example.com" in sc.describe_client(found[0]), "local_clients with a fake registry")
+check(len(found) == 1 and found[0]["host"] == "relay.example.com"
+      and sc.describe_client(found[0]).startswith("Guest of "), "local_clients with a fake registry")
 check(sys.platform == "win32" or sc.local_clients() == [], "no registry off Windows: no clients")
 
 # --- LDAP escaping (RFC 4515) -----------------------------------------------------------------------

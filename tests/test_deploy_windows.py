@@ -153,7 +153,7 @@ def cleanup():
     try:
         winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, TEST_KEY, winreg.KEY_WOW64_64KEY, 0)
     except OSError:
-        pass
+        pass  # key not there, nothing to clean
     shutil.rmtree(os.path.dirname(APP_FILE), ignore_errors=True)
     return codes
 

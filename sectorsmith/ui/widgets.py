@@ -144,7 +144,7 @@ def focusable(widget, command=None, targets=(), inner=None):
         try:
             widget.after_idle(later)
         except tk.TclError:
-            pass
+            pass  # widget already destroyed
 
     def activate(e):
         if e.keysym in ("Return", "KP_Enter") and _fill_is(widget, "danger", "danger_hover"):
@@ -162,7 +162,7 @@ def focusable(widget, command=None, targets=(), inner=None):
             try:
                 t.configure(takefocus=0)  # the inner label is part of the same stop
             except (tk.TclError, ValueError):
-                pass
+                pass  # widget has no takefocus option
         for seq in ("<FocusIn>", "<FocusOut>"):
             tk.Misc.bind(t, seq, sync, add="+")
         for seq in ("<Return>", "<KP_Enter>", "<space>"):
@@ -589,7 +589,7 @@ class DataTable(ctk.CTkFrame):
                 self.tree.item(cur, tags=list(self.tree.item(cur, "tags")) + ["focusrow"])
                 self.tree.see(cur)
         except tk.TclError:
-            pass
+            pass  # row removed while focus moved
 
     def _tags(self):
         self.tree.tag_configure("hover", background=theme.c("hover"))

@@ -112,8 +112,8 @@ def render_certificate(info: dict, branding: dict | None = None) -> tuple[str, s
     def rows(pairs):
         return "\n".join(f"<tr><th>{e(k)}</th><td>{e(str(v)) if v not in ('', None) else '-'}</td></tr>"
                          for k, v in pairs)
-    job = rows([("Client", rec["client"]), ("Ticket", rec["ticket"]), ("Technician", rec["technician"]),
-                ("Machine", rec["machine"])])
+    job = rows([("Client", rec["client"])] + ([("Ticket", rec["ticket"])] if rec["ticket"] else []) +
+               [("Technician", rec["technician"]), ("Machine", rec["machine"])])
     drive = rows([("Model", rec["drive_model"]), ("Serial number", rec["drive_serial"]),
                   ("Capacity", f"{human_size(rec['capacity_bytes'])} ({rec['capacity_bytes']:,} bytes)"),
                   ("Interface", rec["interface"]), ("Firmware", rec["drive_firmware"]), ("Scope", rec["scope"])])

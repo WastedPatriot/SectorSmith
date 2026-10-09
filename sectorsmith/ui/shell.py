@@ -14,6 +14,9 @@ from .widgets import Icon, Popover, StatusPill, bind_all, caption, divider, focu
 
 P = theme.PALETTE
 
+# ticket numbers are on hold: the field, columns and palette prefix stay hidden until this is True
+TICKETS = False
+
 
 def technician() -> str:
     from .guide import load_settings
@@ -340,7 +343,8 @@ class ContextBar(ctk.CTkFrame):
         self.client_chev = Icon(self.client, "chevron_down", 14, "muted", "surface")
         self.client_chev.pack(side="left", padx=(0, 10))
         self.ticket = Chip(left, "+ Ticket", self.ticket_menu, mono=False)
-        self.ticket.pack(side="left", padx=(8, 0), pady=11)
+        if TICKETS:
+            self.ticket.pack(side="left", padx=(8, 0), pady=11)
         divider(left, vertical=True).pack(side="left", padx=14, pady=18)
         self.crumbs = ctk.CTkFrame(left, fg_color="transparent")
         self.crumbs.pack(side="left", fill="y")

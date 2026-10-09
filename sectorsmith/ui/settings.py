@@ -99,7 +99,7 @@ class SettingsScreen(Screen):
         self.tech = tk.StringVar(value=load_settings().get("technician") or technician())
         ctk.CTkEntry(row, textvariable=self.tech, width=260, height=34).pack(side="left")
         primary_button(row, "Save", self._save_tech, width=80, height=34).pack(side="left", padx=10)
-        ctk.CTkLabel(card.body, text="Every job is stamped with this name, the client and the ticket.",
+        ctk.CTkLabel(card.body, text="Every job is stamped with this name and the client.",
                      font=theme.font_style("small"), text_color=P["muted"], anchor="w").pack(fill="x", pady=(8, 0))
 
         card = Card(col, "Branding")

@@ -33,8 +33,8 @@ The menu is grouped by what you're doing: **Recover, Erase, Drives, Machines, Ma
 </td>
 <td width="50%" valign="top">
 
-### Client and ticket on every job
-Pick the client and type the ticket number in the top bar. Every job, report and certificate is stamped with **client, ticket and technician**, and the Jobs page shows what ran, where and for whom.
+### Client on every job
+Pick the client in the top bar. Every job, report and certificate is stamped with **client and technician**, and the Jobs page keeps a history of what ran, where and for whom, with filters and CSV export.
 
 </td>
 </tr>
@@ -79,7 +79,7 @@ The pixel helper sweeps progress bars and reacts to results. Choose **Full, Subt
 
 ## 🆕 What's new in 1.4.0
 
-* **New look:** a menu grouped by job, a client and ticket bar on every job, Ctrl+K search, and an indigo theme. Mossbit has a Subtle mode (the default) and a Presentation mode for screen sharing.
+* **New look:** a menu grouped by job, a client bar on every job, Ctrl+K search, and an indigo theme. Mossbit has a Subtle mode (the default) and a Presentation mode for screen sharing.
 * **Deploy (preview):** drop an installer to build a package, deploy it to every PC, a client or one PC, and run maintenance with a check step before anything changes.
 * **Migrate user, now with apps:** start from an old disk or NVMe in a USB caddy (even with no drive letter), copy to a drive in one click, and reinstall the user's apps on the new PC.
 * **Erase and certify:** uses the drive's own Secure Erase or NVMe Sanitize when it can (NIST 800-88 Purge), and produces a branded A4 certificate with a QR code.
@@ -110,7 +110,7 @@ The pixel helper sweeps progress bars and reacts to results. Choose **Full, Subt
 </tr>
 <tr>
 <td><img src="docs/images/machines_dark.png" alt="Machines"><p align="center"><sub><b>Machines</b>: linked PCs, migration and network clone</sub></p></td>
-<td><img src="docs/images/jobs_light.png" alt="Jobs"><p align="center"><sub><b>Jobs</b>: every job with client, ticket and result</sub></p></td>
+<td><img src="docs/images/jobs_light.png" alt="Jobs"><p align="center"><sub><b>Jobs</b>: every job with client, technician and result</sub></p></td>
 </tr>
 <tr>
 <td><img src="docs/images/manage_light.png" alt="Manage"><p align="center"><sub><b>Manage</b>: software library and deployments</sub></p></td>
@@ -210,7 +210,7 @@ Securely erase a whole disk or a single partition before it's reused, returned o
    | *More…* | HMG IS5, DoD 7-pass, Schneier, Gutmann 35, custom pattern | Special requirements |
 
 4. **Type to confirm**, e.g. `ERASE DISK 2 A1B2C3` (the last 6 characters of the serial) or `ERASE PARTITION 1`.
-5. **Save the certificate.** A sober A4 page (print it to PDF) with your company name and logo (Settings, Branding), client, ticket, technician, machine, drive model, serial and capacity, method, hardware or software erase, NIST category, verification result, times, a certificate ID and a QR code holding the ID and a SHA-256 of the record.
+5. **Save the certificate.** A sober A4 page (print it to PDF) with your company name and logo (Settings, Branding), client, technician, machine, drive model, serial and capacity, method, hardware or software erase, NIST category, verification result, times, a certificate ID and a QR code holding the ID and a SHA-256 of the record.
 
 <img src="docs/images/wipe_strength.png" width="49%"> <img src="docs/images/wipe_confirm.png" width="49%">
 
