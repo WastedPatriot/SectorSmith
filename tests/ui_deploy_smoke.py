@@ -426,10 +426,12 @@ scr.schedule_editor._kind_changed()
 scr.schedule_editor.day.set("Friday")
 scr.schedule_editor.time.delete(0, "end")
 scr.schedule_editor.time.insert(0, "7:30")
+scr.reboot_seg.set(D.REBOOT_LABEL["end"])
 shot("deployment_bundle_how")
 press("Save deployment")
 bundle = next(d for d in store().deployments if d.item_type == "bundle")
 assert bundle.items == [seven.id, added.id] and bundle.name == "Archivers" and bundle.onboarding_only
+assert bundle.reboot_policy == "end" and seven.reboot_codes == [3010, 1641]
 assert bundle.schedule["kind"] == "weekly" and bundle.schedule["time"] == "07:30" and bundle.schedule["day"] == 4
 assert {(d.target_kind, d.desired) for d in store().deployments} == {
     ("client", "latest"), ("machine", "enforce"), ("all", "installed"), ("all", "latest")}

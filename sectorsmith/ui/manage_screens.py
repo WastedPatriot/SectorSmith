@@ -13,9 +13,9 @@ import customtkinter as ctk
 from ..deploy import catalogue, core, schedule, versions
 from ..util import Cancelled, Progress, cancel_scope, get_logger
 from . import theme
-from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, SOFTWARE_STATES, \
-    STATUS_LABEL, TASK_STATES, ClientEditor, DeploymentWizard, PackageBuilder, RunWizard, SessionView, TaskEditor, \
-    _plural, _short, _took, attempt, export_scripts
+from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, REBOOT_LABEL, \
+    SOFTWARE_STATES, STATUS_LABEL, TASK_STATES, ClientEditor, DeploymentWizard, PackageBuilder, RunWizard, \
+    SessionView, TaskEditor, _plural, _short, _took, attempt, export_scripts
 from .manage_common import HIDDEN, EntryText, ManagePage, RowTable, client_hidden, client_text, host_text
 from .screens import Screen
 from .widgets import AutoScroll, Card, DataTable, DropZone, Popover, StatusPill, caption, link_button, segmented, \
@@ -537,6 +537,7 @@ class DeploymentsScreen(ManagePage):
         fields = [("Wants", dep_state(d)), ("Target", dep_target(self.app, self.store, d)),
                   ("New PCs only", "Yes" if d.onboarding_only else "No"),
                   ("Schedule", schedule.describe(d) or "When you run maintenance"),
+                  ("Restarts", REBOOT_LABEL.get(d.reboot_policy, d.reboot_policy)),
                   ("Next run", schedule.next_text(d)), ("Last result", last)]
         sections = []
         if d.item_type == "bundle":
@@ -961,6 +962,8 @@ class SessionsScreen(ManagePage):
         fields = [("When", _ago(s.get("started"))), ("Mode", mode),
                   ("Started by", TRIGGERS.get(s.get("trigger") or "manual", "You")),
                   ("Client", client_text(self.app, s.get("client") or "") or "-"), ("Took", took)]
+        if s.get("restart") or (s.get("summary") or {}).get("reboot"):
+            fields.append(("Restart", s.get("restart") or "needed, not done"))
         lines = [f"{a.get('name', '?')}: {STATUS_LABEL.get(a.get('status'), a.get('status', ''))}"
                  + (f" ({ACTION_LABEL.get(a.get('action'), a.get('action'))})"
                     if a.get("action") not in (None, "none") else "") for a in s.get("actions", [])[:12]]
