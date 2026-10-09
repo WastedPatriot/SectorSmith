@@ -55,6 +55,9 @@ jobs:
       - run: python -m pip install --upgrade pip pyinstaller -r requirements.txt
       - name: Real-disk integration test (virtual disk via diskpart)
         run: python tests/test_windows.py
+      - name: Deploy end-to-end test (test MSI and script package through a Link agent)
+        run: python tests/test_deploy_windows.py
+        timeout-minutes: 20
       - name: Import check (UI)
         run: python -c "import sectorsmith.ui.main, sectorsmith.app; print('UI modules import OK')"
       - name: Build SectorSmith.exe

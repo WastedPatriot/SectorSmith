@@ -17,6 +17,8 @@ log = get_logger()
 UPLOAD_CHUNK = 4 * 1024 * 1024
 WINGET_INSTALL = "winget install --id {winget_id} -e --silent --accept-package-agreements --accept-source-agreements"
 WINGET_UNINSTALL = "winget uninstall --id {winget_id} -e --silent"
+# msiexec 1618: another installation is in progress (often Windows Update), so wait and try again
+BUSY_CODE, BUSY_TRIES, BUSY_WAIT = 1618, 6, 20
 
 
 def _id():
@@ -523,8 +525,17 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     log_lines = []
 
     def run(cmd):
-        r = ep.run_command(cmd=cmd, timeout=3600)
-        log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
+        for attempt in range(BUSY_TRIES):
+            r = ep.run_command(cmd=cmd, timeout=3600)
+            log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
+            if r["code"] != BUSY_CODE or attempt == BUSY_TRIES - 1:
+                return r
+            if prog:
+                prog.set_detail("Another installer is running on the PC, waiting for it to finish")
+            end = time.monotonic() + BUSY_WAIT
+            while time.monotonic() < end:
+                check_cancel()
+                time.sleep(min(0.5, max(0.0, end - time.monotonic())))
         return r
     try:
         if a["type"] == "software":

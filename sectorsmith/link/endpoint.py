@@ -506,6 +506,8 @@ class LocalEndpoint:
             return json.load(open(fake))
         if sys.platform == "win32":
             import winreg
+            # always the 64-bit view: from a 32-bit process both machine paths would land in WOW6432Node
+            view = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
             roots = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "machine"),
                      (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
                       "machine32")]
@@ -525,7 +527,7 @@ class LocalEndpoint:
                 pass
             for hive, path, scope in roots:
                 try:
-                    k = winreg.OpenKey(hive, path)
+                    k = winreg.OpenKey(hive, path, 0, view)
                 except OSError:
                     continue
                 with k:
@@ -537,7 +539,7 @@ class LocalEndpoint:
                             break
                         i += 1
                         try:
-                            with winreg.OpenKey(k, name) as sk:
+                            with winreg.OpenKey(k, name, 0, view) as sk:
                                 def val(v, sk=sk):
                                     try:
                                         return winreg.QueryValueEx(sk, v)[0]
