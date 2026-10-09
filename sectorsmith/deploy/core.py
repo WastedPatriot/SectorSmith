@@ -50,6 +50,7 @@ class Package:
     notes: list = field(default_factory=list)
     id: str = field(default_factory=_id)
     created: float = field(default_factory=time.time)
+    version_source: dict = field(default_factory=dict)  # see versions.py: winget, github, page or script
 
 
 @dataclass
@@ -98,6 +99,8 @@ class Store:
 
     def __init__(self, root: str | None = None):
         self.root = root or str(app_dir() / "deploy")
+        # network and programs used by version sources (versions.py); tests put fakes here
+        self.fetcher = self.runner = self.downloader = None
         os.makedirs(os.path.join(self.root, "files"), exist_ok=True)
         os.makedirs(os.path.join(self.root, "sessions"), exist_ok=True)
         self.data = {}
@@ -505,11 +508,11 @@ def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list
     return order
 
 
-def _upload(ep, store: Store, pkg: Package, prog: Progress | None) -> str:
-    src = store.installer_path(pkg)
+def _upload(ep, src: str, pkg: Package, prog: Progress | None) -> str:
+    name = os.path.basename(src)
     remote_dir = ep.deploy_dir()
     sep = "\\" if "\\" in remote_dir else "/"
-    dest = f"{remote_dir}{sep}{pkg.id}{sep}{pkg.installer}"
+    dest = f"{remote_dir}{sep}{pkg.id}{sep}{name}"
     size = os.path.getsize(src)
     with open(src, "rb") as f:
         off = 0
@@ -519,7 +522,7 @@ def _upload(ep, store: Store, pkg: Package, prog: Progress | None) -> str:
             ep.put_file(path=dest, offset=off, total=size, blob=data)
             off += len(data)
             if prog:
-                prog.set_detail(f"Uploading {pkg.installer}: {off * 100 // max(1, size)}%")
+                prog.set_detail(f"Uploading {name}: {off * 100 // max(1, size)}%")
             if size == 0:
                 break
     return dest
@@ -566,19 +569,31 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
                                 "entry": None, "result": "ignored on this PC"})
                 continue
             installed, ver, entry = detect(ep, pkg, inv)
-            want = d.version if d.desired == "version" else pkg.version
-            note = ""
+            found, note = None, ""
+            if pkg.version_source and d.desired != "uninstalled":
+                from . import versions
+                try:
+                    found = versions.latest(store, pkg)
+                    found.pop("cached", None)
+                except (versions.SourceError, ValueError) as e:
+                    note = f"couldn't check the newest version ({e})"
+            newest = found["version"] if found else pkg.version
+            want = d.version if d.desired == "version" else newest
             act = resolve(d.desired, installed, ver, want, d.allow_downgrade)
             if act == "refused":
                 note = f"{ver} is newer than {want}; downgrades are off for this deployment"
             # the library holds one installer per package, so a pin to any other version can't be installed
-            if d.desired == "version" and act not in ("none", "refused") and want and pkg.version \
-                    and vtuple(pkg.version) != vtuple(want):
-                act, note = "audit", f"the library has {pkg.version}, this deployment pins {want}"
+            # (winget installs any version it knows)
+            have = {vtuple(x) for x in (pkg.version, found and found.get("url") and found["version"]) if x}
+            if d.desired == "version" and act not in ("none", "refused") and want and have \
+                    and vtuple(want) not in have and pkg.kind != "winget":
+                act, note = "audit", f"the library has {pkg.version or found['version']}, this deployment pins {want}"
             a = {"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
                  "desired": d.desired + (f" {want}" if d.desired in ("latest", "version") and want else ""),
                  "want": want if d.desired in ("latest", "version") else "",
                  "current": ver or "not installed", "action": act, "entry": entry}
+            if found:
+                a["source"] = found
             if note:
                 a["result"] = note
             actions.append(a)
@@ -649,15 +664,34 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                     prog.set_detail(f"Removing {pkg.name}")
                 run(cmd)
             if a["action"] in ("install", "upgrade", "reinstall"):
-                remote = _upload(ep, store, pkg, prog) if pkg.installer else ""
+                found = a.get("source") or {}
+                local = store.installer_path(pkg)
+                inst = pkg
+                if found.get("version"):
+                    inst = dataclasses.replace(pkg, version=found["version"])
+                if a["desired"].startswith("version") and a.get("want"):
+                    inst = dataclasses.replace(pkg, version=a["want"])
+                if pkg.kind != "winget" and found.get("url") and \
+                        (not local or vtuple(found["version"]) != vtuple(pkg.version) or not os.path.exists(local)):
+                    from . import versions
+                    if prog:
+                        prog.set_detail(f"Downloading {pkg.name} {found['version']}")
+                    local = versions.get_installer(store, pkg, found)
+                    log_lines.append(f"downloaded {found['url']}" + (" (SHA256 checked)" if found.get("sha256")
+                                                                     else " (no SHA256 to check)"))
+                cmd_t = pkg.install
+                if pkg.kind == "winget" and a["desired"].startswith("version") and a.get("want") \
+                        and "--version" not in cmd_t:
+                    cmd_t += " --version {version}"
+                remote = _upload(ep, local, pkg, prog) if local else ""
                 try:
                     if prog:
-                        prog.set_detail(f"Installing {pkg.name} {pkg.version}")
-                    r = run(expand(pkg.install, pkg, installer=remote))
+                        prog.set_detail(f"Installing {pkg.name} {inst.version}")
+                    r = run(expand(cmd_t, inst, installer=remote))
                 finally:
                     if remote:
                         try:
-                            ep.remove_path(path=remote[:-len(pkg.installer) - 1])
+                            ep.remove_path(path=remote[:-len(os.path.basename(local)) - 1])
                         except Exception as e:  # noqa: BLE001
                             log.warning("Couldn't remove the uploaded installer %s: %s", remote, e)
                 if r["code"] not in pkg.success_codes:
@@ -673,8 +707,8 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             elif a["desired"].startswith("version") and a.get("want"):
                 ok = installed and vtuple(ver) == vtuple(a["want"])
             else:
-                ok = installed and (not pkg.version or a["desired"].startswith("installed")
-                                    or vtuple(ver) >= vtuple(pkg.version))
+                want = a.get("want") or pkg.version
+                ok = installed and (not want or a["desired"].startswith("installed") or vtuple(ver) >= vtuple(want))
             a.update(status="compliant" if ok else "failed",
                      result=("removed" if want_absent else f"now {ver}") if ok else
                      f"still {'installed' if installed else 'missing'} after {a['action']} ({ver or '-'})")

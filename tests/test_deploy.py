@@ -957,5 +957,145 @@ if not cat.winget_path():
         missing = True
     check(missing, "no winget on this PC: search says so (the UI falls back to the curated list)")
 
+# --- 11. Dynamic versions: winget, GitHub, a vendor page or a script, never the real network -----------------------
+from sectorsmith.deploy import versions as V  # noqa: E402
+
+WG_SHOW = ("Found 7-Zip [7zip.7zip]\r\nVersion: 24.08\r\nPublisher: Igor Pavlov\r\nInstaller:\r\n"
+           "  Installer Type: exe\r\n  Installer Url: https://www.7-zip.org/a/7z2408-x64.exe\r\n"
+           "  Installer SHA256: " + "AB" * 32 + "\r\n")
+got = V.parse_winget_show(WG_SHOW)
+check(got == {"version": "24.08", "url": "https://www.7-zip.org/a/7z2408-x64.exe", "sha256": "ab" * 32},
+      "winget show: Version, Installer Url and SHA256 parsed")
+GH = json.dumps({"tag_name": "v8.7.1", "assets": [
+    {"name": "npp.8.7.1.Installer.arm64.exe", "browser_download_url": "https://github.com/x/arm.exe"},
+    {"name": "npp.8.7.1.Installer.x64.exe", "browser_download_url": "https://github.com/x/x64.exe",
+     "digest": "sha256:" + "cd" * 32}]})
+check(V.parse_github(GH, r"Installer\.x64\.exe$") == {"version": "8.7.1", "url": "https://github.com/x/x64.exe",
+                                                       "sha256": "cd" * 32},
+      "GitHub release: tag as version, asset by pattern, its digest as the hash")
+page = '<a href="/files/tool-5.2.0-setup.msi">Download Tool 5.2.0</a>'
+check(V.parse_page(page, r'href="(?P<url>[^"]+-(?P<version>[\d.]+)-setup\.msi)"', "https://vendor.example/dl/")
+      == {"version": "5.2.0", "url": "https://vendor.example/files/tool-5.2.0-setup.msi"},
+      "vendor page: named groups give version and link, relative links resolved")
+check(V.parse_page("Latest release: 3.4", r"release: ([\d.]+)") == {"version": "3.4"}, "page: first group as version")
+check(V.parse_script('{"version": "v2.0.1", "url": "https://x.example/a.exe"}') ==
+      {"version": "2.0.1", "url": "https://x.example/a.exe"}
+      and V.parse_script("2.0.2\nhttps://x.example/b.exe\n" + "EF" * 32) ==
+      {"version": "2.0.2", "url": "https://x.example/b.exe", "sha256": "ef" * 32}, "script output: JSON or lines")
+for bad, why in ((lambda: V.parse_page("nothing", r"v([\d.]+)"), "pattern didn't match"),
+                 (lambda: V.parse_github(json.dumps({"tag_name": "1.0", "assets": []}), "x64"), "no file"),
+                 (lambda: V.parse_github("{}", ""), "no published release"),
+                 (lambda: V.parse_script(""), "didn't print a version"),
+                 (lambda: V.fetch("http://insecure.example/x"), "only https"),
+                 (lambda: V.resolve({"kind": "script", "script": "x"},
+                                    runner=lambda a, t: (0, "1.0\nhttp://p.example/a.exe")), "only https")):
+    try:
+        bad()
+        msg = ""
+    except V.SourceError as e:
+        msg = str(e)
+    check(why in msg, f"version source problem explained: {msg}")
+for src, why in (({"kind": "github", "repo": "not a repo"}, "owner/name"), ({"kind": "page", "url": "http://a.example",
+                                                                             "regex": "x"}, "https"),
+                 ({"kind": "winget", "id": "nope"}, "winget ID"), ({"kind": "page", "url": "https://a.example",
+                                                                    "regex": "("}, "regular expression")):
+    try:
+        V.validate(src)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check(why in msg, f"bad version source refused: {msg}")
+
+calls = []
+
+
+def fake_fetch(url, **kw):
+    calls.append(url)
+    if "api.github.com" in url:
+        return GH.encode()
+    return page.encode()
+
+
+def fake_runner(args, timeout):
+    calls.append(" ".join(args[:4]))
+    if args[1] == "show":
+        return 0, WG_SHOW
+    import base64
+    script = base64.b64decode(args[args.index("-EncodedCommand") + 1]).decode("utf-16-le")
+    return (0, "9.9\nhttps://s.example/app.exe") if "Write-Output" in script else (1, "boom")
+
+
+check(V.resolve({"kind": "winget", "id": "7zip.7zip"}, runner=fake_runner)["version"] == "24.08"
+      and calls[-1] == "winget show --id 7zip.7zip", "winget source runs 'winget show --id X --exact'")
+check(V.resolve({"kind": "github", "repo": "notepad-plus-plus/notepad-plus-plus", "asset": "x64"},
+                fetcher=fake_fetch)["version"] == "8.7.1"
+      and calls[-1] == "https://api.github.com/repos/notepad-plus-plus/notepad-plus-plus/releases/latest",
+      "GitHub source asks the releases API")
+check(V.resolve({"kind": "script", "script": "Write-Output '9.9'"}, runner=fake_runner) ==
+      {"version": "9.9", "url": "https://s.example/app.exe"} and "-EncodedCommand" in calls[-1],
+      "script source runs PowerShell with the script encoded (no shell)")
+
+vstore = Store(os.path.join(W, "lib11"))
+vstore.fetcher, vstore.runner = fake_fetch, fake_runner
+gh = vstore.upsert("packages", Package(name="Dyn GH", version_source={"kind": "github", "repo": "a/b", "asset": "x64"}))
+calls.clear()
+day1 = time.mktime((2026, 3, 2, 10, 0, 0, 0, 0, -1))
+a1 = V.latest(vstore, gh, now=day1)
+a2 = V.latest(vstore, gh, now=day1 + 3600)
+check(a1["version"] == "8.7.1" and not a1["cached"] and a2["cached"] and len(calls) == 1,
+      "newest version looked up once a day (second ask the same day comes from the cache)")
+V.latest(vstore, gh, now=day1 + 86400)
+gh.version_source = {"kind": "github", "repo": "a/c", "asset": "x64"}
+V.latest(vstore, gh, now=day1 + 86400 + 60)
+check(len(calls) == 3 and V.cached(vstore, gh)["version"] == "8.7.1", "a new day or a changed source asks again")
+
+# a session: 3.0 installed, the source says 3.1, its download is checked against the source's SHA256
+dyn_src = os.path.join(W, "src", "dyn-3.1.py")
+shutil.copy(FAKEINST, dyn_src)
+with open(dyn_src, "rb") as _f:
+    dyn_sha = hashlib.sha256(_f.read()).hexdigest()
+REL = {"tag_name": "release-3.1", "assets": [{"name": "dyn-3.1.py", "browser_download_url":
+                                              "https://downloads.example/dyn-3.1.py", "digest": "sha256:" + dyn_sha}]}
+downloads = []
+
+
+def fake_download(url, dest, progress=None):
+    downloads.append(url)
+    shutil.copy(dyn_src if len(downloads) == 1 else FAKE, dest)
+
+
+vstore.fetcher = lambda url, **kw: json.dumps(REL).encode()
+vstore.downloader = fake_download
+dyn = vstore.upsert("packages", Package(name="Dyn App", kind="exe", install=f'"{PY}" "{{installer}}" add "Dyn App" '
+                                                                            '{version}',
+                                        uninstall="{registry_uninstall}",
+                                        detection={"method": "registry", "value": "Dyn App"},
+                                        version_source={"kind": "github", "repo": "dyn/app", "asset": r"\.py$"}))
+deploy(vstore, dyn, "latest")
+set_inventory(entry("Dyn App", "3.0"))
+s_ = core.run_session(WinCodes(), vstore, Progress(1), mode="detect")
+a_ = s_["actions"][0]
+check(a_["action"] == "upgrade" and a_["want"] == "3.1" and a_["source"]["url"].endswith("dyn-3.1.py"),
+      "Latest compares against the source's newest version (3.0 installed, 3.1 out: upgrade)")
+s_ = core.run_session(WinCodes(), vstore, Progress(1), mode="full")
+a_ = s_["actions"][0]
+check(a_["status"] == "compliant" and inventory().get("Dyn App") == "3.1" and "SHA256 checked" in a_["log"]
+      and downloads == ["https://downloads.example/dyn-3.1.py"],
+      f"installer downloaded, hash checked, installed with the resolved version ({a_.get('result')})")
+core.run_session(WinCodes(), vstore, Progress(1), mode="full")
+check(len(downloads) == 1, "the download is kept for that version, not fetched again")
+REL["tag_name"], REL["assets"][0]["browser_download_url"] = "3.2", "https://downloads.example/dyn-3.2.py"
+os.remove(os.path.join(vstore.root, V.CACHE))
+s_ = core.run_session(WinCodes(), vstore, Progress(1), mode="full")
+a_ = s_["actions"][0]
+check(a_["status"] == "failed" and "SHA256" in a_["result"] and inventory().get("Dyn App") == "3.1"
+      and not os.listdir(os.path.join(vstore.root, "downloads", dyn.id, "3.2")),
+      f"a download whose SHA256 doesn't match is thrown away, not run ({a_['result']})")
+vstore.fetcher = lambda url, **kw: (_ for _ in ()).throw(V.SourceError("offline"))
+os.remove(os.path.join(vstore.root, V.CACHE))
+s_ = core.run_session(WinCodes(), vstore, Progress(1), mode="detect")
+check(s_["actions"][0]["action"] == "none" and "offline" in s_["actions"][0]["result"],
+      "source unreachable: said so, and an installed app is left as it is")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

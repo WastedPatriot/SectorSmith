@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from ..deploy import catalogue, core, schedule
+from ..deploy import catalogue, core, schedule, versions
 from ..util import Cancelled, Progress, cancel_scope, get_logger
 from . import theme
 from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, SOFTWARE_STATES, \
@@ -36,6 +36,14 @@ def _ago(ts):
     if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday - 1:
         return time.strftime("Yesterday %H:%M", t)
     return time.strftime("%d %b %H:%M", t)
+
+
+def _version_text(store, p):
+    """The library version, or what the version source said last time."""
+    if p.version_source:
+        found = versions.cached(store, p)
+        return found["version"] if found else "Newest"
+    return p.version or "Newest"
 
 
 def _detection_text(p):
@@ -222,8 +230,8 @@ class PackagesScreen(ManagePage):
         sel = None
         for p in rows:
             n = len(self.store.used_by(p.id))
-            iid = self.table.add((p.name, p.version or "Newest", KIND_LABEL.get(p.kind, p.kind), _detection_text(p),
-                                  n or "-"), data=p)
+            iid = self.table.add((p.name, _version_text(self.store, p), KIND_LABEL.get(p.kind, p.kind),
+                                  _detection_text(p), n or "-"), data=p)
             if select is not None and p.id == select:
                 sel = iid
         self.table.done()
@@ -247,6 +255,10 @@ class PackagesScreen(ManagePage):
             ("see the script" if det.get("method") == "script" else (det.get("value") or p.name))
         fields = [("Version", p.version or "Newest"), ("Kind", KIND_LABEL.get(p.kind, p.kind)),
                   ("Publisher", p.publisher or "-"), ("Source", source), ("Detect by", f"{how}: {_short(what, 60)}")]
+        if p.version_source:
+            found = versions.cached(self.store, p)
+            fields.insert(1, ("Newest from", versions.describe(p.version_source)
+                              + (f", {found['version']} when last asked" if found else ", not asked yet")))
         if p.category:
             fields.append(("Category", p.category))
         sections = [("Install", _short(p.install, 240), True)]

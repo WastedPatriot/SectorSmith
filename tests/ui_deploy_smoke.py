@@ -47,6 +47,7 @@ with open(bogus, "wb") as f:
 from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.deploy import schedule as sch  # noqa: E402
+from sectorsmith.deploy.versions import KINDS as versions_kinds  # noqa: E402
 from sectorsmith.ui import deploy_screens as D, main as M, manage_schedule as MSch, manage_screens as MS, nav, \
     theme  # noqa: E402
 from sectorsmith.ui.guide import save_settings  # noqa: E402
@@ -258,6 +259,42 @@ assert scr.title_lbl.cget("text") == "Package saved", scr.title_lbl.cget("text")
 handy = next(p for p in store().packages if p.name == "Handy tool")
 assert handy.kind == "script" and handy.detection == {"method": "file", "value": tool}
 
+# --- a package whose newest version comes from a GitHub release (fake fetcher, never the network) ------------------
+fetched = []
+
+
+def fake_fetch(url, **kw):
+    fetched.append(url)
+    return json.dumps({"tag_name": "v5.1.0", "assets": [{"name": "tool-5.1.0-x64.msi", "digest": "sha256:" + "ab" * 32,
+                                                        "browser_download_url": "https://example.invalid/t.msi"}]}
+                      ).encode()
+
+
+store().fetcher = fake_fetch
+app.go(D.PackageBuilder, mode="script")
+pump(.5)
+scr = app.screen
+scr.v["name"].set("Dynamic tool")
+scr.v["install"].set('msiexec /i "{installer}" /qn')
+scr.det_method.set(D.DETECTION["registry"])
+scr._det_changed()
+scr.vs_kind.set(versions_kinds["github"])
+scr._source_changed()
+scr.vs["repo"].set("not a repo")
+press("Save package")
+assert scr.title_lbl.cget("text") != "Package saved", "a bad repository is refused"
+scr.vs["repo"].set("example/tool")
+scr.vs["asset"].set(r"x64\.msi$")
+scr.vs_check.invoke()
+until(lambda: "Newest: 5.1.0" in scr.vs_result.cget("text"))
+assert "SHA256 known" in scr.vs_result.cget("text") and fetched == [
+    "https://api.github.com/repos/example/tool/releases/latest"]
+shot("builder_version_source")
+press("Save package")
+assert scr.title_lbl.cget("text") == "Package saved"
+dyn = next(p for p in store().packages if p.name == "Dynamic tool")
+assert dyn.version_source == {"kind": "github", "repo": "example/tool", "asset": r"x64\.msi$"}, dyn.version_source
+
 # --- the catalogue: curated list, live winget search (fake), cancel, add to library ---------------------------
 MS.CatalogueScreen.runner = fake_winget
 MS.CatalogueScreen.debounce_ms = 50
@@ -421,14 +458,14 @@ assert not store().get("deployments", tdep.id).schedule
 app.open_target("manage", "library")
 pump(.5)
 scr = app.screen
-assert len(scr.table.rows) == 5, table_text(scr)
+assert len(scr.table.rows) == 6, table_text(scr)
 scr.search_var.set("zip")
 pump(.2)
 assert sorted(r[0] for r in table_text(scr)) == ["7-Zip", "7-Zip ZS"]
 scr.search_var.set("")
 scr.filter.set("Scripts")
 scr.fill()
-assert sorted(r[0] for r in table_text(scr)) == ["Greenshot", "Handy tool"], "Chocolatey and script packages"
+assert sorted(r[0] for r in table_text(scr)) == ["Dynamic tool", "Greenshot", "Handy tool"], "Chocolatey and script packages"
 scr.filter.set("All")
 scr.fill(pkg.id)
 used = {r[0]: r[4] for r in table_text(scr)}
