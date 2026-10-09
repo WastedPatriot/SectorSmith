@@ -65,7 +65,7 @@ class Client:
 
 @dataclass
 class Deployment:
-    item_type: str                         # software | task
+    item_type: str                         # software | task | bundle (several packages, ids in items)
     item_id: str
     desired: str = "latest"                # software: installed|latest|version|uninstalled|ignore · task: enforce|audit
     version: str = ""
@@ -75,6 +75,11 @@ class Deployment:
     enabled: bool = True
     params: dict = field(default_factory=dict)
     id: str = field(default_factory=_id)
+    name: str = ""                         # optional label, shown for bundles
+    items: list = field(default_factory=list)      # package ids of a bundle
+    baseline: bool = False                 # a client's baseline: the packages every new PC for that client gets
+    schedule: dict = field(default_factory=dict)   # see schedule.py: kind daily|weekly|connect, time, day, mode
+    last_runs: dict = field(default_factory=dict)  # hostname (lower case) -> when its schedule last ran there
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +147,9 @@ class Store:
             shutil.rmtree(os.path.join(self.root, "files", id_), ignore_errors=True)
             self.data["deployments"] = [d for d in self.deployments if not (d.item_type == "software"
                                                                             and d.item_id == id_)]
+            for d in self.deployments:
+                if d.item_type == "bundle" and id_ in d.items:
+                    d.items = [x for x in d.items if x != id_]
             self.save("deployments")
         if kind == "tasks":
             self.data["deployments"] = [d for d in self.deployments if not (d.item_type == "task"
@@ -197,6 +205,29 @@ class Store:
     def clients_of(self, hostname: str) -> list[Client]:
         h = hostname.lower()
         return [c for c in self.clients if h in [m.lower() for m in c.machines]]
+
+    def used_by(self, pkg_id: str) -> list[Deployment]:
+        """Deployments that put this package somewhere (on its own or in a bundle)."""
+        return [d for d in self.deployments if (d.item_type == "software" and d.item_id == pkg_id)
+                or (d.item_type == "bundle" and pkg_id in d.items)]
+
+    def baseline_for(self, client_id: str) -> Deployment | None:
+        return next((d for d in self.deployments if d.baseline and d.target_kind == "client"
+                     and d.target_value == client_id), None)
+
+    def set_baseline(self, client_id: str, package_ids: list, desired: str = "installed") -> Deployment | None:
+        """Save the client's baseline (the packages every new PC for it gets). No packages removes it."""
+        d = self.baseline_for(client_id)
+        ids = [p for p in dict.fromkeys(package_ids) if self.get("packages", p) is not None]
+        if not ids:
+            if d is not None:
+                self.delete("deployments", d.id)
+            return None
+        if d is None:
+            d = Deployment("bundle", "", desired, target_kind="client", target_value=client_id,
+                           onboarding_only=True, baseline=True, name="Baseline")
+        d.items, d.desired = ids, desired
+        return self.upsert("deployments", d)
 
     # ------------------------------------------------------------------ export / import
     def export_package(self, pkg: Package, folder: str) -> str:
@@ -405,20 +436,46 @@ def detect(ep, pkg: Package, inv: list[dict]) -> tuple[bool, str | None, dict | 
 
 
 # ---------------------------------------------------------------------------
-def applicable(store: Store, hostname: str, onboarding: bool) -> list[Deployment]:
-    client_ids = {c.id for c in store.clients_of(hostname)}
+def expand_bundle(d: Deployment) -> list[Deployment]:
+    """A bundle as one software deployment per package (ids '<bundle id>/<package id>'); anything else as is."""
+    if d.item_type != "bundle":
+        return [d]
+    return [Deployment("software", pid, d.desired, target_kind=d.target_kind, target_value=d.target_value,
+                       onboarding_only=d.onboarding_only, enabled=d.enabled, id=f"{d.id}/{pid}") for pid in d.items]
+
+
+def source_id(deployment_id: str) -> str:
+    """The stored deployment an action came from (a bundle's packages carry '<bundle id>/<package id>')."""
+    return (deployment_id or "").split("/")[0]
+
+
+def targets(store: Store, d: Deployment, hostname: str) -> bool:
+    h = hostname.lower()
+    if d.target_kind == "all":
+        return True
+    if d.target_kind == "machine":
+        return d.target_value.lower() == h
+    return d.target_kind == "client" and d.target_value in {c.id for c in store.clients_of(hostname)}
+
+
+def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list[Deployment]:
+    """What applies to this PC, most specific first wins per item. ``only``: deployment ids; the run is limited to
+    their items (a more specific deployment of the same item still decides what happens to it)."""
     res = []
     for d in store.deployments:
         if not d.enabled or (d.onboarding_only and not onboarding):
             continue
-        if d.target_kind == "all" or (d.target_kind == "machine" and d.target_value.lower() == hostname.lower()) \
-                or (d.target_kind == "client" and d.target_value in client_ids):
-            res.append(d)
+        if targets(store, d, hostname):
+            res.extend(expand_bundle(d))
     # most specific deployment wins per item: machine > client > all
     rank = {"machine": 0, "client": 1, "all": 2}
     best = {}
     for d in sorted(res, key=lambda d: rank.get(d.target_kind, 3)):
         best.setdefault((d.item_type, d.item_id), d)
+    if only is not None:
+        wanted = set(only)
+        keys = {(x.item_type, x.item_id) for d in store.deployments if d.id in wanted for x in expand_bundle(d)}
+        best = {k: v for k, v in best.items() if k in keys}
     # prerequisites first
     order, seen, visiting = [], set(), set()
 
@@ -470,10 +527,10 @@ def _registry_uninstall(entry: dict | None) -> str:
     return cmd
 
 
-def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False) -> list[dict]:
+def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
-    for d in applicable(store, hostname, onboarding):
+    for d in applicable(store, hostname, onboarding, only):
         if d.item_type == "software":
             pkg = store.get("packages", d.item_id)
             if pkg is None or d.desired == "ignore":
@@ -605,23 +662,26 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     return a
 
 
-def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding: bool = False) -> dict:
+def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding: bool = False,
+                only=None, trigger: str = "manual") -> dict:
     """Detect → (execute) → re-check. mode: 'detect' (read-only) or 'full'.
 
     Cancel stops a running installer or script (on a linked PC too). What already ran is saved as a session
     with the rest marked 'cancelled', and Cancelled.info["session"] holds it."""
     with cancel_scope(prog.check):
-        return _run_session(ep, store, prog, mode, onboarding)
+        return _run_session(ep, store, prog, mode, onboarding, only, trigger)
 
 
-def _run_session(ep, store, prog, mode, onboarding):
+def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual"):
     info = ep.info()
     host = info["hostname"]
     sess = {"id": _id(), "machine": host, "started": time.time(), "mode": mode, "onboarding": onboarding,
-            "client": ", ".join(c.name for c in store.clients_of(host)), "actions": []}
+            "client": ", ".join(c.name for c in store.clients_of(host)), "actions": [], "trigger": trigger}
+    if only is not None:
+        sess["only"] = list(only)
     prog.reset(1, f"Detecting on {host}…")
     inv = ep.installed_software()
-    actions = plan(ep, store, host, inv, onboarding)
+    actions = plan(ep, store, host, inv, onboarding, only)
     sess["detected"] = [dict(a, entry=None) for a in actions]
     todo = [a for a in actions if a["action"] not in ("none", "audit")]
     if mode == "detect" or not todo:
@@ -669,3 +729,43 @@ def _finish(store, sess, cancelled=False):
     log.info("Deploy session %s on %s%s: %s", sess["id"], sess["machine"], " (cancelled)" if cancelled else "",
              sess["summary"])
     return sess
+
+
+# ---------------------------------------------------------------------------
+def onboard(ep, store: Store, client_id: str, prog: Progress, mode: str = "full") -> dict:
+    """Give a new PC its client's baseline: puts the PC in the client (when it is in no client yet), then runs the
+    baseline as an onboarding session (detect, install, check again). For the end of a user migration, or Manage.
+
+    Raises ValueError when the client has no baseline or the PC already belongs to another client."""
+    client = store.get("clients", client_id)
+    base = store.baseline_for(client_id)
+    if client is None or base is None or not base.items:
+        raise ValueError("This client has no baseline yet. Pick its packages in Manage, Clients.")
+    with cancel_scope(prog.check):
+        host = ep.info()["hostname"]
+    others = [c for c in store.clients_of(host) if c.id != client_id]
+    if others:
+        raise ValueError(f"{host} is already in {others[0].name}. A PC can only be in one client.")
+    if host.lower() not in [m.lower() for m in client.machines]:
+        client.machines.append(host)
+        store.upsert("clients", client)
+    return run_session(ep, store, prog, mode=mode, onboarding=True, only=[base.id], trigger="onboarding")
+
+
+def deployment_results(sessions: list[dict]) -> dict:
+    """Latest outcome of each stored deployment, from sessions listed newest first (as Store.sessions() gives them):
+    {deployment id: {"when", "machine", "compliant", "failed", "pending", "non_compliant", "cancelled"}}."""
+    out: dict = {}
+    for s in sessions:
+        seen: dict = {}
+        for a in s.get("actions", []):
+            dep = source_id(a.get("deployment", ""))
+            if not dep or dep in out:
+                continue
+            r = seen.setdefault(dep, {"when": s.get("started"), "machine": s.get("machine", ""), "compliant": 0,
+                                      "failed": 0, "pending": 0, "non_compliant": 0, "cancelled": 0})
+            key = (a.get("status") or "").replace("-", "_")
+            if key in r:
+                r[key] += 1
+        out.update(seen)
+    return out

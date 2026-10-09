@@ -1,0 +1,82 @@
+{
+ "version": 1,
+ "note": "Curated MSP app catalogue for Manage. detect is a Deploy detection rule; registry values match part of the Add/Remove Programs name, re: starts a regular expression.",
+ "apps": [
+  {"name": "Google Chrome", "winget": "Google.Chrome", "choco": "googlechrome", "publisher": "Google", "category": "Browsers", "detect": {"method": "registry", "value": "Google Chrome"}},
+  {"name": "Mozilla Firefox", "winget": "Mozilla.Firefox", "choco": "firefox", "publisher": "Mozilla", "category": "Browsers", "detect": {"method": "registry", "value": "Mozilla Firefox"}},
+  {"name": "Microsoft Edge", "winget": "Microsoft.Edge", "choco": "microsoft-edge", "publisher": "Microsoft", "category": "Browsers", "detect": {"method": "registry", "value": "Microsoft Edge"}, "note": "Comes with Windows. Use Keep up to date rather than Installed."},
+  {"name": "Brave", "winget": "Brave.Brave", "choco": "brave", "publisher": "Brave Software", "category": "Browsers", "detect": {"method": "registry", "value": "Brave"}},
+  {"name": "Opera", "winget": "Opera.Opera", "choco": "opera", "publisher": "Opera", "category": "Browsers", "detect": {"method": "registry", "value": "re:^Opera( Stable)?\\b"}},
+  {"name": "Vivaldi", "winget": "Vivaldi.Vivaldi", "choco": "vivaldi", "publisher": "Vivaldi Technologies", "category": "Browsers", "detect": {"method": "registry", "value": "Vivaldi"}},
+
+  {"name": "7-Zip", "winget": "7zip.7zip", "choco": "7zip", "publisher": "Igor Pavlov", "category": "Utilities", "detect": {"method": "registry", "value": "7-Zip"}},
+  {"name": "WinRAR", "winget": "RARLab.WinRAR", "choco": "winrar", "publisher": "RARLab", "category": "Utilities", "detect": {"method": "registry", "value": "WinRAR"}, "note": "Paid licence for business use."},
+  {"name": "Notepad++", "winget": "Notepad++.Notepad++", "choco": "notepadplusplus", "publisher": "Notepad++ Team", "category": "Utilities", "detect": {"method": "registry", "value": "Notepad++"}},
+  {"name": "Everything", "winget": "voidtools.Everything", "choco": "everything", "publisher": "voidtools", "category": "Utilities", "detect": {"method": "registry", "value": "Everything"}},
+  {"name": "PowerToys", "winget": "Microsoft.PowerToys", "choco": "powertoys", "publisher": "Microsoft", "category": "Utilities", "detect": {"method": "registry", "value": "PowerToys"}},
+  {"name": "Greenshot", "winget": "Greenshot.Greenshot", "choco": "greenshot", "publisher": "Greenshot", "category": "Utilities", "detect": {"method": "registry", "value": "Greenshot"}},
+  {"name": "ShareX", "winget": "ShareX.ShareX", "choco": "sharex", "publisher": "ShareX Team", "category": "Utilities", "detect": {"method": "registry", "value": "ShareX"}},
+  {"name": "TreeSize Free", "winget": "JAMSoftware.TreeSize.Free", "choco": "treesizefree", "publisher": "JAM Software", "category": "Utilities", "detect": {"method": "registry", "value": "TreeSize"}},
+  {"name": "WizTree", "winget": "AntibodySoftware.WizTree", "choco": "wiztree", "publisher": "Antibody Software", "category": "Utilities", "detect": {"method": "registry", "value": "WizTree"}},
+  {"name": "PowerShell 7", "winget": "Microsoft.PowerShell", "choco": "powershell-core", "publisher": "Microsoft", "category": "Utilities", "detect": {"method": "registry", "value": "PowerShell 7"}},
+
+  {"name": "Adobe Acrobat Reader", "winget": "Adobe.Acrobat.Reader.64-bit", "choco": "adobereader", "publisher": "Adobe", "category": "Documents", "detect": {"method": "registry", "value": "re:^Adobe Acrobat( Reader)?\\b"}},
+  {"name": "Foxit PDF Reader", "winget": "Foxit.FoxitReader", "choco": "foxitreader", "publisher": "Foxit Software", "category": "Documents", "detect": {"method": "registry", "value": "Foxit PDF Reader"}},
+  {"name": "PDF24 Creator", "winget": "geeksoftwareGmbH.PDF24Creator", "choco": "pdf24", "publisher": "geek software", "category": "Documents", "detect": {"method": "registry", "value": "PDF24"}},
+  {"name": "LibreOffice", "winget": "TheDocumentFoundation.LibreOffice", "choco": "libreoffice-fresh", "publisher": "The Document Foundation", "category": "Documents", "detect": {"method": "registry", "value": "LibreOffice"}},
+  {"name": "Office Deployment Tool", "winget": "Microsoft.OfficeDeploymentTool", "choco": "", "publisher": "Microsoft", "category": "Documents", "detect": {"method": "registry", "value": "Office Deployment Tool"}, "note": "Puts setup.exe on the PC. Run it with your configuration.xml (a Deploy task works well) to install Microsoft 365 Apps."},
+
+  {"name": "Microsoft Teams", "winget": "Microsoft.Teams", "choco": "", "publisher": "Microsoft", "category": "Communication", "detect": {"method": "registry", "value": "Microsoft Teams"}},
+  {"name": "Zoom Workplace", "winget": "Zoom.Zoom", "choco": "zoom", "publisher": "Zoom", "category": "Communication", "detect": {"method": "registry", "value": "re:^Zoom( Workplace)?\\b"}},
+  {"name": "Slack", "winget": "SlackTechnologies.Slack", "choco": "slack", "publisher": "Slack Technologies", "category": "Communication", "detect": {"method": "registry", "value": "Slack"}},
+  {"name": "Mozilla Thunderbird", "winget": "Mozilla.Thunderbird", "choco": "thunderbird", "publisher": "Mozilla", "category": "Communication", "detect": {"method": "registry", "value": "Mozilla Thunderbird"}},
+  {"name": "Citrix Workspace", "winget": "Citrix.Workspace", "choco": "citrix-workspace", "publisher": "Citrix", "category": "Communication", "detect": {"method": "registry", "value": "Citrix Workspace"}},
+
+  {"name": "TeamViewer", "winget": "TeamViewer.TeamViewer", "choco": "teamviewer", "publisher": "TeamViewer", "category": "Remote access", "detect": {"method": "registry", "value": "TeamViewer"}},
+  {"name": "AnyDesk", "winget": "AnyDeskSoftwareGmbH.AnyDesk", "choco": "anydesk.install", "publisher": "AnyDesk Software", "category": "Remote access", "detect": {"method": "registry", "value": "AnyDesk"}},
+  {"name": "RustDesk", "winget": "RustDesk.RustDesk", "choco": "rustdesk", "publisher": "RustDesk", "category": "Remote access", "detect": {"method": "registry", "value": "RustDesk"}},
+  {"name": "mRemoteNG", "winget": "mRemoteNG.mRemoteNG", "choco": "mremoteng", "publisher": "mRemoteNG", "category": "Remote access", "detect": {"method": "registry", "value": "mRemoteNG"}},
+  {"name": "Remote Desktop Manager", "winget": "Devolutions.RemoteDesktopManager", "choco": "rdm", "publisher": "Devolutions", "category": "Remote access", "detect": {"method": "registry", "value": "Remote Desktop Manager"}},
+
+  {"name": "VLC media player", "winget": "VideoLAN.VLC", "choco": "vlc", "publisher": "VideoLAN", "category": "Media", "detect": {"method": "registry", "value": "VLC media player"}},
+  {"name": "Audacity", "winget": "Audacity.Audacity", "choco": "audacity", "publisher": "Audacity Team", "category": "Media", "detect": {"method": "registry", "value": "Audacity"}},
+  {"name": "GIMP", "winget": "GIMP.GIMP", "choco": "gimp", "publisher": "The GIMP Team", "category": "Media", "detect": {"method": "registry", "value": "GIMP"}},
+  {"name": "paint.net", "winget": "dotPDN.PaintDotNet", "choco": "paint.net", "publisher": "dotPDN", "category": "Media", "detect": {"method": "registry", "value": "paint.net"}},
+  {"name": "IrfanView", "winget": "IrfanSkiljan.IrfanView", "choco": "irfanview", "publisher": "Irfan Skiljan", "category": "Media", "detect": {"method": "registry", "value": "IrfanView"}},
+  {"name": "OBS Studio", "winget": "OBSProject.OBSStudio", "choco": "obs-studio", "publisher": "OBS Project", "category": "Media", "detect": {"method": "registry", "value": "OBS Studio"}},
+
+  {"name": "PuTTY", "winget": "PuTTY.PuTTY", "choco": "putty", "publisher": "Simon Tatham", "category": "Admin tools", "detect": {"method": "registry", "value": "PuTTY"}},
+  {"name": "WinSCP", "winget": "WinSCP.WinSCP", "choco": "winscp", "publisher": "Martin Prikryl", "category": "Admin tools", "detect": {"method": "registry", "value": "WinSCP"}},
+  {"name": "FileZilla", "winget": "TimKosse.FileZilla.Client", "choco": "filezilla", "publisher": "Tim Kosse", "category": "Admin tools", "detect": {"method": "registry", "value": "FileZilla"}},
+  {"name": "Wireshark", "winget": "WiresharkFoundation.Wireshark", "choco": "wireshark", "publisher": "Wireshark Foundation", "category": "Admin tools", "detect": {"method": "registry", "value": "Wireshark"}},
+  {"name": "Advanced IP Scanner", "winget": "Famatech.AdvancedIPScanner", "choco": "advanced-ip-scanner", "publisher": "Famatech", "category": "Admin tools", "detect": {"method": "registry", "value": "Advanced IP Scanner"}},
+  {"name": "Git", "winget": "Git.Git", "choco": "git", "publisher": "The Git Development Community", "category": "Admin tools", "detect": {"method": "registry", "value": "re:^Git( version [\\d.]+)?$"}},
+  {"name": "Visual Studio Code", "winget": "Microsoft.VisualStudioCode", "choco": "vscode", "publisher": "Microsoft", "category": "Admin tools", "detect": {"method": "registry", "value": "Microsoft Visual Studio Code"}},
+
+  {"name": "WireGuard", "winget": "WireGuard.WireGuard", "choco": "wireguard", "publisher": "WireGuard", "category": "VPN", "detect": {"method": "registry", "value": "WireGuard"}},
+  {"name": "OpenVPN Connect", "winget": "OpenVPNTechnologies.OpenVPNConnect", "choco": "openvpn-connect", "publisher": "OpenVPN", "category": "VPN", "detect": {"method": "registry", "value": "OpenVPN Connect"}},
+  {"name": "FortiClient VPN", "winget": "Fortinet.FortiClientVPN", "choco": "", "publisher": "Fortinet", "category": "VPN", "detect": {"method": "registry", "value": "FortiClient VPN"}},
+
+  {"name": "KeePass", "winget": "DominikReichl.KeePass", "choco": "keepass", "publisher": "Dominik Reichl", "category": "Security", "detect": {"method": "registry", "value": "KeePass Password Safe"}},
+  {"name": "Bitwarden", "winget": "Bitwarden.Bitwarden", "choco": "bitwarden", "publisher": "Bitwarden", "category": "Security", "detect": {"method": "registry", "value": "Bitwarden"}},
+  {"name": "Malwarebytes", "winget": "Malwarebytes.Malwarebytes", "choco": "malwarebytes", "publisher": "Malwarebytes", "category": "Security", "detect": {"method": "registry", "value": "Malwarebytes"}},
+
+  {"name": "Java Runtime (Temurin 21)", "winget": "EclipseAdoptium.Temurin.21.JRE", "choco": "temurin21jre", "publisher": "Eclipse Adoptium", "category": "Runtimes", "detect": {"method": "registry", "value": "re:^Eclipse Temurin JRE .*21\\."}},
+  {"name": ".NET Desktop Runtime 8", "winget": "Microsoft.DotNet.DesktopRuntime.8", "choco": "dotnet-8.0-desktopruntime", "publisher": "Microsoft", "category": "Runtimes", "detect": {"method": "registry", "value": "re:^Microsoft Windows Desktop Runtime - 8\\."}},
+  {"name": "Visual C++ Redistributable 2015-2022 (x64)", "winget": "Microsoft.VCRedist.2015+.x64", "choco": "vcredist140", "publisher": "Microsoft", "category": "Runtimes", "detect": {"method": "registry", "value": "re:^Microsoft Visual C\\+\\+ 2015-20\\d\\d Redistributable \\(x64\\)"}},
+  {"name": "Python 3.12", "winget": "Python.Python.3.12", "choco": "python312", "publisher": "Python Software Foundation", "category": "Runtimes", "detect": {"method": "registry", "value": "re:^Python 3\\.12\\.\\d+ \\("}},
+  {"name": "Node.js LTS", "winget": "OpenJS.NodeJS.LTS", "choco": "nodejs-lts", "publisher": "OpenJS Foundation", "category": "Runtimes", "detect": {"method": "registry", "value": "Node.js"}},
+
+  {"name": "Google Drive", "winget": "Google.GoogleDrive", "choco": "googledrive", "publisher": "Google", "category": "Cloud storage", "detect": {"method": "registry", "value": "Google Drive"}},
+  {"name": "Dropbox", "winget": "Dropbox.Dropbox", "choco": "dropbox", "publisher": "Dropbox", "category": "Cloud storage", "detect": {"method": "registry", "value": "Dropbox"}},
+  {"name": "Microsoft OneDrive", "winget": "Microsoft.OneDrive", "choco": "onedrive", "publisher": "Microsoft", "category": "Cloud storage", "detect": {"method": "registry", "value": "Microsoft OneDrive"}},
+
+  {"name": "Dell Command Update", "winget": "Dell.CommandUpdate", "choco": "dellcommandupdate", "publisher": "Dell", "category": "Vendor tools", "detect": {"method": "registry", "value": "Dell Command | Update"}, "note": "Dell PCs only. Aim it at a client or PC, not every PC."},
+  {"name": "Lenovo System Update", "winget": "Lenovo.SystemUpdate", "choco": "lenovo-thinkvantage-system-update", "publisher": "Lenovo", "category": "Vendor tools", "detect": {"method": "registry", "value": "Lenovo System Update"}, "note": "Lenovo PCs only. Aim it at a client or PC, not every PC."},
+
+  {"name": "RMM agent", "winget": "", "choco": "", "publisher": "Your RMM", "category": "Agents", "placeholder": true, "detect": {"method": "registry", "value": ""}, "note": "Download the site or client installer from your RMM portal and drop it on Packages. Each client usually needs its own installer or site key."},
+  {"name": "Antivirus or EDR agent", "winget": "", "choco": "", "publisher": "Your security vendor", "category": "Agents", "placeholder": true, "detect": {"method": "registry", "value": ""}, "note": "Use the installer and install token from your security console. Most need tamper protection turned off before an uninstall."},
+  {"name": "Backup agent", "winget": "", "choco": "", "publisher": "Your backup vendor", "category": "Agents", "placeholder": true, "detect": {"method": "registry", "value": ""}, "note": "Use the installer from your backup portal, then register the PC there."},
+  {"name": "Remote support agent", "winget": "", "choco": "", "publisher": "Your remote support tool", "category": "Agents", "placeholder": true, "detect": {"method": "registry", "value": ""}, "note": "The client installer from ScreenConnect, Splashtop or similar, with your instance settings built in."}
+ ]
+}

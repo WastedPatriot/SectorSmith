@@ -136,6 +136,8 @@ class MainWindow(*_Base):
             self.go(WelcomeScreen, animate=False)
         self._set_icon()
         self.after(120, self._poll)
+        from .manage_schedule import start as start_schedules
+        start_schedules(self)  # due deployment schedules run after start-up and when a linked PC connects
         self.protocol("WM_DELETE_WINDOW", self._quit)
         self.after(400, lambda: self.mascot.set_mood("idle", "hello"))
 

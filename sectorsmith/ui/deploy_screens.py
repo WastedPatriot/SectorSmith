@@ -1,4 +1,6 @@
-"""Screens for SectorSmith Deploy: software library, deployments, clients, upkeep tasks and sessions."""
+"""Wizards and editors for Manage (SectorSmith Deploy): package builder, new deployment, client and task editors,
+run maintenance and the session view. The list pages (Packages, Catalogue, Deployments, Clients, Tasks, Sessions)
+are in manage_screens.py."""
 from __future__ import annotations
 
 import dataclasses
@@ -6,22 +8,22 @@ import os
 import re
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ..deploy import analyze, core
+from ..deploy import analyze, core, schedule
 from ..util import Cancelled, get_logger, human_time
 from . import theme
 from .link_screens import MachinePicker
 from .screens import Screen
-from .widgets import DropZone, IconBadge, OptionCard, Pill, bind_all, ghost_button
+from .widgets import DataTable, DropZone, IconBadge, OptionCard, Pill, bind_all, caption, ghost_button, segmented
 
 log = get_logger()
 P = theme.PALETTE
 
 BADGE = "PREVIEW"
-TABS = ["Library", "Deployments", "Clients", "Tasks", "Sessions"]
+PAGES = ["Library", "Deployments", "Clients", "Tasks", "Sessions"]
 INSTALLER_EXTS = (".msi", ".exe", ".msix", ".msixbundle", ".appx", ".appxbundle")
 
 SOFTWARE_STATES = {"latest": "Keep up to date", "installed": "Installed", "version": "Set version",
@@ -128,83 +130,98 @@ def export_scripts(app, store, pkg):
                    lambda e: app.toast(f"Couldn't export {pkg.name}: {e}", "danger"))
 
 
+def go_manage(app, page="Library", **kw):
+    """Open a Manage list page: Library (Packages), Deployments, Clients, Tasks or Sessions."""
+    from . import manage_screens as M
+    cls = {"Library": M.PackagesScreen, "Deployments": M.DeploymentsScreen, "Clients": M.ClientsScreen,
+           "Tasks": M.TasksScreen, "Sessions": M.SessionsScreen}.get(page, M.PackagesScreen)
+    return app.go(cls, **kw)
+
+
+def __getattr__(name):
+    # the old tabbed Deploy screen is now the Manage pages; Packages is where it used to open
+    if name == "DeployScreen":
+        from .manage_screens import PackagesScreen
+        return PackagesScreen
+    raise AttributeError(name)
+
+
 # ---------------------------------------------------------------------------
-def badge(parent, icon, tone, size=40, bg="card"):
-    b = IconBadge(parent, icon, size, tone)
-    b.set_bg(theme.c(bg))
-    theme.on_theme_change(lambda: b.set_bg(theme.c(bg)))
-    return b
+def badge(parent, icon, tone, size=36, bg="surface"):
+    return IconBadge(parent, icon, size, tone, bg=bg)
 
 
-def small_button(master, text, command, tone="muted", width=70):
-    return ctk.CTkButton(master, text=text, command=command, width=width, height=30, corner_radius=15,
-                         fg_color="transparent", hover_color=P["danger_soft"] if tone == "danger" else P["card_hover"],
-                         text_color=P[tone], font=theme.font(12, "bold"))
+def small_button(master, text, command, tone="text_2", width=70):
+    return ctk.CTkButton(master, text=text, command=command, width=width, height=30, corner_radius=8,
+                         fg_color="transparent", hover_color=P["danger_soft"] if tone == "danger" else P["hover"],
+                         text_color=P[tone], font=theme.font_style("body_strong"))
 
 
 def soft_button(master, text, command, width=None):
-    return ctk.CTkButton(master, text=text, command=command, height=34, corner_radius=17,
-                         width=width or max(90, len(text) * 8 + 24), fg_color=P["violet_soft"],
-                         hover_color=P["card_hover"], text_color=P["violet"], font=theme.font(12, "bold"))
+    return ctk.CTkButton(master, text=text, command=command, height=32, corner_radius=8,
+                         width=width or max(90, len(text) * 8 + 24), fg_color=P["accent_soft"],
+                         hover_color=P["selected"], text_color=P["accent"], font=theme.font_style("body_strong"))
 
 
 def item_row(parent, icon, tone, title, sub="", pills=()):
-    """A library card: badge, title with pills, one line of detail, and room for buttons on the right."""
-    card = ctk.CTkFrame(parent, corner_radius=16, fg_color=P["card"], border_width=2, border_color=P["card"])
+    """A pickable card: icon tile, title with pills, one line of detail, and room for buttons on the right."""
+    card = ctk.CTkFrame(parent, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
     card.pack(fill="x", pady=3, padx=(0, 6))
     card.badge = badge(card, icon, tone)
-    card.badge.pack(side="left", padx=12, pady=10)
+    card.badge.pack(side="left", padx=(14, 12), pady=10)
     card.actions = ctk.CTkFrame(card, fg_color="transparent")
     card.actions.pack(side="right", padx=(0, 10))
     t = ctk.CTkFrame(card, fg_color="transparent")
     t.pack(side="left", fill="x", expand=True, pady=8)
     top = ctk.CTkFrame(t, fg_color="transparent")
     top.pack(anchor="w")
-    ctk.CTkLabel(top, text=title, font=theme.font(14, "bold"), text_color=P["text"]).pack(side="left")
+    ctk.CTkLabel(top, text=title, font=theme.font_style("body_strong"), text_color=P["text"], height=20).pack(
+        side="left")
     for text, ptone in pills:
         Pill(top, text, ptone).pack(side="left", padx=(8, 0))
     if sub:
-        ctk.CTkLabel(t, text=sub, font=theme.font(12), text_color=P["muted"], anchor="w", justify="left",
-                     wraplength=520).pack(anchor="w")
+        ctk.CTkLabel(t, text=sub, font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
+                     wraplength=520, height=16).pack(anchor="w")
     return card
 
 
-def make_selectable(rows, card, value, on_pick):
-    """Single-choice cards in the same style as the drive and machine pickers."""
-    rows.append(card)
+def paint_card(c, on):
+    c.configure(border_color=P["accent"] if on else P["border"], fg_color=P["selected"] if on else P["surface"])
+    c.badge.set_bg("selected" if on else "surface")
 
-    def paint(c, on):
-        c.configure(border_color=P["accent"] if on else P["card"], fg_color=P["accent_soft"] if on else P["card"])
-        c.badge.set_bg(theme.c("accent_soft" if on else "card"))
+
+def make_selectable(rows, card, value, on_pick, multi=False):
+    """Pickable cards in the same style as the drive and machine pickers. multi: clicking toggles."""
+    rows.append(card)
+    card.on = False
 
     def click(_e=None):
-        for c in rows:
-            paint(c, c is card)
+        if multi:
+            card.on = not card.on
+            paint_card(card, card.on)
+        else:
+            for c in rows:
+                c.on = c is card
+                paint_card(c, c.on)
         on_pick(value)
     card.click = click
     bind_all(card, "<Button-1>", click)
 
 
-def action_tree(parent, cols, height=8):
-    wrap = ctk.CTkFrame(parent, corner_radius=18, fg_color=P["card"])
-    wrap.pack(fill="both", expand=True)
-    tree = ttk.Treeview(wrap, columns=[c[0] for c in cols], show="headings", style="Smith.Treeview",
-                        selectmode="browse", height=height)
-    for key, title, w in cols:
-        tree.heading(key, text=title)
-        tree.column(key, width=w, anchor="w")
-    sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview, style="Smith.Vertical.TScrollbar")
-    tree.configure(yscrollcommand=sb.set)
-    tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
-    sb.pack(side="right", fill="y", pady=10, padx=4)
+TONE_TAG = {"bad": ("danger",), "todo": ("warn",), "good": ("success",), "": ()}
 
-    def tags():
-        tree.tag_configure("bad", foreground=theme.c("danger"))
-        tree.tag_configure("todo", foreground=theme.c("warn"))
-        tree.tag_configure("good", foreground=theme.c("success"))
-    tags()
-    theme.on_theme_change(tags)
-    return tree
+
+def action_tree(parent, cols, height=8):
+    """A themed table in a bordered card. Returns the DataTable; add rows with add_action_row."""
+    wrap = ctk.CTkFrame(parent, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+    wrap.pack(fill="both", expand=True)
+    table = DataTable(wrap, cols, height=height)
+    table.pack(fill="both", expand=True, padx=1, pady=(1, 8))
+    return table
+
+
+def add_action_row(table, values, tag=""):
+    return table.add(values, tags=TONE_TAG.get(tag, ()))
 
 
 def _tag(a):
@@ -217,11 +234,11 @@ def _tag(a):
 
 
 class MachineChecklist(ctk.CTkFrame):
-    """Machine cards like MachinePicker, but you can tick several."""
+    """Machine cards like MachinePicker, but you can tick several (or one, with single=True)."""
 
-    def __init__(self, master, app, on_change):
+    def __init__(self, master, app, on_change, single=False):
         super().__init__(master, fg_color="transparent")
-        self.app, self.on_change = app, on_change
+        self.app, self.on_change, self.single = app, on_change, single
         self.selected = []
         self.cards = []
         self.render()
@@ -233,258 +250,42 @@ class MachineChecklist(ctk.CTkFrame):
         machines = self.app.machines()
         self.selected = [m for m in self.selected if m in machines]
         for i, m in enumerate(machines):
-            card = ctk.CTkFrame(self, corner_radius=16, fg_color=P["card"], border_width=2, border_color=P["card"])
+            card = ctk.CTkFrame(self, corner_radius=12, fg_color=P["surface"], border_width=1,
+                                border_color=P["border"])
             card.grid(row=i // 3, column=i % 3, sticky="ew", padx=(0, 10), pady=4)
-            b = badge(card, "pc", "violet" if m.is_local else "success")
-            b.pack(side="left", padx=(12, 8), pady=10)
+            b = badge(card, "pc", "neutral" if m.is_local else "teal", 32)
+            b.pack(side="left", padx=(12, 10), pady=10)
             t = ctk.CTkFrame(card, fg_color="transparent")
             t.pack(side="left", padx=(0, 16))
-            ctk.CTkLabel(t, text=machine_name(m), font=theme.font(14, "bold"), text_color=P["text"]).pack(anchor="w")
-            sub = ("linked · " + m.address) if not m.is_local else "where SectorSmith is running"
-            ctk.CTkLabel(t, text=sub, font=theme.font(11), text_color=P["muted"]).pack(anchor="w")
+            ctk.CTkLabel(t, text=machine_name(m), font=theme.font_style("body_strong"), text_color=P["text"],
+                         height=18).pack(anchor="w")
+            sub = ("Linked · " + m.address) if not m.is_local else "Where SectorSmith is running"
+            ctk.CTkLabel(t, text=sub, font=theme.font_style("small"), text_color=P["muted"], height=16).pack(
+                anchor="w")
             self.cards.append((card, b, m))
 
             def click(_e=None, card=card, b=b, m=m):
                 on = m not in self.selected
-                (self.selected.append if on else self.selected.remove)(m)
-                self._paint(card, b, on)
+                if self.single:
+                    self.selected = [m] if on else []
+                else:
+                    (self.selected.append if on else self.selected.remove)(m)
+                for c2, b2, m2 in self.cards:
+                    self._paint(c2, b2, m2 in self.selected)
                 self.on_change(list(self.selected))
             card.click = click
             bind_all(card, "<Button-1>", click)
             self._paint(card, b, m in self.selected)
-        add = ctk.CTkButton(self, text="+  Link another PC", height=60, corner_radius=16, fg_color="transparent",
-                            border_width=2, border_color=P["border"], hover_color=P["card_hover"],
-                            text_color=P["accent"], font=theme.font(13, "bold"), command=self.app.open_connect)
+        add = ctk.CTkButton(self, text="+  Link another PC", height=54, corner_radius=12, fg_color="transparent",
+                            border_width=1, border_color=P["border_strong"], hover_color=P["hover"],
+                            text_color=P["accent"], font=theme.font_style("body_strong"), command=self.app.open_connect)
         n = len(machines)
         add.grid(row=n // 3, column=n % 3, sticky="w", pady=4)
 
     @staticmethod
     def _paint(card, b, on):
-        card.configure(border_color=P["accent"] if on else P["card"], fg_color=P["accent_soft"] if on else P["card"])
-        b.set_bg(theme.c("accent_soft" if on else "card"))
-
-
-# ---------------------------------------------------------------------------
-class DeployScreen(Screen):
-    guide_topic = "deploy"
-
-    def __init__(self, master, app, tab="Library"):
-        super().__init__(master, app, "Deploy software", "Install apps and run upkeep tasks on your linked PCs.",
-                         badge=BADGE)
-        self.app.mascot.set_mood("idle", text="Let's get some apps out to your PCs!")
-        body = self.new_body()
-        self.store = open_store(self, body)
-        self.dz = None
-        if self.store is None:
-            return
-        bar = ctk.CTkFrame(body, fg_color="transparent")
-        bar.pack(fill="x")
-        self.tabs = ctk.CTkSegmentedButton(bar, values=TABS, command=lambda _v: self._tab(),
-                                           selected_color=P["accent"], selected_hover_color=P["accent_hover"],
-                                           font=theme.font(13, "bold"), height=36, corner_radius=18)
-        self.tabs.set(tab if tab in TABS else TABS[0])
-        self.tabs.pack(side="left")
-        ctk.CTkLabel(bar, text="Preview: try new packages on one PC first", font=theme.font(12),
-                     text_color=P["muted"]).pack(side="right")
-        self.area = ctk.CTkFrame(body, fg_color="transparent")
-        self.area.pack(fill="both", expand=True, pady=(12, 0))
-        self.app.drop_handlers.append(self._drop_hot)
-        self.buttons(primary=("Run maintenance", lambda: self.app.go(RunWizard)))
-        self._tab()
-
-    # -- shared bits --------------------------------------------------------
-    def _drop_hot(self, kind, _p):
-        if self.dz is not None and self.dz.winfo_exists():
-            self.dz.hot(kind == "enter")
-
-    def accept_files(self, paths):
-        found = [p for p in paths if p.lower().endswith(INSTALLER_EXTS)]
-        if not found:
-            self.app.toast("Drop an installer (.msi, .exe or .msix) to add it to the library.", "warn")
-            return
-        if len(found) > 1:
-            self.app.toast(f"One at a time: starting with {os.path.basename(found[0])}.", "warn")
-        self.app.mascot.say("drop")
-        self.app.go(PackageBuilder, path=found[0])
-
-    def _tab(self):
-        for w in self.area.winfo_children():
-            w.destroy()
-        self.dz = None
-        getattr(self, "_" + self.tabs.get().lower())()
-
-    def _toolbar(self, text, *actions):
-        bar = ctk.CTkFrame(self.area, fg_color="transparent")
-        bar.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(bar, text=text.upper(), font=theme.font(11, "bold"), text_color=P["muted"]).pack(side="left")
-        for label, cmd in reversed(actions):
-            soft_button(bar, label, cmd).pack(side="right", padx=(8, 0))
-
-    def _list(self):
-        lst = ctk.CTkScrollableFrame(self.area, fg_color="transparent")
-        lst.pack(fill="both", expand=True)
-        return lst
-
-    def _empty(self, parent, text):
-        ctk.CTkLabel(parent, text=text, font=theme.font(13), text_color=P["muted"], justify="left",
-                     wraplength=640).pack(anchor="w", pady=12)
-
-    def _remove(self, kind, obj, question):
-        if not messagebox.askyesno("Remove?", question):
-            return
-        ok, _ = attempt(self.app, "remove it", lambda: self.store.delete(kind, obj.id))
-        if ok:
-            self.app.toast(f"Removed {obj.name if hasattr(obj, 'name') else 'it'}")
-            self._tab()
-
-    # -- tabs ---------------------------------------------------------------
-    def _library(self):
-        pkgs = sorted(self.store.packages, key=lambda p: p.name.lower())
-        self._toolbar(_plural(len(pkgs), "package"),
-                      ("Import folder...", self._import),
-                      ("+ Script or command", lambda: self.app.go(PackageBuilder, mode="script")),
-                      ("+ winget", lambda: self.app.go(PackageBuilder, mode="winget")),
-                      ("+ Installer...", self._browse))
-        self.dz = DropZone(self.area, "Drop an installer here", "MSI, EXE or MSIX. SectorSmith suggests the silent "
-                                                               "switches for you.", height=96, icon="deploy",
-                           tone="violet", wide=True)
-        self.dz.pack(fill="x", pady=(0, 8))
-        lst = self._list()
-        if not pkgs:
-            self._empty(lst, "Your library is empty. Drop an installer above to make your first package.")
-        for p in pkgs:
-            source = p.installer or (f"winget: {p.winget_id}" if p.winget_id else "no installer file")
-            sub = " · ".join(x for x in (p.publisher, source, DETECTION.get(p.detection.get("method"), "")) if x)
-            pills = [(KIND_LABEL.get(p.kind, p.kind), "violet")] + ([(p.version, "success")] if p.version else [])
-            card = item_row(lst, "deploy", "violet", p.name, sub, pills)
-            small_button(card.actions, "Edit", lambda p=p: self.app.go(PackageBuilder, package=p)).pack(side="left")
-            small_button(card.actions, "Export...", lambda p=p: export_scripts(self.app, self.store, p),
-                         width=80).pack(side="left")
-            small_button(card.actions, "Deploy", lambda p=p: self.app.go(DeploymentWizard, item=("software", p.id)),
-                         tone="accent").pack(side="left")
-            small_button(card.actions, "Remove", lambda p=p: self._remove(
-                "packages", p, f"Remove {p.name} from the library?\n\nIts installer copy and its deployments go "
-                               "too. Nothing is changed on any PC."), tone="danger", width=80).pack(side="left")
-
-    def _browse(self):
-        p = filedialog.askopenfilename(title="Pick an installer",
-                                       filetypes=[("Installers", " ".join("*" + e for e in INSTALLER_EXTS)),
-                                                  ("All files", "*")])
-        if p:
-            self.app.go(PackageBuilder, path=p)
-
-    def _import(self):
-        folder = filedialog.askdirectory(title="Pick an exported package folder (it has a package.json)")
-        if not folder:
-            return
-        if not os.path.exists(os.path.join(folder, "package.json")):
-            self.app.toast("That folder has no package.json. Pick a folder made with Export.", "warn")
-            return
-        ok, pkg = attempt(self.app, "import that package", lambda: self.store.import_package(folder))
-        if ok:
-            self.app.toast(f"Imported {pkg.name}")
-            self._tab()
-
-    def _item(self, d):
-        if d.item_type == "software":
-            p = self.store.get("packages", d.item_id)
-            return (p.name if p else "Missing package"), "deploy"
-        t = self.store.get("tasks", d.item_id)
-        return (t.name if t else "Missing task"), "task"
-
-    def _target(self, d):
-        if d.target_kind == "client":
-            c = self.store.get("clients", d.target_value)
-            return f"Client: {c.name if c else 'missing'}"
-        if d.target_kind == "machine":
-            return f"PC: {d.target_value}"
-        return "Every PC"
-
-    def _deployments(self):
-        deps = self.store.deployments
-        self._toolbar(_plural(len(deps), "deployment"), ("+ New deployment", lambda: self.app.go(DeploymentWizard)))
-        lst = self._list()
-        if not deps:
-            self._empty(lst, "No deployments yet. A deployment says what a package or task should look like on "
-                             "which PCs, for example: keep 7-Zip up to date on every PC.")
-        for d in deps:
-            name, icon = self._item(d)
-            states = SOFTWARE_STATES if d.item_type == "software" else TASK_STATES
-            state = states.get(d.desired, d.desired) + (f" {d.version}" if d.desired == "version" else "")
-            pills = [("Software" if d.item_type == "software" else "Task", "violet")]
-            if d.onboarding_only:
-                pills.append(("New PCs only", "warn"))
-            card = item_row(lst, icon, "violet" if d.item_type == "software" else "success", name,
-                            f"{state} · {self._target(d)}", pills)
-            var = tk.BooleanVar(value=d.enabled)
-            ctk.CTkSwitch(card.actions, text="On", variable=var, progress_color=P["accent"],
-                          font=theme.font(12), command=lambda d=d, var=var: self._toggle(d, var)).pack(side="left")
-            small_button(card.actions, "Remove", lambda d=d: self._remove(
-                "deployments", d, f"Remove this deployment of {self._item(d)[0]}?\n\nPCs keep whatever is "
-                                  "installed now."), tone="danger", width=80).pack(side="left")
-
-    def _toggle(self, d, var):
-        d.enabled = bool(var.get())
-        attempt(self.app, "save that change", lambda: self.store.upsert("deployments", d))
-
-    def _clients(self):
-        clients = sorted(self.store.clients, key=lambda c: c.name.lower())
-        self._toolbar(_plural(len(clients), "client"), ("+ New client", lambda: self.app.go(ClientEditor)))
-        lst = self._list()
-        if not clients:
-            self._empty(lst, "A client is a named group of PCs, like a customer or an office. Deployments can "
-                             "target a whole client.")
-        for c in clients:
-            card = item_row(lst, "client", "accent", c.name, ", ".join(c.machines) or "No PCs yet",
-                            [(_plural(len(c.machines), "PC"), "accent")])
-            small_button(card.actions, "Edit", lambda c=c: self.app.go(ClientEditor, client=c)).pack(side="left")
-            small_button(card.actions, "Remove", lambda c=c: self._remove(
-                "clients", c, f"Remove the client {c.name}?\n\nIts PCs aren't changed."), tone="danger",
-                width=80).pack(side="left")
-
-    def _tasks(self):
-        tasks = sorted(self.store.tasks, key=lambda t: t.name.lower())
-        self._toolbar(_plural(len(tasks), "task"), ("+ New task", lambda: self.app.go(TaskEditor)))
-        lst = self._list()
-        if not tasks:
-            self._empty(lst, "Upkeep tasks are small scripts: a check that says whether a PC is fine, and a fix "
-                             "that runs when it isn't. For example: make sure the Print Spooler is running.")
-        for t in tasks:
-            first = next((ln.strip() for ln in t.test.splitlines() if ln.strip()), "")
-            card = item_row(lst, "task", "success", t.name, t.description or _short(f"Check: {first}", 80),
-                            [(LANGUAGES.get(t.language, t.language), "success")])
-            small_button(card.actions, "Edit", lambda t=t: self.app.go(TaskEditor, task=t)).pack(side="left")
-            small_button(card.actions, "Deploy", lambda t=t: self.app.go(DeploymentWizard, item=("task", t.id)),
-                         tone="accent").pack(side="left")
-            small_button(card.actions, "Remove", lambda t=t: self._remove(
-                "tasks", t, f"Remove the task {t.name}?\n\nIts deployments go too."), tone="danger",
-                width=80).pack(side="left")
-
-    def _sessions(self):
-        _ok, sessions = attempt(self.app, "read past sessions", lambda: self.store.sessions(limit=100))
-        sessions = sessions or []
-        self._toolbar(_plural(len(sessions), "session"), ("Run maintenance", lambda: self.app.go(RunWizard)))
-        lst = self._list()
-        if not sessions:
-            self._empty(lst, "Nothing has run yet. Run maintenance checks your PCs, shows what they need, and "
-                             "applies it once you confirm. Every run is kept here.")
-        for s in sessions:
-            sm = s.get("summary") or {}
-            bad = sm.get("failed", 0)
-            pills = []
-            for key, label, tone in (("compliant", "OK", "success"), ("pending", "to change", "warn"),
-                                     ("non_compliant", "not OK", "warn"), ("failed", "failed", "danger")):
-                if sm.get(key):
-                    pills.append((f"{sm[key]} {label}", tone))
-            if sm.get("reboot"):
-                pills.append(("restart needed", "violet"))
-            mode = "Check only" if s.get("mode") == "detect" else "Check and fix"
-            took = _took(s["finished"] - s["started"]) if s.get("finished") and s.get("started") else ""
-            client = f"Client: {s['client']}" if s.get("client") else ""
-            sub = " · ".join(x for x in (_when(s.get("started")), mode, client, took) if x)
-            card = item_row(lst, "warn" if bad else "check", "danger" if bad else "success",
-                            s.get("machine", "?"), sub, pills)
-            small_button(card.actions, "View", lambda s=s: self.app.go(SessionView, session=s)).pack(side="left")
+        card.configure(border_color=P["accent"] if on else P["border"], fg_color=P["selected"] if on else P["surface"])
+        b.set_bg("selected" if on else "surface")
 
 
 # ---------------------------------------------------------------------------
@@ -513,39 +314,45 @@ class PackageBuilder(Screen):
             self._source()
 
     def _back_to_library(self):
-        self.app.go(DeployScreen, tab="Library")
+        go_manage(self.app, "Library", select=self.pkg.id if self.pkg is not None else None)
 
     # -- step 1 -------------------------------------------------------------
     def _source(self):
-        body = self.step(0, "New package", "Drop an installer, or start from a winget ID or your own script.")
+        body = self.step(0, "New package", "Drop an installer, or start from the catalogue, a winget ID or your own "
+                                           "script.")
         self.app.mascot.set_mood("idle", text="Got an installer for me?")
-        self.dz = DropZone(body, "Drop an installer here", "MSI, EXE or MSIX", height=150, icon="deploy",
-                           tone="violet")
+        self.dz = DropZone(body, "Drop an installer here", "MSI, EXE or MSIX", height=150, icon="upload")
         self.dz.pack(fill="x")
         self.app.drop_handlers.append(lambda kind, _p: self.dz is not None and self.dz.winfo_exists()
                                       and self.dz.hot(kind == "enter"))
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=8)
         ghost_button(row, "Browse...", self._browse, width=130).pack(side="left")
-        self.status = ctk.CTkLabel(row, text="", font=theme.font(13), text_color=P["muted"], justify="left",
-                                   wraplength=620, anchor="w")
+        self.status = ctk.CTkLabel(row, text="", font=theme.font_style("body"), text_color=P["muted"],
+                                   justify="left", wraplength=620, anchor="w")
         self.status.pack(side="left", padx=14)
-        ctk.CTkLabel(body, text="OR START FROM", font=theme.font(11, "bold"), text_color=P["muted"]).pack(
-            anchor="w", pady=(10, 4))
+        caption(body, "Or start from").pack(anchor="w", pady=(10, 4))
         grid = ctk.CTkFrame(body, fg_color="transparent")
         grid.pack(fill="x")
         grp = []
+        cat = OptionCard(grid, "The catalogue", "Common MSP apps with the silent switches and detection worked "
+                                                "out.", "catalogue", grp, icon="search", tone="info")
         wg = OptionCard(grid, "A winget package", "Installs from the Windows Package Manager by its ID, for "
                                                   "example 7zip.7zip. No file needed.", "winget", grp,
                         icon="deploy", tone="success")
         sc = OptionCard(grid, "A script or command", "Your own install command, plus a check that tells "
                                                      "SectorSmith it's there.", "script", grp, icon="task",
                         tone="accent")
-        wg.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        sc.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        grid.grid_columnconfigure((0, 1), weight=1, uniform="o")
+        for i, o in enumerate((cat, wg, sc)):
+            o.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0 if i == 2 else 6))
+        grid.grid_columnconfigure((0, 1, 2), weight=1, uniform="o")
         wg.on_select = sc.on_select = self._blank
+        cat.on_select = lambda _v: self._catalogue()
         self.buttons(secondary=("Back", self._back_to_library))
+
+    def _catalogue(self):
+        from .manage_screens import CatalogueScreen
+        self.app.go(CatalogueScreen)
 
     def _browse(self):
         p = filedialog.askopenfilename(title="Pick an installer",
@@ -619,7 +426,7 @@ class PackageBuilder(Screen):
         cols.grid_columnconfigure(0, weight=11, uniform="d")
         cols.grid_columnconfigure(1, weight=9, uniform="d")
         cols.grid_rowconfigure(0, weight=1)
-        form = ctk.CTkFrame(cols, corner_radius=20, fg_color=P["card"])
+        form = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
         form.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
         form.grid_columnconfigure(1, weight=1)
         self.form = form
@@ -639,10 +446,8 @@ class PackageBuilder(Screen):
                     (s.get("uninstall") or "") else None)
         det = s.get("detection") or {"method": "registry", "value": ""}
         self._label("Detect by")
-        self.det_method = ctk.CTkOptionMenu(form, values=list(DETECTION.values()), height=32, corner_radius=12,
-                                            width=260, fg_color=P["bg"], button_color=P["violet"],
-                                            text_color=P["text"], font=theme.font(12),
-                                            command=lambda _v: self._det_changed())
+        self.det_method = ctk.CTkOptionMenu(form, values=list(DETECTION.values()), height=32, width=260,
+                                            font=theme.font_style("body"), command=lambda _v: self._det_changed())
         self.det_method.set(DETECTION.get(det.get("method"), DETECTION["registry"]))
         self.det_method.grid(row=self._row, column=1, sticky="w", padx=(0, 18), pady=4)
         self._row += 1
@@ -660,27 +465,23 @@ class PackageBuilder(Screen):
         side.grid(row=0, column=1, sticky="nsew")
         pills = ctk.CTkFrame(side, fg_color="transparent")
         pills.pack(fill="x")
-        Pill(pills, KIND_LABEL.get(self.kind, self.kind), "violet").pack(side="left")
+        Pill(pills, KIND_LABEL.get(self.kind, self.kind), "accent").pack(side="left")
         if s.get("product_code"):
             Pill(pills, "MSI product code found", "success").pack(side="left", padx=6)
         notes = s.get("notes") or []
         if notes:
             guess = any("guess" in n.lower() for n in notes)
-            box = ctk.CTkFrame(side, corner_radius=16, fg_color=P["warn_soft" if guess else "violet_soft"])
+            box = ctk.CTkFrame(side, corner_radius=12, fg_color=P["warn_soft" if guess else "accent_soft"])
             box.pack(fill="x", pady=(8, 0))
             for n in notes:
-                ctk.CTkLabel(box, text=_tidy(n), font=theme.font(12), text_color=P["text"], justify="left",
-                             anchor="w", wraplength=360).pack(anchor="w", padx=14, pady=(8, 8))
-        ctk.CTkLabel(side, text="SCRIPTS PREVIEW", font=theme.font(11, "bold"), text_color=P["muted"]).pack(
-            anchor="w", pady=(12, 4))
-        self.preview_tab = ctk.CTkSegmentedButton(side, values=["Install.ps1", "Uninstall.ps1", "Detect.ps1"],
-                                                  command=lambda _v: self._preview(), selected_color=P["violet"],
-                                                  selected_hover_color=P["violet"], font=theme.font(12, "bold"),
-                                                  height=30, corner_radius=15)
+                ctk.CTkLabel(box, text=_tidy(n), font=theme.font_style("small"), text_color=P["text"],
+                             justify="left", anchor="w", wraplength=360).pack(anchor="w", padx=14, pady=(8, 8))
+        caption(side, "Scripts preview").pack(anchor="w", pady=(12, 4))
+        self.preview_tab = segmented(side, ["Install.ps1", "Uninstall.ps1", "Detect.ps1"],
+                                     command=lambda _v: self._preview(), height=30)
         self.preview_tab.set("Install.ps1")
         self.preview_tab.pack(anchor="w")
-        self.preview_box = ctk.CTkTextbox(side, font=theme.mono(11), fg_color=P["card"], text_color=P["text"],
-                                          corner_radius=14, wrap="none")
+        self.preview_box = ctk.CTkTextbox(side, font=theme.mono(11), wrap="none")
         self.preview_box.pack(fill="both", expand=True, pady=(6, 0))
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._preview_soon())
@@ -697,19 +498,19 @@ class PackageBuilder(Screen):
                                      extra=extra)
 
     def _label(self, text):
-        ctk.CTkLabel(self.form, text=text, font=theme.font(13, "bold"), text_color=P["text"], anchor="w",
+        ctk.CTkLabel(self.form, text=text, font=theme.font_style("body_strong"), text_color=P["text"], anchor="w",
                      width=110).grid(row=self._row, column=0, sticky="nw", padx=(18, 10),
-                                     pady=(12 if self._row == 0 else 6, 0))
+                                     pady=(16 if self._row == 0 else 6, 0))
 
     def _field(self, label, key, placeholder=None, mono=False, hint=None):
         self._label(label)
-        e = ctk.CTkEntry(self.form, textvariable=self.v[key], height=32, corner_radius=12,
-                         font=theme.mono(12) if mono else theme.font(13), placeholder_text=placeholder)
-        e.grid(row=self._row, column=1, sticky="ew", padx=(0, 18), pady=(12 if self._row == 0 else 4, 0))
+        e = ctk.CTkEntry(self.form, textvariable=self.v[key], height=32,
+                         font=theme.mono(12) if mono else theme.font_style("body"), placeholder_text=placeholder)
+        e.grid(row=self._row, column=1, sticky="ew", padx=(0, 18), pady=(16 if self._row == 0 else 4, 0))
         self._row += 1
         if hint:
-            ctk.CTkLabel(self.form, text=hint, font=theme.font(11), text_color=P["muted"], anchor="w").grid(
-                row=self._row, column=1, sticky="w", padx=(0, 18))
+            ctk.CTkLabel(self.form, text=hint, font=theme.font_style("small"), text_color=P["muted"],
+                         anchor="w").grid(row=self._row, column=1, sticky="w", padx=(0, 18))
             self._row += 1
         return e
 
@@ -722,36 +523,34 @@ class PackageBuilder(Screen):
         method = _key(DETECTION, self.det_method.get())
         lbl = {"registry": "Name has", "msi_product_code": "Product code", "file": "File path",
                "script": "Script"}[method]
-        ctk.CTkLabel(self.det_box, text=lbl, font=theme.font(13, "bold"), text_color=P["text"], anchor="w",
+        ctk.CTkLabel(self.det_box, text=lbl, font=theme.font_style("body_strong"), text_color=P["text"], anchor="w",
                      width=110).grid(row=0, column=0, sticky="nw", padx=(18, 10), pady=(6, 0))
         if method == "script":
-            self.lang_seg = ctk.CTkSegmentedButton(self.det_box, values=list(LANGUAGES.values()),
-                                                   selected_color=P["violet"], selected_hover_color=P["violet"],
-                                                   font=theme.font(12, "bold"), height=28, corner_radius=14,
-                                                   command=lambda v: setattr(self, "lang", _key(LANGUAGES, v)))
+            self.lang_seg = segmented(self.det_box, list(LANGUAGES.values()), height=28,
+                                      command=lambda v: setattr(self, "lang", _key(LANGUAGES, v)))
             self.lang_seg.set(LANGUAGES.get(self.lang, LANGUAGES["powershell"]))
             self.lang_seg.grid(row=0, column=1, sticky="w", padx=(0, 18), pady=(4, 0))
-            self.det_text = ctk.CTkTextbox(self.det_box, height=74, font=theme.mono(11), corner_radius=12,
-                                           border_width=2, border_color=P["border"], fg_color=P["bg"])
+            self.det_text = ctk.CTkTextbox(self.det_box, height=74, font=theme.mono(11),
+                                           border_color=P["control_border"])
             self.det_text.insert("1.0", self.det_script)
             self.det_text.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=(4, 0))
             self.det_text.bind("<KeyRelease>", lambda _e: self._preview_soon())
             hint = "Print the installed version, or nothing if it's missing."
         elif method == "msi_product_code":
-            ctk.CTkEntry(self.det_box, textvariable=self.v["product_code"], height=32, corner_radius=12,
+            ctk.CTkEntry(self.det_box, textvariable=self.v["product_code"], height=32,
                          font=theme.mono(12), placeholder_text="{GUID}").grid(row=0, column=1, sticky="ew",
                                                                               padx=(0, 18), pady=(4, 0))
             hint = "Matched against the product code Windows registered."
         else:
-            ctk.CTkEntry(self.det_box, textvariable=self.det_value, height=32, corner_radius=12,
-                         font=theme.mono(12) if method == "file" else theme.font(13),
+            ctk.CTkEntry(self.det_box, textvariable=self.det_value, height=32,
+                         font=theme.mono(12) if method == "file" else theme.font_style("body"),
                          placeholder_text="C:\\Program Files\\App\\app.exe" if method == "file" else
                          "Leave empty to use the package name").grid(row=0, column=1, sticky="ew", padx=(0, 18),
                                                                      pady=(4, 0))
             hint = ("Its version is read from the file." if method == "file" else
                     "Matches part of the name. Start with re: for a regular expression.")
-        ctk.CTkLabel(self.det_box, text=hint, font=theme.font(11), text_color=P["muted"], anchor="w").grid(
-            row=2, column=1, sticky="w", padx=(0, 18))
+        ctk.CTkLabel(self.det_box, text=hint, font=theme.font_style("small"), text_color=P["muted"],
+                     anchor="w").grid(row=2, column=1, sticky="w", padx=(0, 18))
         self._preview_soon()
 
     def _detection(self):
@@ -887,76 +686,98 @@ class PackageBuilder(Screen):
 
 # ---------------------------------------------------------------------------
 class DeploymentWizard(Screen):
+    """What (one task, or one or more packages), where (every PC, a client, one PC) and how (wanted state,
+    new PCs only, schedule)."""
     guide_topic = "deploy"
 
-    def __init__(self, master, app, item=None):
+    def __init__(self, master, app, item=None, items=None):
         super().__init__(master, app, "New deployment", steps=["What", "Where", "How"], badge=BADGE)
-        self.item = item
+        self.picked = list(items or ([item] if item else []))
         self.target = None
         self.store = open_store(self, self.new_body())
         if self.store is not None:
             self._what()
 
+    @property
+    def item(self):
+        return self.picked[0] if len(self.picked) == 1 else None
+
     def _back(self):
-        self.app.go(DeployScreen, tab="Deployments")
+        go_manage(self.app, "Deployments")
 
     def _what(self):
-        body = self.step(0, "New deployment", "What should go out? Pick a package or an upkeep task.")
+        body = self.step(0, "New deployment", "What should go out? Pick one or more packages, or an upkeep task.")
         self.app.mascot.set_mood("idle", text="What are we rolling out?")
         lst = ctk.CTkScrollableFrame(body, fg_color="transparent")
         lst.pack(fill="both", expand=True)
         rows = []
         nb = None
+        cards = {}
 
         def pick(item):
-            self.item = item
-            nb.configure(state="normal")
-        cards = {}
-        for title, kind, items in (("SOFTWARE", "software", self.store.packages), ("TASKS", "task", self.store.tasks)):
+            if item[0] == "task" or any(k == "task" for k, _i in self.picked):
+                self.picked = [item] if item not in self.picked or item[0] != "task" else []
+            elif item in self.picked:
+                self.picked.remove(item)
+            else:
+                self.picked.append(item)
+            for key, c in cards.items():
+                c.on = key in self.picked
+                paint_card(c, c.on)
+            n = len(self.picked)
+            nb.configure(state="normal" if n else "disabled",
+                         text=f"Next: {_plural(n, 'package')}" if n > 1 else "Next")
+        for title, kind, items in (("Software", "software", self.store.packages), ("Tasks", "task", self.store.tasks)):
             if not items:
                 continue
-            ctk.CTkLabel(lst, text=title, font=theme.font(11, "bold"), text_color=P["muted"]).pack(anchor="w",
-                                                                                                 pady=(6, 2))
+            caption(lst, title).pack(anchor="w", pady=(6, 2))
             for x in sorted(items, key=lambda x: x.name.lower()):
                 if kind == "software":
-                    card = item_row(lst, "deploy", "violet", x.name, x.publisher or KIND_LABEL.get(x.kind, x.kind),
+                    card = item_row(lst, "package", "accent", x.name, x.publisher or KIND_LABEL.get(x.kind, x.kind),
                                     [(x.version, "success")] if x.version else [])
                 else:
                     card = item_row(lst, "task", "success", x.name, x.description, [])
-                make_selectable(rows, card, (kind, x.id), pick)
+                make_selectable(rows, card, (kind, x.id), pick, multi=True)
                 cards[(kind, x.id)] = card
         if not rows:
-            ctk.CTkLabel(lst, text="Nothing to deploy yet. Add a package or a task first.", font=theme.font(13),
-                         text_color=P["muted"]).pack(anchor="w", pady=12)
+            ctk.CTkLabel(lst, text="Nothing to deploy yet. Add a package or a task first.",
+                         font=theme.font_style("body"), text_color=P["muted"]).pack(anchor="w", pady=12)
             soft_button(lst, "Add a package", lambda: self.app.go(PackageBuilder)).pack(anchor="w")
         nb = self.buttons(primary=("Next", self._where), secondary=("Back", self._back))
-        nb.configure(state="disabled")
-        if self.item in cards:
-            cards[self.item].click()
+        start, self.picked = [p for p in self.picked if p in cards], []
+        for key in start:
+            pick(key)
+        if not self.picked:
+            nb.configure(state="disabled")
         self.cards = cards
 
-    def _item_obj(self):
-        kind, id_ = self.item
-        return self.store.get("packages" if kind == "software" else "tasks", id_)
+    def _objs(self):
+        return [self.store.get("packages" if k == "software" else "tasks", i) for k, i in self.picked]
+
+    def _what_text(self):
+        objs = [o for o in self._objs() if o is not None]
+        if len(objs) == 1:
+            return objs[0].name
+        return f"{_plural(len(objs), 'package')} ({', '.join(o.name for o in objs[:3])}" \
+               + (", ..." if len(objs) > 3 else "") + ")"
 
     def _where(self):
-        obj = self._item_obj()
-        body = self.step(1, "Which PCs?", f"Where should {obj.name if obj else 'it'} apply?")
+        body = self.step(1, "Which PCs?", f"Where should {self._what_text()} apply?")
         grp = []
         area = ctk.CTkFrame(body, fg_color="transparent")
         nb = None
         everyone = OptionCard(body, "Every PC", "Applies to every PC you run maintenance on.", "all", grp,
-                              icon="pc", tone="violet")
+                              icon="pc", tone="accent")
         client = OptionCard(body, "A client", "Applies to the PCs in one of your clients.", "client", grp,
-                            icon="client", tone="accent")
+                            icon="building", tone="info")
         one = OptionCard(body, "One PC", "Applies to a single PC, by its name. Wins over Every PC and client "
-                                         "deployments.", "machine", grp, icon="pc", tone="success")
+                                         "deployments.", "machine", grp, icon="pc", tone="teal")
         for o in (everyone, client, one):
             o.pack(fill="x", pady=4)
         area.pack(fill="x", pady=(8, 0))
         clients = sorted(self.store.clients, key=lambda c: c.name.lower())
         if not clients:
-            client.set_enabled(False, "You have no clients yet. Add one on the Clients tab.")
+            client.set_enabled(False, "You have no clients yet. Add one on the Clients page.")
 
         def set_target(t):
             self.target = t
@@ -968,14 +789,15 @@ class DeploymentWizard(Screen):
             if v == "all":
                 set_target(("all", ""))
             elif v == "client":
-                names = [c.name for c in clients]
-                menu = ctk.CTkOptionMenu(area, values=names, height=34, corner_radius=12, fg_color=P["card"],
-                                         button_color=P["violet"], text_color=P["text"], font=theme.font(13),
-                                         command=lambda n: set_target(("client", clients[names.index(n)].id)))
-                cur = next((c.name for c in clients if self.target == ("client", c.id)), names[0])
-                menu.set(cur)
+                from .manage_common import client_text
+                names = [client_text(self.app, c.name) for c in clients]
+                labels = [f"{n} ({i + 1})" if names.count(n) > 1 else n for i, n in enumerate(names)]
+                menu = ctk.CTkOptionMenu(area, values=labels, height=34, width=260, font=theme.font_style("body"),
+                                         command=lambda n: set_target(("client", clients[labels.index(n)].id)))
+                cur = next((i for i, c in enumerate(clients) if self.target == ("client", c.id)), 0)
+                menu.set(labels[cur])
                 menu.pack(anchor="w")
-                set_target(("client", clients[names.index(cur)].id))
+                set_target(("client", clients[cur].id))
             else:
                 name = tk.StringVar(value=self.target[1] if self.target and self.target[0] == "machine" else "")
                 name.trace_add("write", lambda *_: set_target(("machine", name.get().strip())))
@@ -983,9 +805,9 @@ class DeploymentWizard(Screen):
                 self.machine_picker.pack(anchor="w")
                 row = ctk.CTkFrame(area, fg_color="transparent")
                 row.pack(fill="x", pady=(8, 0))
-                ctk.CTkLabel(row, text="PC name:", font=theme.font(13, "bold"), text_color=P["text"]).pack(
+                ctk.CTkLabel(row, text="PC name:", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
                     side="left")
-                self.machine_entry = ctk.CTkEntry(row, textvariable=name, width=260, height=34, corner_radius=12,
+                self.machine_entry = ctk.CTkEntry(row, textvariable=name, width=260, height=34,
                                                   placeholder_text="Pick one above, or type its name")
                 self.machine_entry.pack(side="left", padx=10)
                 set_target(("machine", name.get().strip()))
@@ -998,29 +820,48 @@ class DeploymentWizard(Screen):
         self.where_cards[start].select()
 
     def _how(self):
-        obj = self._item_obj()
-        kind = self.item[0]
-        states = SOFTWARE_STATES if kind == "software" else TASK_STATES
-        body = self.step(2, "What should happen?", f"{obj.name if obj else '?'}  ·  {self._target_text()}")
+        kind = "task" if self.picked[0][0] == "task" else "software"
+        bundle = len(self.picked) > 1
+        states = TASK_STATES if kind == "task" else SOFTWARE_STATES
+        if bundle:  # one version can't fit several packages
+            states = {k: v for k, v in states.items() if k != "version"}
+        body = self.step(2, "What should happen?", f"{_short(self._what_text(), 70)}  ·  {self._target_text()}")
         self.app.mascot.set_mood("idle", text="Nearly there!")
-        seg = ctk.CTkSegmentedButton(body, values=list(states.values()), selected_color=P["accent"],
-                                     selected_hover_color=P["accent_hover"], font=theme.font(13, "bold"),
-                                     height=36, corner_radius=18)
+        cols = ctk.CTkFrame(body, fg_color="transparent")
+        cols.pack(fill="both", expand=True)
+        cols.grid_columnconfigure(0, weight=3, uniform="h")
+        cols.grid_columnconfigure(1, weight=2, uniform="h")
+        left = ctk.CTkFrame(cols, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 24))
+        caption(left, "Wanted state").pack(anchor="w", pady=(0, 4))
+        seg = segmented(left, list(states.values()), height=34)
         seg.pack(anchor="w")
-        help_lbl = ctk.CTkLabel(body, text="", font=theme.font(13), text_color=P["muted"], anchor="w",
-                                justify="left", wraplength=700)
+        help_lbl = ctk.CTkLabel(left, text="", font=theme.font_style("body"), text_color=P["muted"], anchor="w",
+                                justify="left", wraplength=520)
         help_lbl.pack(anchor="w", pady=(8, 0))
-        vrow = ctk.CTkFrame(body, fg_color="transparent")
-        ctk.CTkLabel(vrow, text="Version:", font=theme.font(13, "bold"), text_color=P["text"]).pack(side="left")
-        self.version = ctk.CTkEntry(vrow, width=160, height=34, corner_radius=12, placeholder_text="e.g. 24.08")
+        vrow = ctk.CTkFrame(left, fg_color="transparent")
+        ctk.CTkLabel(vrow, text="Version:", font=theme.font_style("body_strong"), text_color=P["text"]).pack(
+            side="left")
+        self.version = ctk.CTkEntry(vrow, width=160, height=34, placeholder_text="e.g. 24.08")
+        obj = self._objs()[0]
         if obj is not None and getattr(obj, "version", ""):
             self.version.insert(0, obj.version)
         self.version.pack(side="left", padx=10)
-        opts = ctk.CTkFrame(body, fg_color="transparent")
-        opts.pack(fill="x", pady=(14, 0))
+        opts = ctk.CTkFrame(left, fg_color="transparent")
+        opts.pack(fill="x", pady=(16, 0))
+        self.name = ctk.CTkEntry(opts, width=300, height=34, placeholder_text="Name for this group, e.g. Office apps")
+        if bundle:
+            caption(opts, "Name (optional)").pack(anchor="w", pady=(0, 4))
+            self.name.pack(anchor="w", pady=(0, 12))
         self.onboarding = tk.BooleanVar(value=False)
-        ctk.CTkSwitch(opts, text="Only on new PCs (runs marked as onboarding)", variable=self.onboarding,
-                      progress_color=P["accent"], font=theme.font(12)).pack(anchor="w")
+        ctk.CTkSwitch(opts, text="Only on new PCs (onboarding runs)", variable=self.onboarding,
+                      font=theme.font_style("body")).pack(anchor="w")
+        right = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        right.grid(row=0, column=1, sticky="new")
+        from .manage_screens import ScheduleEditor
+        self.schedule_editor = ScheduleEditor(right, None, None, compact=True)
+        caption(right, "When it runs").pack(anchor="w", padx=18, pady=(16, 4))
+        self.schedule_editor.pack(fill="x", padx=18, pady=(0, 16))
 
         def changed(label):
             key = _key(states, label)
@@ -1039,65 +880,85 @@ class DeploymentWizard(Screen):
     def _target_text(self):
         kind, value = self.target
         if kind == "client":
+            from .manage_common import client_text
             c = self.store.get("clients", value)
-            return f"client {c.name if c else '?'}"
+            return f"client {client_text(self.app, c.name) if c else '?'}"
         return f"PC {value}" if kind == "machine" else "every PC"
 
     def _save(self):
-        kind, id_ = self.item
-        states = SOFTWARE_STATES if kind == "software" else TASK_STATES
+        kind = "task" if self.picked[0][0] == "task" else "software"
+        states = TASK_STATES if kind == "task" else SOFTWARE_STATES
         desired = _key(states, self.state_seg.get())
         version = self.version.get().strip() if desired == "version" else ""
         if desired == "version" and not version:
             self.app.toast("Type the version to keep, for example 24.08.", "warn")
             return
-        d = core.Deployment(item_type=kind, item_id=id_, desired=desired, version=version,
-                            target_kind=self.target[0], target_value=self.target[1],
-                            onboarding_only=bool(self.onboarding.get()))
+        try:
+            sched = self.schedule_editor.value()
+        except ValueError as e:
+            self.app.toast(str(e), "warn")
+            return
+        common = dict(desired=desired, version=version, target_kind=self.target[0], target_value=self.target[1],
+                      onboarding_only=bool(self.onboarding.get()), schedule=sched)
+        if len(self.picked) > 1:
+            d = core.Deployment(item_type="bundle", item_id="", items=[i for _k, i in self.picked],
+                                name=self.name.get().strip(), **common)
+        else:
+            d = core.Deployment(item_type=kind, item_id=self.picked[0][1], **common)
         ok, _ = attempt(self.app, "save the deployment", lambda: self.store.upsert("deployments", d))
         if ok:
-            self.app.toast("Deployment saved. It applies the next time maintenance runs.")
+            when = schedule.describe(d)
+            self.app.toast("Deployment saved. " + (f"It runs {when[0].lower() + when[1:]}." if when else
+                                                   "It applies the next time maintenance runs."))
             self.app.mascot.set_mood("happy", "done")
-            self._back()
+            go_manage(self.app, "Deployments", select=d.id)
 
 
 # ---------------------------------------------------------------------------
+def _form_card(body, expand=False):
+    card = ctk.CTkFrame(body, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+    card.pack(fill="both" if expand else "x", expand=expand)
+    card.grid_columnconfigure(1, weight=1)
+    return card
+
+
+def _form_label(card, row, text, sticky="w", top=False):
+    ctk.CTkLabel(card, text=text, font=theme.font_style("body_strong"), text_color=P["text"], width=110,
+                 anchor="w").grid(row=row, column=0, sticky=sticky, padx=(20, 10), pady=(20 if top else 6, 6))
+
+
 class ClientEditor(Screen):
     guide_topic = "deploy"
 
     def __init__(self, master, app, client=None):
         super().__init__(master, app, "Edit client" if client else "New client",
-                         "A client is a named group of PCs. Deployments can target the whole group.", badge=BADGE)
+                         "A client is a named group of PCs. Deployments and a baseline can target the whole group.",
+                         badge=BADGE)
         self.client = client
         body = self.new_body()
         self.store = open_store(self, body)
         if self.store is None:
             return
-        card = ctk.CTkFrame(body, corner_radius=20, fg_color=P["card"])
-        card.pack(fill="x")
-        card.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(card, text="Name", font=theme.font(13, "bold"), text_color=P["text"], width=110,
-                     anchor="w").grid(row=0, column=0, sticky="w", padx=(18, 10), pady=(18, 6))
-        self.name = ctk.CTkEntry(card, height=34, corner_radius=12, placeholder_text="e.g. Smith & Co, or Front office")
-        self.name.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=(18, 6))
-        ctk.CTkLabel(card, text="PCs", font=theme.font(13, "bold"), text_color=P["text"], width=110,
-                     anchor="w").grid(row=1, column=0, sticky="nw", padx=(18, 10), pady=6)
-        self.pcs = ctk.CTkTextbox(card, height=150, corner_radius=12, font=theme.font(13), border_width=2,
-                                  border_color=P["border"], fg_color=P["bg"])
-        self.pcs.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=6)
-        ctk.CTkLabel(card, text="One PC name per line, as Windows shows it (the hostname).", font=theme.font(11),
-                     text_color=P["muted"], anchor="w").grid(row=2, column=1, sticky="w", padx=(0, 18), pady=(0, 16))
+        card = _form_card(body)
+        _form_label(card, 0, "Name", top=True)
+        self.name = ctk.CTkEntry(card, height=34, placeholder_text="e.g. Smith & Co, or Front office")
+        self.name.grid(row=0, column=1, sticky="ew", padx=(0, 20), pady=(20, 6))
+        _form_label(card, 1, "PCs", "nw")
+        self.pcs = ctk.CTkTextbox(card, height=150, font=theme.font_style("body"), border_color=P["control_border"])
+        self.pcs.grid(row=1, column=1, sticky="ew", padx=(0, 20), pady=6)
+        ctk.CTkLabel(card, text="One PC name per line, as Windows shows it (the hostname).",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w").grid(
+            row=2, column=1, sticky="w", padx=(0, 20), pady=(0, 18))
         if client:
             self.name.insert(0, client.name)
             self.pcs.insert("1.0", "\n".join(client.machines))
-        ctk.CTkLabel(body, text="ADD A LINKED PC", font=theme.font(11, "bold"), text_color=P["muted"]).pack(
-            anchor="w", pady=(16, 4))
+        caption(body, "Add a linked PC").pack(anchor="w", pady=(16, 4))
         self.quick = ctk.CTkFrame(body, fg_color="transparent")
         self.quick.pack(fill="x")
         self._render_quick()
         self.app.machine_listeners.append(self._render_quick)
         self.buttons(primary=("Save client", self._save),
-                     secondary=("Back", lambda: self.app.go(DeployScreen, tab="Clients")))
+                     secondary=("Back", lambda: go_manage(self.app, "Clients")))
 
     def _machines(self):
         return [ln.strip() for ln in self.pcs.get("1.0", "end").splitlines() if ln.strip()]
@@ -1110,9 +971,9 @@ class ClientEditor(Screen):
         for m in self.app.machines():
             h = hostname(m)
             soft_button(self.quick, f"+ {h}", lambda h=h: self._add(h)).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.quick, text="+  Link another PC", height=34, corner_radius=17, fg_color="transparent",
-                      border_width=2, border_color=P["border"], hover_color=P["card_hover"], text_color=P["accent"],
-                      font=theme.font(12, "bold"), command=self.app.open_connect).pack(side="left")
+        ctk.CTkButton(self.quick, text="+  Link another PC", height=32, corner_radius=8, fg_color="transparent",
+                      border_width=1, border_color=P["border_strong"], hover_color=P["hover"], text_color=P["accent"],
+                      font=theme.font_style("body_strong"), command=self.app.open_connect).pack(side="left")
 
     def _add(self, h):
         if h.lower() in [m.lower() for m in self._machines()]:
@@ -1138,7 +999,7 @@ class ClientEditor(Screen):
         ok, _ = attempt(self.app, "save the client", lambda: self.store.upsert("clients", c))
         if ok:
             self.app.toast(f"Saved {name}")
-            self.app.go(DeployScreen, tab="Clients")
+            go_manage(self.app, "Clients", select=c.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1154,44 +1015,34 @@ class TaskEditor(Screen):
         self.store = open_store(self, body)
         if self.store is None:
             return
-        card = ctk.CTkFrame(body, corner_radius=20, fg_color=P["card"])
-        card.pack(fill="both", expand=True)
-        card.grid_columnconfigure(1, weight=1)
+        card = _form_card(body, expand=True)
         card.grid_rowconfigure((3, 4), weight=1)
-
-        def label(r, text, sticky="w"):
-            ctk.CTkLabel(card, text=text, font=theme.font(13, "bold"), text_color=P["text"], width=110,
-                         anchor="w").grid(row=r, column=0, sticky=sticky, padx=(18, 10), pady=6)
-        label(0, "Name")
-        self.name = ctk.CTkEntry(card, height=34, corner_radius=12, placeholder_text="e.g. Print Spooler running")
-        self.name.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=(18, 6))
-        label(1, "Description")
-        self.desc = ctk.CTkEntry(card, height=34, corner_radius=12, placeholder_text="Optional, one line")
-        self.desc.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=6)
-        label(2, "Language")
-        self.lang = ctk.CTkSegmentedButton(card, values=list(LANGUAGES.values()), selected_color=P["violet"],
-                                           selected_hover_color=P["violet"], font=theme.font(12, "bold"),
-                                           height=30, corner_radius=15)
+        _form_label(card, 0, "Name", top=True)
+        self.name = ctk.CTkEntry(card, height=34, placeholder_text="e.g. Print Spooler running")
+        self.name.grid(row=0, column=1, sticky="ew", padx=(0, 20), pady=(20, 6))
+        _form_label(card, 1, "Description")
+        self.desc = ctk.CTkEntry(card, height=34, placeholder_text="Optional, one line")
+        self.desc.grid(row=1, column=1, sticky="ew", padx=(0, 20), pady=6)
+        _form_label(card, 2, "Language")
+        self.lang = segmented(card, list(LANGUAGES.values()), height=30)
         self.lang.set(LANGUAGES.get(task.language if task else "powershell", LANGUAGES["powershell"]))
-        self.lang.grid(row=2, column=1, sticky="w", padx=(0, 18), pady=6)
-        label(3, "Check", "nw")
-        self.test = ctk.CTkTextbox(card, height=110, corner_radius=12, font=theme.mono(12), border_width=2,
-                                   border_color=P["border"], fg_color=P["bg"])
-        self.test.grid(row=3, column=1, sticky="nsew", padx=(0, 18), pady=6)
-        label(4, "Fix", "nw")
-        self.fix = ctk.CTkTextbox(card, height=110, corner_radius=12, font=theme.mono(12), border_width=2,
-                                  border_color=P["border"], fg_color=P["bg"])
-        self.fix.grid(row=4, column=1, sticky="nsew", padx=(0, 18), pady=6)
+        self.lang.grid(row=2, column=1, sticky="w", padx=(0, 20), pady=6)
+        _form_label(card, 3, "Check", "nw")
+        self.test = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
+        self.test.grid(row=3, column=1, sticky="nsew", padx=(0, 20), pady=6)
+        _form_label(card, 4, "Fix", "nw")
+        self.fix = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
+        self.fix.grid(row=4, column=1, sticky="nsew", padx=(0, 20), pady=6)
         ctk.CTkLabel(card, text="Both scripts run as administrator on the PC. Exit with 0 from Check when "
-                                "everything is fine.", font=theme.font(11), text_color=P["muted"], anchor="w").grid(
-            row=5, column=1, sticky="w", padx=(0, 18), pady=(0, 14))
+                                "everything is fine.", font=theme.font_style("small"), text_color=P["muted"],
+                     anchor="w").grid(row=5, column=1, sticky="w", padx=(0, 20), pady=(0, 16))
         if task:
             self.name.insert(0, task.name)
             self.desc.insert(0, task.description)
             self.test.insert("1.0", task.test)
             self.fix.insert("1.0", task.set)
         self.buttons(primary=("Save task", self._save),
-                     secondary=("Back", lambda: self.app.go(DeployScreen, tab="Tasks")))
+                     secondary=("Back", lambda: go_manage(self.app, "Tasks")))
 
     def _save(self):
         name, test = self.name.get().strip(), self.test.get("1.0", "end-1c").strip()
@@ -1207,25 +1058,48 @@ class TaskEditor(Screen):
         ok, _ = attempt(self.app, "save the task", lambda: self.store.upsert("tasks", t))
         if ok:
             self.app.toast(f"Saved {name}")
-            self.app.go(DeployScreen, tab="Tasks")
+            go_manage(self.app, "Tasks", select=t.id)
 
 
 # ---------------------------------------------------------------------------
 class RunWizard(Screen):
-    """Maintenance: check the chosen PCs (read-only), show the plan, then apply it after a typed confirmation."""
+    """Maintenance: check the chosen PCs (read-only), show the plan, then apply it after a typed confirmation.
+
+    only: limit the run to these deployments. onboard: a client id; the chosen PCs join that client and get its
+    baseline (an onboarding run)."""
     guide_topic = "deploy"
 
-    def __init__(self, master, app):
-        super().__init__(master, app, "Run maintenance", steps=["PCs", "Check", "Apply", "Done"], badge=BADGE)
+    def __init__(self, master, app, only=None, onboard=None):
+        title = "Onboard a new PC" if onboard else "Run maintenance"
+        super().__init__(master, app, title, steps=["PCs", "Check", "Apply", "Done"], badge=BADGE)
         self.chosen = []
-        self.onboarding = tk.BooleanVar(value=False)
+        self.onboarding = tk.BooleanVar(value=bool(onboard))
         self.results = []
         self.store = open_store(self, self.new_body())
+        self.client = self.store.get("clients", onboard) if (self.store is not None and onboard) else None
+        self.base = self.store.baseline_for(onboard) if self.client is not None else None
+        self.only = list(only) if only else ([self.base.id] if self.base is not None else None)
         if self.store is not None:
             self._pcs()
 
+    def _scope_text(self):
+        if self.base is not None:
+            from .manage_common import client_text
+            names = [p.name for p in (self.store.get("packages", i) for i in self.base.items) if p]
+            return (f"The PC joins {client_text(self.app, self.client.name)} and gets its baseline: "
+                    f"{_short(', '.join(names), 120)}.")
+        if self.only:
+            from .manage_screens import dep_title
+            deps = [d for d in (self.store.get("deployments", i) for i in self.only) if d is not None]
+            return "Only this deployment runs: " + "; ".join(dep_title(self.store, d) for d in deps) + "."
+        return ""
+
     def _pcs(self):
-        body = self.step(0, "Run maintenance", "Pick the PCs to bring into line. Nothing changes until you confirm.")
+        if self.base is not None:
+            body = self.step(0, "Onboard a new PC", "Pick the new PC. Nothing changes until you confirm.")
+        else:
+            body = self.step(0, self.title_lbl.cget("text") if self.only else "Run maintenance",
+                             "Pick the PCs to bring into line. Nothing changes until you confirm.")
         self.app.mascot.set_mood("idle", text="Which PCs need a tidy-up?")
         nb = None
 
@@ -1234,25 +1108,49 @@ class RunWizard(Screen):
             n = len(sel)
             nb.configure(state="normal" if n else "disabled",
                          text=f"Check {_plural(n, 'PC')}" if n else "Check now")
-        self.checklist = MachineChecklist(body, self.app, changed)
+        self.checklist = MachineChecklist(body, self.app, changed, single=self.base is not None)
         self.checklist.selected = list(self.chosen)
         self.checklist.render()
         self.checklist.pack(fill="x")
         self.app.machine_listeners.append(self._machines_changed)
-        ctk.CTkSwitch(body, text="Treat these as new PCs (include onboarding-only deployments)",
-                      variable=self.onboarding, progress_color=P["accent"], font=theme.font(12)).pack(
-            anchor="w", pady=(14, 0))
+        if self.base is None:
+            ctk.CTkSwitch(body, text="Treat these as new PCs (include onboarding-only deployments)",
+                          variable=self.onboarding, font=theme.font_style("body")).pack(anchor="w", pady=(14, 0))
+        scope = self._scope_text()
         on = [d for d in self.store.deployments if d.enabled]
-        if on:
+        if scope:
+            self.note(body, scope, "accent").pack(anchor="w", pady=(10, 0))
+        elif on:
             self.note(body, f"{_plural(len(on), 'deployment')} in the library. Each PC gets the ones aimed at it: "
-                            "a single PC beats its client, which beats Every PC.", "violet").pack(anchor="w",
+                            "a single PC beats its client, which beats Every PC.", "accent").pack(anchor="w",
                                                                                                   pady=(10, 0))
         else:
             self.note(body, "There are no deployments switched on yet, so there's nothing to check. Add one on "
-                            "the Deployments tab first.", "warn").pack(anchor="w", pady=(10, 0))
+                            "the Deployments page first.", "warn").pack(anchor="w", pady=(10, 0))
+        back = ("Clients", {"select": self.client.id}) if self.client is not None else ("Sessions", {})
         nb = self.buttons(primary=("Check now", self._check),
-                          secondary=("Back", lambda: self.app.go(DeployScreen, tab="Sessions")))
+                          secondary=("Back", lambda: go_manage(self.app, back[0], **back[1])))
         changed(list(self.chosen))
+
+    def _join_client(self, machines):
+        """Onboarding: put the chosen PCs in the client first, so its baseline applies to them."""
+        if self.client is None:
+            return True
+        hosts = [hostname(m) for m in machines]
+        for h in hosts:
+            other = next((c for c in self.store.clients_of(h) if c.id != self.client.id), None)
+            if other is not None:
+                from .manage_common import client_text
+                self.app.toast(f"{h} is already in {client_text(self.app, other.name)}. A PC can only be in one "
+                               "client.", "warn")
+                return False
+        have = {m.lower() for m in self.client.machines}
+        new = [h for h in hosts if h.lower() not in have]
+        if new:
+            self.client.machines += new
+            ok, _ = attempt(self.app, "add the PC to the client", lambda: self.store.upsert("clients", self.client))
+            return ok
+        return True
 
     def _machines_changed(self):
         if not self.checklist.winfo_exists():
@@ -1261,18 +1159,17 @@ class RunWizard(Screen):
 
     # -- live status under the progress panel --------------------------------
     def _live_list(self, body, machines):
-        ctk.CTkLabel(body, text="PCS", font=theme.font(11, "bold"), text_color=P["muted"]).pack(anchor="w",
-                                                                                              pady=(0, 4))
+        caption(body, "PCs").pack(anchor="w", pady=(0, 4))
         lst = ctk.CTkScrollableFrame(body, fg_color="transparent", height=170)
         lst.pack(fill="both", expand=True)
         self.live = {}
         for m in machines:
-            row = ctk.CTkFrame(lst, corner_radius=14, fg_color=P["card"])
+            row = ctk.CTkFrame(lst, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
             row.pack(fill="x", pady=3, padx=(0, 6))
-            badge(row, "pc", "violet" if m.is_local else "success", 34).pack(side="left", padx=10, pady=8)
-            ctk.CTkLabel(row, text=machine_name(m), font=theme.font(14, "bold"), text_color=P["text"]).pack(
+            badge(row, "pc", "neutral" if m.is_local else "teal", 32).pack(side="left", padx=12, pady=8)
+            ctk.CTkLabel(row, text=machine_name(m), font=theme.font_style("body_strong"), text_color=P["text"]).pack(
                 side="left")
-            st = ctk.CTkLabel(row, text="Waiting", font=theme.font(12, "bold"), text_color=P["muted"])
+            st = ctk.CTkLabel(row, text="Waiting", font=theme.font_style("body_strong"), text_color=P["muted"])
             st.pack(side="right", padx=14)
             self.live[id(m)] = st
 
@@ -1284,7 +1181,8 @@ class RunWizard(Screen):
         self.app.call_soon(apply)
 
     def _job(self, machines, mode):
-        store, onboarding = self.store, bool(self.onboarding.get())
+        store, onboarding, only = self.store, bool(self.onboarding.get()), self.only
+        trigger = "onboarding" if self.base is not None else "manual"
 
         def job(prog):
             out = []
@@ -1292,7 +1190,8 @@ class RunWizard(Screen):
                 prog.check()
                 self._set_live(m, "Checking..." if mode == "detect" else "Working...", "accent")
                 try:
-                    sess = core.run_session(m, store, prog, mode=mode, onboarding=onboarding)
+                    sess = core.run_session(m, store, prog, mode=mode, onboarding=onboarding, only=only,
+                                            trigger=trigger)
                 except Cancelled:
                     self._set_live(m, "Stopped", "warn")
                     raise
@@ -1316,6 +1215,8 @@ class RunWizard(Screen):
     # -- step 2: check -------------------------------------------------------
     def _check(self):
         machines = list(self.chosen)
+        if not self._join_client(machines):
+            return
         body, panel = self.progress("Checking...", f"Looking at {_plural(len(machines), 'PC')}. Nothing is "
                                                    "changed in this step.")
         self._draw_steps(1)
@@ -1342,22 +1243,21 @@ class RunWizard(Screen):
                              "Every checked PC already matches its deployments." if not errors else "")
             self.app.mascot.set_mood("happy" if not errors else "sad", text="All tidy already!" if not errors
                                      else "Some PCs didn't answer.")
-        tree = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("want", "Wanted", 140),
-                                  ("found", "Found", 140), ("plan", "Plan", 150)])
+        table = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("want", "Wanted", 140),
+                                   ("found", "Found", 140), ("plan", "Plan", 150)])
         for m, s in results:
             if s.get("error"):
-                tree.insert("", "end", values=(s["machine"], "Couldn't check", "", "", _short(s["error"], 60)),
-                            tags=("bad",))
+                add_action_row(table, (s["machine"], "Couldn't check", "", "", _short(s["error"], 60)), "bad")
             for a in s.get("actions", []):
-                tree.insert("", "end", values=(s["machine"], a["name"], _wanted(a["desired"]), a["current"],
-                                               ACTION_LABEL.get(a["action"], a["action"])), tags=(_tag(a),))
+                add_action_row(table, (s["machine"], a["name"], _wanted(a["desired"]), a["current"],
+                                       ACTION_LABEL.get(a["action"], a["action"])), _tag(a))
             if not s.get("actions") and not s.get("error"):
-                tree.insert("", "end", values=(s["machine"], "No deployments for this PC", "", "", ""))
-        self.tree = tree
+                add_action_row(table, (s["machine"], "No deployments for this PC", "", "", ""))
+        self.table, self.tree = table, table.tree
         if n:
             self.buttons(primary=("Apply changes", self._confirm), secondary=("Back", self._pcs))
         else:
-            self.buttons(primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")),
+            self.buttons(primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")),
                          secondary=("Check again", self._check))
 
     # -- step 3: confirm -----------------------------------------------------
@@ -1406,9 +1306,9 @@ class RunWizard(Screen):
         if left:
             lines.append(f"Not started: {', '.join(a['name'] for a in left[:6])}"
                          + (" and more" if len(left) > 6 else ""))
-        lines.append("PCs after that one weren't touched. The session is saved on the Sessions tab.")
+        lines.append("PCs after that one weren't touched. The session is saved on the Sessions page.")
         self.cancelled_state("Maintenance stopped", lines, step=3,
-                             primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")))
+                             primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")))
 
     def _done(self, results):
         acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in ("none", "audit")]
@@ -1420,31 +1320,30 @@ class RunWizard(Screen):
         self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "error")
         lines = [f"{len(acts) - len(failed)} of {_plural(len(acts), 'change')} worked and checked out."]
         if failed:
-            lines.append(f"{len(failed)} failed. Select a row on the Sessions tab to see the installer output.")
+            lines.append(f"{len(failed)} failed. Select a row on the Sessions page to see the installer output.")
         if errors:
             lines.append(f"Couldn't reach {_plural(len(errors), 'PC')}.")
         if reboot:
             lines.append("Some installers asked for a restart.")
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          f"Maintenance finished on {_plural(len(results), 'PC')}", lines)
-        tree = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("plan", "Plan", 120),
-                                  ("status", "Status", 110), ("result", "Result", 220)], height=6)
+        table = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("plan", "Plan", 120),
+                                   ("status", "Status", 110), ("result", "Result", 220)], height=6)
         for _m, s in results:
             if s.get("error"):
-                tree.insert("", "end", values=(s["machine"], "Couldn't run", "", "Failed", _short(s["error"], 60)),
-                            tags=("bad",))
+                add_action_row(table, (s["machine"], "Couldn't run", "", "Failed", _short(s["error"], 60)), "bad")
             for a in s.get("actions", []):
-                tree.insert("", "end", values=(s["machine"], a["name"], ACTION_LABEL.get(a["action"], a["action"]),
-                                               STATUS_LABEL.get(a.get("status"), a.get("status", "")),
-                                               _short(a.get("result", ""), 60)), tags=(_tag(a),))
-        self.tree = tree
-        self.buttons(primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")),
+                add_action_row(table, (s["machine"], a["name"], ACTION_LABEL.get(a["action"], a["action"]),
+                                       STATUS_LABEL.get(a.get("status"), a.get("status", "")),
+                                       _short(a.get("result", ""), 60)), _tag(a))
+        self.table, self.tree = table, table.tree
+        self.buttons(primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")),
                      secondary=("Check again", self._check))
 
     def _error(self, e):
         body = self.step(1, "That didn't work", "")
         self.result_card(body, "warn", "danger", "Maintenance stopped", [str(e), "", "Details are in the log file."])
-        self.buttons(primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")))
+        self.buttons(primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")))
 
 
 # ---------------------------------------------------------------------------
@@ -1452,33 +1351,37 @@ class SessionView(Screen):
     guide_topic = "deploy"
 
     def __init__(self, master, app, session):
+        from .manage_common import client_text, host_text
         s = session
         mode = "Check only" if s.get("mode") == "detect" else "Check and fix"
-        super().__init__(master, app, f"Session on {s.get('machine', '?')}",
-                         " · ".join(x for x in (_when(s.get("started")), mode, s.get("client")) if x), badge=BADGE)
+        try:
+            store = app.deploy_store()
+        except Exception:  # noqa: BLE001  only used to hide other clients' PC names while presenting
+            store = None
+        super().__init__(master, app, f"Session on {host_text(app, store, s.get('machine', '?'))}",
+                         " · ".join(x for x in (_when(s.get("started")), mode, client_text(app, s.get("client") or ""))
+                                    if x), badge=BADGE)
         self.s = s
         body = self.new_body()
-        tree = action_tree(body, [("item", "Item", 200), ("want", "Wanted", 140), ("found", "Found", 130),
-                                  ("plan", "Plan", 110), ("status", "Status", 110), ("result", "Result", 200)],
-                           height=7)
+        table = action_tree(body, [("item", "Item", 200), ("want", "Wanted", 140), ("found", "Found", 130),
+                                   ("plan", "Plan", 110), ("status", "Status", 110), ("result", "Result", 200)],
+                            height=7)
         self.rows = {}
         for a in s.get("actions", []):
-            iid = tree.insert("", "end", values=(a.get("name", "?"), _wanted(a.get("desired")), a.get("current", ""),
-                                                 ACTION_LABEL.get(a.get("action"), a.get("action", "")),
-                                                 STATUS_LABEL.get(a.get("status"), a.get("status", "")),
-                                                 _short(a.get("result", ""), 60)), tags=(_tag(a),))
+            iid = add_action_row(table, (a.get("name", "?"), _wanted(a.get("desired")), a.get("current", ""),
+                                         ACTION_LABEL.get(a.get("action"), a.get("action", "")),
+                                         STATUS_LABEL.get(a.get("status"), a.get("status", "")),
+                                         _short(a.get("result", ""), 60)), _tag(a))
             self.rows[iid] = a
         if not self.rows:
-            tree.insert("", "end", values=("No deployments applied to this PC", "", "", "", "", ""))
-        tree.bind("<<TreeviewSelect>>", lambda _e: self._show(tree.selection()))
-        self.tree = tree
-        ctk.CTkLabel(body, text="OUTPUT", font=theme.font(11, "bold"), text_color=P["muted"]).pack(anchor="w",
-                                                                                                 pady=(10, 4))
-        self.out = ctk.CTkTextbox(body, height=150, font=theme.mono(11), fg_color=P["card"], text_color=P["text"],
-                                  corner_radius=14, wrap="none")
+            add_action_row(table, ("No deployments applied to this PC", "", "", "", "", ""))
+        table.tree.bind("<<TreeviewSelect>>", lambda _e: self._show(table.tree.selection()))
+        self.table, self.tree = table, table.tree
+        caption(body, "Output").pack(anchor="w", pady=(12, 4))
+        self.out = ctk.CTkTextbox(body, height=150, font=theme.mono(11), wrap="none")
         self.out.pack(fill="x")
         self._set_out("Select a row to see what ran and what it printed.")
-        self.buttons(primary=("Back to Deploy", lambda: self.app.go(DeployScreen, tab="Sessions")))
+        self.buttons(primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")))
 
     def _set_out(self, text):
         self.out.configure(state="normal")
