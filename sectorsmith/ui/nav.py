@@ -126,6 +126,19 @@ def locate(screen_cls, kw=None):
     return best or (None, None)
 
 
+def selftest() -> list[str]:
+    """Import every screen the rail, sub-nav and palette can open. Returns the failures, empty when all load.
+    The built exe runs this in CI, since screens are imported lazily and a missing one fails silently."""
+    bad = []
+    targets = {it.target for _cat, it in all_items() if not it.target.startswith("app:")}
+    for target in sorted(targets):
+        try:
+            resolve(target)
+        except Exception as e:  # noqa: BLE001  reported, not raised
+            bad.append(f"{target}: {type(e).__name__}: {e}")
+    return bad
+
+
 def resolve(target: str):
     """'module:Class' -> the class (imported lazily to keep start-up fast)."""
     mod, name = target.split(":")

@@ -74,6 +74,7 @@ class MainWindow(*_Base):
                 self.TkdndVersion = TkinterDnD._require(self)
             except Exception:  # noqa: BLE001
                 globals()["_DND"] = False
+        self._install_error_hooks()
         ctk.set_default_color_theme("blue")
         theme.apply_ctk_defaults()
         self.title(APP_NAME)
@@ -515,6 +516,28 @@ class MainWindow(*_Base):
         self.mascot.say(text="Expert tools are open in a new window.")
 
     # ------------------------------------------------------------------ helpers
+    def _install_error_hooks(self):
+        """Uncaught errors from button clicks, the app and background threads go to the log and a toast,
+        instead of vanishing (the windowed exe has no console)."""
+        def tk_error(exc, val, tb):
+            log.error("UI error: %s", "".join(traceback.format_exception(exc, val, tb)))
+            try:
+                self.toast(f"Something went wrong: {val}. Details are in the log.", "danger")
+            except tk.TclError:
+                pass  # window already closing
+        self.report_callback_exception = tk_error
+        prev = sys.excepthook
+
+        def app_error(exc, val, tb):
+            log.error("Unhandled error: %s", "".join(traceback.format_exception(exc, val, tb)))
+            prev(exc, val, tb)
+        sys.excepthook = app_error
+
+        def thread_error(args):
+            log.error("Error in thread %s: %s", getattr(args.thread, "name", "?"),
+                      "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        threading.excepthook = thread_error
+
     def toast(self, text, tone="success"):
         Toast(self, text, tone)
 
