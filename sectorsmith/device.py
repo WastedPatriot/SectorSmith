@@ -672,6 +672,10 @@ class PassThrough:
         """method: "crypto" or "block" (NVMe Sanitize) or "format" (Format NVM with secure erase)."""
         raise NotImplementedError
 
+    def sanitize_status(self) -> dict | None:
+        """{"in_progress": bool, "fraction": float} from the drive, or None when it can't be asked."""
+        return None
+
     def close(self):
         pass
 
@@ -739,6 +743,20 @@ if is_windows():
             # STORAGE_REINITIALIZE_MEDIA: Version, Size, TimeoutInSeconds, SanitizeOption (method in bits 0-3)
             body = struct.pack("<IIII", 16, 16, max(1, int(timeout)), NVME_SANITIZE_METHODS[method] & 0xF)
             _ioctl(self.h, IOCTL_STORAGE_REINITIALIZE_MEDIA, body, outsize=0)
+
+        def sanitize_status(self):
+            # NVMe Sanitize Status log page (0x81) via StorageDeviceProtocolSpecificProperty; ATA has no equivalent
+            query = struct.pack("<II", 50, 0) + struct.pack("<10I", 3, 2, 0x81, 0, 40, 512, 0, 0, 0, 0)
+            try:
+                out = _ioctl(self.h, IOCTL_STORAGE_QUERY_PROPERTY, query + bytes(512), outsize=len(query) + 512)
+            except OSError:
+                return None
+            off, length = struct.unpack_from("<II", out, 8 + 16)
+            data = out[8 + off: 8 + off + min(length, 512)]
+            if len(data) < 4:
+                return None
+            sprog, sstat = struct.unpack_from("<HH", data, 0)
+            return {"in_progress": (sstat & 0x7) == 2, "fraction": sprog / 65536}
 
         def close(self):
             if self.h:

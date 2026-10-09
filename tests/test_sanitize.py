@@ -301,6 +301,39 @@ fake = FakeNVMe(d9.path, works=False)
 r = wipe.erase_disk(d9, NIST_CLEAR, Progress(1), pt=fake)
 check(r["hardware"] and not r["verify_ok"] and r["verify_mismatched_blocks"] == 32,
       "NVMe: a drive that reports success but erased nothing fails verification")
+class DroppedNVMe(FakeNVMe):
+    """Accepts the sanitize, then every read fails (drive dropped off the bus or still busy)."""
+
+    def __init__(self, path, dev, recover_after=None):
+        super().__init__(path)
+        self.dev, self.recover_after, self.polls = dev, recover_after, 0
+
+    def nvme_sanitize(self, method, timeout):
+        super().nvme_sanitize(method, timeout)
+        real = self.dev._read_direct
+
+        def bad_read(off, n):
+            if self.recover_after is not None and self.polls >= self.recover_after:
+                return real(off, n)
+            raise OSError(5, "I/O error (sanitize in progress)")
+        self.dev._read_direct = bad_read
+
+    def sanitize_status(self):
+        self.polls += 1
+        return {"in_progress": self.recover_after is not None and self.polls < self.recover_after, "fraction": 0.5}
+
+
+wipe.REREAD_DELAYS, wipe.SANITIZE_POLL = (0, 0), 0
+d9b = drive("nvme_gone.img", bus="NVMe")
+fake = DroppedNVMe(d9b.path, d9b)
+e = raises(lambda: wipe.erase_disk(d9b, NIST_CLEAR, Progress(1), pt=fake), wipe.HardwareEraseFailed)
+check(e is not None and not e.fallback_ok and "couldn't be read back" in str(e) and fake.polls >= 2,
+      "NVMe: unreadable sampled sectors are not counted as erased, no Purge result")
+d9c = drive("nvme_slow.img", bus="NVMe")
+fake = DroppedNVMe(d9c.path, d9c, recover_after=3)
+r = wipe.erase_disk(d9c, NIST_CLEAR, Progress(1), pt=fake)
+check(r["hardware"] and r["verify_ok"] and "unreadable" not in r["verification"] and fake.polls >= 3,
+      "NVMe: re-read after the drive reports its sanitize finished, then verified")
 d10 = drive("nvme_refuse.img", bus="NVMe")
 fake = FakeNVMe(d10.path, refuse=True)
 r = wipe.erase_disk(d10, NIST_CLEAR, Progress(1), pt=fake)

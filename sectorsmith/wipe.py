@@ -202,6 +202,8 @@ NIST_CLEAR = "Clear"
 ATA_TEMP_PASSWORD = "SectorSmith"  # set just before Secure Erase, which clears it again
 MARKERS = 32  # sectors stamped before a hardware erase and checked after it
 MARK_TAG = b"SECTORSMITH-ERASE-MARK"
+REREAD_DELAYS = (2, 5, 10, 20)  # seconds between re-reads when marked sectors can't be read after the erase
+SANITIZE_POLL = 5  # seconds between sanitize progress checks
 
 FROZEN_ADVICE = ("The drive is frozen: the PC's firmware locked its security commands when it started. Put the PC to "
                  "sleep and wake it again, or unplug the drive and plug it back in while Windows is running (a "
@@ -395,20 +397,50 @@ def _write_markers(dev: Device) -> dict[int, bytes]:
     return marks
 
 
-def _check_markers(dev: Device, marks: dict[int, bytes]) -> tuple[int, str]:
-    """(markers still readable, what the sampled sectors read as now)."""
-    survived = 0
+def _check_markers(dev: Device, marks: dict[int, bytes]) -> tuple[int, int, str]:
+    """(markers still readable, sectors that couldn't be read, what the sampled sectors read as now)."""
+    survived = unreadable = 0
     kinds = set()
     for lba, data in marks.items():
         try:
             got = dev.read(lba * dev.sector_size, dev.sector_size)
         except OSError:
             kinds.add("unreadable")
+            unreadable += 1
             continue
         if got == data or MARK_TAG in got:
             survived += 1
         kinds.add("zeros" if got.count(0) == len(got) else "ones" if got.count(0xFF) == len(got) else "other data")
-    return survived, " and ".join(sorted(kinds))
+    return survived, unreadable, " and ".join(sorted(kinds))
+
+
+def _sanitize_busy(pt) -> bool:
+    """True while the drive reports a sanitize still running (when the pass-through can tell)."""
+    try:
+        st = pt.sanitize_status()
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    return bool(st and st.get("in_progress"))
+
+
+def _verify_after_erase(dev: Device, marks: dict[int, bytes], pt, prog: Progress) -> tuple[int, int, str]:
+    """Read the markers back. Sectors that can't be read are retried after a pause (a sanitize may still be
+    finishing in the background); they never count as erased."""
+    survived, unreadable, now_reads = _check_markers(dev, marks)
+    for delay in REREAD_DELAYS:
+        if not unreadable:
+            break
+        prog.set_label("Checking the erase", f"{unreadable} sampled sector(s) can't be read yet, waiting {delay}s")
+        log.warning("Hardware erase check: %d marker sector(s) unreadable on %s, re-reading in %ss",
+                    unreadable, dev.path, delay)
+        time.sleep(delay)
+        waited = 0
+        while waited < 12 * 3600 and _sanitize_busy(pt):
+            prog.set_label("Checking the erase", "The drive says it is still erasing, waiting for it to finish")
+            time.sleep(SANITIZE_POLL)
+            waited += max(1, SANITIZE_POLL)
+        survived, unreadable, now_reads = _check_markers(dev, marks)
+    return survived, unreadable, now_reads
 
 
 def hardware_erase(dev: Device, plan: HardwarePlan, prog: Progress, pt: _device.PassThrough | None = None) -> dict:
@@ -463,11 +495,18 @@ def hardware_erase(dev: Device, plan: HardwarePlan, prog: Progress, pt: _device.
             raise failure[0]
         prog.update(1000)
         prog.set_label("Checking the erase", "Reading back the marked sectors")
-        survived, now_reads = _check_markers(dev, marks)
+        survived, unreadable, now_reads = _verify_after_erase(dev, marks, pt, prog)
     finally:
         if own and pt is not None:
             pt.close()
         dev.close()
+    if unreadable:
+        log.error("Hardware erase on %s not verified: %d of %d marker sectors unreadable", dev.path, unreadable,
+                  len(marks))
+        raise HardwareEraseFailed(
+            f"{plan.name} was sent, but {unreadable} of {len(marks)} sampled sectors couldn't be read back "
+            "afterwards, so the erase can't be confirmed. The drive may have dropped off, be failing, or still be "
+            "erasing. Unplug and reconnect it, then run the erase again.", fallback_ok=False)
     ok = survived == 0
     verification = (f"{len(marks) - survived} of {len(marks)} sampled sectors no longer hold the marks written "
                     f"before the erase (they now read as {now_reads})")
