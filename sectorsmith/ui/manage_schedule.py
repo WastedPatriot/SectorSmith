@@ -39,6 +39,8 @@ class Scheduler:
         new = [m for m in ms if id(m) not in self.known]
         self.known = {id(m) for m in ms}
         if new:
+            from .manage_inventory import snapshot_on_connect
+            snapshot_on_connect(self.app, [m for m in new if not m.is_local])
             self.check("connect", new)
 
     def _store(self):

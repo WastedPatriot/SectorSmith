@@ -112,6 +112,7 @@ class Deployment:
     tags: list = field(default_factory=list)       # only PCs with at least one of these tags
     filter_script: str = ""                # only PCs where this prints True (run during the check)
     filter_language: str = "powershell"
+    conditions: str = ""                   # only PCs whose inventory matches, e.g. "ram_gb >= 8" (inventory.py)
 
 
 # ---------------------------------------------------------------------------
@@ -681,12 +682,30 @@ def targets(store: Store, d: Deployment, hostname: str) -> bool:
     return d.target_kind == "client" and d.target_value in {c.id for c in store.clients_of(hostname)}
 
 
-def applies_to(store: Store, d: Deployment, hosts: list[str] | None = None) -> list[str]:
-    """The known PCs a deployment's target takes in (before its filter script, which only the PC can answer)."""
+def applies_to(store: Store, d: Deployment, hosts: list[str] | None = None, unknown: list | None = None) -> list[str]:
+    """The known PCs a deployment's target takes in, with its inventory conditions judged from each PC's last
+    snapshot (before its filter script, which only the PC can answer). PCs with conditions but no snapshot go in
+    ``unknown``."""
+    from . import inventory
     hosts = store.known_hosts() if hosts is None else hosts
     if d.target_kind == "machine" and d.target_value and d.target_value.lower() not in {h.lower() for h in hosts}:
         hosts = hosts + [d.target_value]
-    return [h for h in hosts if targets(store, d, h)]
+    out = [h for h in hosts if targets(store, d, h)]
+    if d.conditions.strip():
+        try:
+            conds = inventory.parse_conditions(d.conditions)
+        except ValueError:
+            return []
+        snaps = inventory.all_snapshots(store)
+        keep = []
+        for h in out:
+            ok, _why = inventory.conditions_pass(snaps.get(h.lower()), conds)
+            if ok:
+                keep.append(h)
+            elif ok is None and unknown is not None:
+                unknown.append(h)
+        out = keep
+    return out
 
 
 TRUE_WORDS = ("true", "$true", "1", "yes")
@@ -720,7 +739,8 @@ def applicable(store: Store, hostname: str, onboarding: bool, only=None, check=N
     for d in store.deployments:
         if not d.enabled or (d.onboarding_only and not onboarding):
             continue
-        if targets(store, d, hostname) and (check is None or not d.filter_script.strip() or check(d)):
+        if targets(store, d, hostname) and (check is None or not (d.filter_script.strip() or d.conditions.strip())
+                                            or check(d)):
             res.extend(expand_bundle(d))
     # most specific deployment wins per item: one PC > a client > every PC; narrowed by tags or a filter beats
     # the same target without
@@ -808,13 +828,23 @@ def resolve(desired: str, installed: bool, current: str | None, want: str, allow
 
 
 def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None,
-         filtered: list | None = None) -> list[dict]:
+         filtered: list | None = None, snap: dict | None = None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
     cache: dict = {}
     skipped = []
 
     def check(d):
+        if d.conditions.strip():
+            from . import inventory
+            try:
+                ok, why = inventory.conditions_pass(snap if snap is not None else inventory.load(store, hostname),
+                                                    d.conditions)
+            except ValueError as e:
+                ok, why = False, f"its conditions can't be read: {e}"
+            if not ok:
+                skipped.append({"deployment": d.id, "why": why})
+                return False
         ok, why = filter_passes(ep, d, cache)
         if not ok:
             skipped.append({"deployment": d.id, "why": why})
@@ -1086,8 +1116,10 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
     if before is not None:
         sess["pending_reboot"] = before.get("reasons") or []
     inv = ep.installed_software()
+    from . import inventory
+    snap = inventory.take(ep, store, software=inv, host=host)
     filtered: list = []
-    actions = plan(ep, store, host, inv, onboarding, only, filtered)
+    actions = plan(ep, store, host, inv, onboarding, only, filtered, snap)
     if filtered:
         sess["filtered"] = filtered
     sess["detected"] = [dict(a, entry=None) for a in actions]

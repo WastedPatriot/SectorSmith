@@ -172,7 +172,7 @@ class MigrationStore(core.Store):
         self.base = base
         # only this migration's packages and deployments, not the whole library the base just loaded
         self.data.clear()
-        self.data.update(packages=packages, tasks=[], clients=[], deployments=deployments)
+        self.data.update(packages=packages, tasks=[], clients=[], deployments=deployments, machines=[])
 
     def save(self, kind=None):
         pass

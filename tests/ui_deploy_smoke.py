@@ -394,11 +394,25 @@ scr = app.screen
 iid = next(i for i, h in scr.table.rows.items() if h.lower() == host.lower())
 scr.table.tree.selection_set(iid)
 pump(.3)
+press("Take a snapshot", scr.panel)
+until(lambda: host.lower() in app.screen.snaps)
+scr = app.screen
+assert any("Fake App" in e["name"] for e in scr.snaps[host.lower()]["software"])
 scr.tag_entry.insert(0, "Reception, laptops, Reception")
 press("Save tags", scr.panel)
 assert store().tags_of(host) == ["Reception", "laptops"], store().tags_of(host)
 assert "Reception, laptops" in json.dumps(table_text(app.screen))
-shot("inventory_tags_light")
+scr = app.screen
+scr.search_var.set("fake app")
+pump(.2)
+assert len(scr.table.rows) == 1, "search finds the PC by its installed software"
+scr.search_var.set("no-such-thing-anywhere")
+pump(.2)
+assert not scr.table.rows
+scr.search_var.set("")
+scr.fill(host)
+pump(.3)
+shot("inventory_light")
 app.go(D.DeploymentWizard, item=("software", handy.id))
 pump(.5)
 scr = app.screen
@@ -411,6 +425,13 @@ scr.tags.delete(0, "end")
 scr.tags.insert(0, "Nobody")
 scr._applies()
 assert scr.applies_lbl.cget("text").startswith("Applies to 0 known PCs"), scr.applies_lbl.cget("text")
+scr.tags.delete(0, "end")
+scr.conditions.insert(0, "ram_gb >= 0.1; software contains fake")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 1 known PC"), scr.applies_lbl.cget("text")
+scr.conditions.insert("end", "; colour = red")
+scr._applies()
+assert "isn't something" in scr.applies_lbl.cget("text"), scr.applies_lbl.cget("text")
 shot("deployment_narrow")
 
 # --- the built-in task library: add one, deploy it with its own settings --------------------------------------
