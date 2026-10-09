@@ -1097,5 +1097,57 @@ s_ = core.run_session(WinCodes(), vstore, Progress(1), mode="detect")
 check(s_["actions"][0]["action"] == "none" and "offline" in s_["actions"][0]["result"],
       "source unreachable: said so, and an installed app is left as it is")
 
+# --- 12. Dependencies: installed first, removed after, loops refused ----------------------------------------------
+dstore = Store(os.path.join(W, "lib12"))
+base_ = installer_pkg(dstore, "Dep Base", "1.0")
+mid = installer_pkg(dstore, "Dep Mid", "1.0", prerequisites=[base_.id])
+top = installer_pkg(dstore, "Dep Top", "1.0", prerequisites=[mid.id])
+base_.prerequisites = [top.id]
+try:
+    dstore.upsert("packages", base_)
+    msg = ""
+except ValueError as e:
+    msg = str(e)
+base_.prerequisites = []
+check("loop" in msg and "Dep Base needs Dep Top needs Dep Mid needs Dep Base" in msg
+      and dstore.get("packages", base_.id).prerequisites == [], f"dependency loop refused in plain words: {msg}")
+selfish = Package(name="Selfish")
+selfish.prerequisites = [selfish.id]
+try:
+    dstore.upsert("packages", selfish)
+    refused = False
+except ValueError:
+    refused = True
+check(refused and dstore.get("packages", selfish.id) is None, "a package can't need itself")
+set_inventory()
+d_top = deploy(dstore, top, "installed")
+s_ = core.run_session(WinCodes(), dstore, Progress(1), mode="full")
+names = [a["name"] for a in s_["actions"]]
+check(names == ["Dep Base", "Dep Mid", "Dep Top"] and all(a["status"] == "compliant" for a in s_["actions"])
+      and set(inventory()) == {"Dep Base", "Dep Mid", "Dep Top"},
+      "dependencies installed first, in order (Base, Mid, then Top)")
+other_ = installer_pkg(dstore, "Dep Other", "1.0")
+deploy(dstore, other_, "installed")
+d_gone = deploy(dstore, base_, "uninstalled")
+p_ = core.plan(WinCodes(), dstore, host, LocalEndpoint().installed_software())
+by = {a["name"]: a for a in p_}
+check(by["Dep Base"]["action"] == "audit" and "Dep Top needs it" in by["Dep Base"]["result"],
+      "a package something else still needs is kept, and the plan says why")
+dstore.delete("deployments", d_top.id)
+dstore.delete("deployments", d_gone.id)
+for pk in (top, mid, base_):
+    deploy(dstore, pk, "uninstalled")
+# the fake installers registered their uploaded copies (now gone) as uninstallers; point them back at fakeinst.py
+set_inventory(*(entry(n, "1.0") for n in ("Dep Base", "Dep Mid", "Dep Top")))
+p_ = core.plan(WinCodes(), dstore, host, LocalEndpoint().installed_software())
+check([a["name"] for a in p_][:3] == ["Dep Top", "Dep Mid", "Dep Base"] and p_[3]["name"] == "Dep Other"
+      and all(a["action"] == "uninstall" for a in p_[:3]),
+      "removals run first, each before what it needs (Top, Mid, then Base)")
+s_ = core.run_session(WinCodes(), dstore, Progress(1), mode="full")
+check(set(inventory()) == {"Dep Other"} and s_["summary"]["failed"] == 0, "all three removed")
+dstore.delete("packages", mid.id)
+check(dstore.get("packages", top.id).prerequisites == [] and Store(dstore.root).get("packages", top.id).prerequisites
+      == [], "deleting a package takes it off the lists of packages that needed it")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

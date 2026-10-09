@@ -289,11 +289,26 @@ scr.vs_check.invoke()
 until(lambda: "Newest: 5.1.0" in scr.vs_result.cget("text"))
 assert "SHA256 known" in scr.vs_result.cget("text") and fetched == [
     "https://api.github.com/repos/example/tool/releases/latest"]
+scr.needs_menu.set("Handy tool")
+scr.needs_menu._command("Handy tool")
+pump(.2)
 shot("builder_version_source")
 press("Save package")
 assert scr.title_lbl.cget("text") == "Package saved"
 dyn = next(p for p in store().packages if p.name == "Dynamic tool")
 assert dyn.version_source == {"kind": "github", "repo": "example/tool", "asset": r"x64\.msi$"}, dyn.version_source
+assert dyn.prerequisites == [handy.id]
+# Handy tool needing Dynamic tool would be a loop: refused with a reason, nothing saved
+app.go(D.PackageBuilder, package=handy)
+pump(.5)
+scr = app.screen
+scr.needs_menu._command("Dynamic tool")
+warned = []
+orig_toast = app.toast
+app.toast = lambda t, tone="success": (warned.append(t), orig_toast(t, tone))
+press("Save package")
+app.toast = orig_toast
+assert any("loop" in t for t in warned) and store().get("packages", handy.id).prerequisites == [], warned
 
 # --- the catalogue: curated list, live winget search (fake), cancel, add to library ---------------------------
 MS.CatalogueScreen.runner = fake_winget

@@ -142,6 +142,11 @@ class Store:
         return next((x for x in self.data[kind] if x.id == id_), None)
 
     def upsert(self, kind, obj):
+        if kind == "packages":
+            loop = dependency_loop(self, obj)
+            if loop:
+                raise ValueError("That would make a loop: " + " needs ".join(loop) + ". A package can't end up "
+                                 "needing itself, so remove one of those.")
         lst = self.data[kind]
         for i, x in enumerate(lst):
             if x.id == obj.id:
@@ -156,6 +161,9 @@ class Store:
         self.data[kind] = [x for x in self.data[kind] if x.id != id_]
         if kind == "packages":
             shutil.rmtree(os.path.join(self.root, "files", id_), ignore_errors=True)
+            for p in self.packages:
+                if id_ in p.prerequisites:
+                    p.prerequisites = [x for x in p.prerequisites if x != id_]
             self.data["deployments"] = [d for d in self.deployments if not (d.item_type == "software"
                                                                             and d.item_id == id_)]
             for d in self.deployments:
@@ -447,6 +455,71 @@ def detect(ep, pkg: Package, inv: list[dict]) -> tuple[bool, str | None, dict | 
 
 
 # ---------------------------------------------------------------------------
+def dependency_loop(store: Store, pkg: Package) -> list[str]:
+    """Package names around a dependency loop through pkg (as it would be saved), or [] when there is none."""
+    graph = {p.id: list(p.prerequisites) for p in store.packages}
+    graph[pkg.id] = list(pkg.prerequisites)
+    done: set = set()
+
+    def walk(n, stack):
+        if n in stack:
+            return stack[stack.index(n):] + [n]
+        if n in done:
+            return None
+        for m in graph.get(n, []):
+            r = walk(m, stack + [n])
+            if r:
+                return r
+        done.add(n)
+        return None
+    loop = walk(pkg.id, [])
+    if not loop:
+        return []
+    names = {p.id: p.name for p in store.packages}
+    names[pkg.id] = pkg.name
+    return [names.get(i, "a deleted package") for i in loop]
+
+
+def dependency_order(store: Store) -> dict:
+    """{package id: position} with every package after the ones it needs (loops are cut where found)."""
+    order: dict = {}
+    visiting: set = set()
+
+    def visit(pid):
+        if pid in order or pid in visiting:
+            return
+        visiting.add(pid)
+        p = store.get("packages", pid)
+        for pre in (p.prerequisites if p else []):
+            visit(pre)
+        visiting.discard(pid)
+        order[pid] = len(order)
+    for p in store.packages:
+        visit(p.id)
+    return order
+
+
+def needed_by(store: Store, deps: list) -> dict:
+    """{package id: names of the packages that need it}, over the deployments that keep software on the PC."""
+    out: dict = {}
+
+    def walk(pid, who, seen):
+        p = store.get("packages", pid)
+        for pre in (p.prerequisites if p else []):
+            if pre not in seen:
+                seen.add(pre)
+                out.setdefault(pre, [])
+                if who not in out[pre]:
+                    out[pre].append(who)
+                walk(pre, who, seen)
+    for d in deps:
+        if d.item_type == "software" and d.desired not in ("uninstalled", "ignore"):
+            p = store.get("packages", d.item_id)
+            if p is not None:
+                walk(p.id, p.name, {p.id})
+    return out
+
+
 def expand_bundle(d: Deployment) -> list[Deployment]:
     """A bundle as one software deployment per package (ids '<bundle id>/<package id>'); anything else as is."""
     if d.item_type != "bundle":
@@ -505,7 +578,11 @@ def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list
         order.append(d)
     for d in best.values():
         visit(d)
-    return order
+    # removals go first, each before the packages it needs (they are removed after it)
+    pos = dependency_order(store)
+    gone = [d for d in order if d.item_type == "software" and d.desired == "uninstalled"]
+    gone.sort(key=lambda d: -pos.get(d.item_id, -1))
+    return gone + [d for d in order if d not in gone]
 
 
 def _upload(ep, src: str, pkg: Package, prog: Progress | None) -> str:
@@ -557,7 +634,10 @@ def resolve(desired: str, installed: bool, current: str | None, want: str, allow
 def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
-    for d in applicable(store, hostname, onboarding, only):
+    deps = applicable(store, hostname, onboarding, only)
+    # a package that something staying on the PC needs isn't removed (judged over everything aimed at the PC)
+    needs = needed_by(store, deps if only is None else applicable(store, hostname, onboarding))
+    for d in deps:
         if d.item_type == "software":
             pkg = store.get("packages", d.item_id)
             if pkg is None:
@@ -582,6 +662,8 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
             act = resolve(d.desired, installed, ver, want, d.allow_downgrade)
             if act == "refused":
                 note = f"{ver} is newer than {want}; downgrades are off for this deployment"
+            if act == "uninstall" and needs.get(pkg.id):
+                act, note = "audit", f"kept, because {', '.join(needs[pkg.id][:3])} needs it"
             # the library holds one installer per package, so a pin to any other version can't be installed
             # (winget installs any version it knows)
             have = {vtuple(x) for x in (pkg.version, found and found.get("url") and found["version"]) if x}
