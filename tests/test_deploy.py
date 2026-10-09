@@ -349,7 +349,7 @@ class WinCodes(LocalEndpoint):
 
     def run_command(self, cmd, timeout=3600, cwd=None, env=None):
         r = super().run_command(cmd, timeout, cwd, env)
-        r["code"] = {1603 & 255: 1603, 3010 & 255: 3010}.get(r["code"], r["code"])
+        r["code"] = {1603 & 255: 1603, 3010 & 255: 3010, 1618 & 255: 1618}.get(r["code"], r["code"])
         return r
 
 
@@ -499,6 +499,87 @@ r = ep.run_script("exit 0", language="cmd")
 check(r["code"] == 127 and "Windows" in r["err"], "cmd scripts refused off Windows with a clear message")
 r = ep.run_script("exit 0", language="cobol")
 check(r["code"] == 127 and "Unknown" in r["err"], "unknown script language refused")
+
+# msiexec 1618 (another installation in progress) is waited out and retried
+busy_n = os.path.join(W, "busy_count")
+busy = store.upsert("packages", Package(
+    name="Busy App", kind="script", version="1.0",
+    install=f'"{PY}" -c "import os,sys; p=r\'{busy_n}\'; n=os.path.exists(p); open(p,\'a\').write(\'x\'); '
+            f'sys.exit(0 if n else 1618)" && "{PY}" "{FAKEINST}" add "Busy App" 1.0',
+    detection={"method": "registry", "value": "Busy App"}))
+core.BUSY_WAIT = 0
+r = core.execute(WinCodes(), store, {"type": "software", "item": busy.id, "action": "install", "desired": "installed",
+                                     "deployment": "x", "name": "Busy App"})
+core.BUSY_WAIT = 20
+with open(busy_n) as _f:
+    _tries = _f.read()
+check(r["status"] == "compliant" and r["log"].count("exit 1618") == 1 and _tries == "xx",
+      f"installer exit 1618 (another install running) waited out and retried ({r['status']}, {r.get('result')})")
+
+# installed_software reads the 64-bit registry view, so a 32-bit process still sees 64-bit apps
+import types  # noqa: E402
+
+_UN = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+_REG = {_UN + "\\{A64}": {"DisplayName": "App64", "DisplayVersion": "6.4"},
+        _UN.replace("SOFTWARE", "SOFTWARE\\WOW6432Node") + "\\{B32}": {"DisplayName": "App32",
+                                                                       "DisplayVersion": "3.2"}}
+
+
+class _Key:
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _open(key, sub, reserved=0, access=0x20019):
+    if isinstance(key, _Key):
+        path = f"{key.path}\\{sub}"
+    elif key == "HKU":
+        return _Key("HKU")
+    else:  # what WOW64 does for a 32-bit process: HKLM\SOFTWARE goes to WOW6432Node unless the 64-bit view is asked for
+        path = sub
+        if not access & 0x100 and path.upper().startswith("SOFTWARE\\") \
+                and not path.upper().startswith("SOFTWARE\\WOW6432NODE"):
+            path = "SOFTWARE\\WOW6432Node\\" + path[9:]
+    if not any(k.lower().startswith(path.lower()) for k in _REG):
+        raise OSError(2, "not found")
+    return _Key(path)
+
+
+def _enum(k, i):
+    kids = sorted({x[len(k.path) + 1:].split("\\")[0] for x in _REG if x.lower().startswith(k.path.lower() + "\\")})
+    if i >= len(kids):
+        raise OSError(259, "no more items")
+    return kids[i]
+
+
+def _query(k, name):
+    try:
+        return _REG[k.path][name], 1
+    except KeyError:
+        raise OSError(2, "no value") from None
+
+
+_fake = types.ModuleType("winreg")
+_fake.__dict__.update(HKEY_LOCAL_MACHINE="HKLM", HKEY_USERS="HKU", KEY_READ=0x20019, KEY_WOW64_64KEY=0x100,
+                      OpenKey=_open, EnumKey=_enum, QueryValueEx=_query)
+_saved = sys.platform, sys.modules.get("winreg"), os.environ.pop("SECTORSMITH_FAKE_SOFTWARE")
+sys.modules["winreg"], sys.platform = _fake, "win32"
+try:
+    _got = LocalEndpoint().installed_software()
+finally:
+    sys.platform, os.environ["SECTORSMITH_FAKE_SOFTWARE"] = _saved[0], _saved[2]
+    if _saved[1] is None:
+        sys.modules.pop("winreg", None)
+    else:
+        sys.modules["winreg"] = _saved[1]
+check(sorted((e["name"], e["scope"]) for e in _got) == [("App32", "machine32"), ("App64", "machine")],
+      f"Add/Remove Programs read in the 64-bit view, each app once {[(e['name'], e['scope']) for e in _got]}")
 
 # --- 5. a session on a linked PC -------------------------------------------------------------
 from sectorsmith.link.server import LinkServer  # noqa: E402
