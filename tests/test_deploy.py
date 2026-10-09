@@ -1417,5 +1417,78 @@ check(why.get(f_no.id) == "the filter script said false" and "exit 3" in why.get
 check(runs == 1, "the same filter script runs once per check, not once per deployment")
 check(by["Filter Wide"]["action"] == "uninstall", "a filtered one-PC deployment still beats the wider one when it passes")
 
+# --- 16. Inventory: snapshots, search, conditions and detection from the snapshot -----------------------------------
+from sectorsmith.deploy import inventory as INV  # noqa: E402
+
+facts = LocalEndpoint().inventory()
+check({"os", "build", "model", "serial", "cpu", "ram_gb", "disks", "volumes", "bitlocker", "last_boot"} <= set(facts)
+      and facts["ram_gb"] > 0 and facts["volumes"], "this PC answers inventory with OS, hardware, disks and last boot")
+istore = Store(os.path.join(W, "lib16"))
+FACTS = {"hostname": "FAR-PC", "os": "Windows 11 Pro", "build": "26100", "model": "Latitude 7450",
+         "manufacturer": "Dell Inc.", "serial": "ABC1234", "cpu": "Intel Core Ultra 7", "cores": 12, "ram_gb": 16.0,
+         "disks": [{"name": "NVMe SSD", "size_gb": 476.9, "type": "SCSI"}],
+         "volumes": [{"drive": "C:", "size_gb": 475.0, "free_gb": 120.5}], "bitlocker": "On", "domain": "acme.local",
+         "last_boot": time.time() - 3 * 86400}
+
+
+class InvPC(FarPC):
+    def inventory(self):
+        return dict(FACTS)
+
+
+set_inventory(entry("Inv Present", "1.0"), entry("Old Viewer", "2.0"))
+snap = INV.take(InvPC(), istore)
+check(snap["serial"] == "ABC1234" and [e["name"] for e in snap["software"]] == ["Inv Present", "Old Viewer"]
+      and INV.load(istore, "far-pc")["model"] == "Latitude 7450" and Store(istore.root).machine("FAR-PC").last_seen,
+      "snapshot kept per PC with its software, and the PC marked as seen")
+
+
+class OldAgent(InvPC):
+    def inventory(self):
+        raise AttributeError("inventory")
+
+
+snap2 = INV.take(OldAgent(), istore, host="OLD-PC")
+check(snap2 and snap2["software"] and "serial" not in snap2, "an older agent still gives a software-only snapshot")
+check(dict(INV.summary(snap))["Model"] == "Dell Inc. Latitude 7450" and dict(INV.summary(snap))["Software"] == "2 apps",
+      "snapshot summary for the details panel")
+check(INV.matches(snap, "latitude abc1234") and INV.matches(snap, "old viewer") and not INV.matches(snap, "thinkpad"),
+      "inventory search covers hardware facts and installed software")
+for text, why in (("ram_gb about 8", "isn't a condition"), ("colour = red", "isn't something"),
+                  ("ram_gb >= lots", "is a number"), ("software = Chrome", "contains")):
+    try:
+        INV.parse_conditions(text)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check(why in msg, f"bad condition explained: {msg}")
+P_ = INV.conditions_pass
+check(P_(snap, "ram_gb >= 16; os contains windows 11; software contains present")[0] is True
+      and P_(snap, "ram_gb > 16")[0] is False and P_(snap, "free_gb < 100")[0] is False
+      and P_(snap, "days_since_boot >= 2")[0] is True and P_(snap, "software not contains Old Viewer")[0] is False
+      and P_(snap, "model = latitude 7450")[0] is True and P_(None, "ram_gb >= 1")[0] is None,
+      "conditions judged against the snapshot (numbers, text, software, derived fields; unknown without one)")
+istore.set_tags("NEW-PC", ["x"])
+big = installer_pkg(istore, "Big RAM Tool", "1.0")
+d_big = deploy(istore, big, "installed", conditions="ram_gb >= 32")
+viewer = installer_pkg(istore, "Old Viewer", "3.0")
+deploy(istore, viewer, "latest", conditions="software contains Old Viewer")
+unk = []
+check(core.applies_to(istore, d_big, unknown=unk) == [] and core.applies_to(istore, deploy(
+    istore, viewer, "installed", target_kind="machine", target_value="nobody", conditions="ram_gb >= 8")) == []
+      and unk == ["NEW-PC"], "applies-to judges conditions from snapshots and counts PCs without one apart")
+exp = {r["name"]: r["action"] for r in INV.expected(istore, "FAR-PC")}
+check(exp == {"Old Viewer": "upgrade"}, f"from the snapshot alone: Old Viewer needs an update, Big RAM Tool doesn't "
+                                        f"apply {exp}")
+FACTS["ram_gb"] = 64.0
+s_ = core.run_session(InvPC(), istore, Progress(1), mode="detect")
+by = {a["name"]: a["action"] for a in s_["actions"]}
+check(by == {"Big RAM Tool": "install", "Old Viewer": "upgrade"} and INV.load(istore, "FAR-PC")["ram_gb"] == 64.0,
+      "each session takes a fresh snapshot first and judges conditions by it")
+FACTS["ram_gb"] = 8.0
+s_ = core.run_session(InvPC(), istore, Progress(1), mode="detect")
+check([a["name"] for a in s_["actions"]] == ["Old Viewer"] and "ram_gb >= 32" in s_["filtered"][0]["why"],
+      "a PC that no longer matches is left out, and the session says why")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

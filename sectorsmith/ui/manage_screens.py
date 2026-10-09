@@ -86,7 +86,7 @@ def dep_target(app, store, d):
         text = "Every PC"
     if d.tags:
         text += " tagged " + ", ".join(d.tags)
-    return text + (" (filtered)" if d.filter_script.strip() else "")
+    return text + (" (filtered)" if d.filter_script.strip() or d.conditions.strip() else "")
 
 
 def dep_state(d):
@@ -548,6 +548,8 @@ class DeploymentsScreen(ManagePage):
         sections = []
         if d.item_type == "bundle":
             sections.append(("Packages", "\n".join(dep_items(self.store, d)) or "None left", False))
+        if d.conditions.strip():
+            sections.append(("Only where", d.conditions, True))
         if d.filter_script.strip():
             sections.append(("Filter script", _short(d.filter_script, 300), True))
         task = self.store.get("tasks", d.item_id) if d.item_type == "task" else None
