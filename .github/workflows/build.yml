@@ -78,7 +78,7 @@ jobs:
           $p = Start-Process dist\SectorSmith.exe -ArgumentList "--no-elevate","--selftest","selftest.txt" -Wait -PassThru
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "exe self-test failed" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: SectorSmith-windows
           path: dist/SectorSmith.exe
