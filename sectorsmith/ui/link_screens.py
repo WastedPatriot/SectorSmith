@@ -95,7 +95,7 @@ class EndpointDiskPicker(ctk.CTkScrollableFrame):
                 Pill(top, "USB", "success").pack(side="left", padx=6)
             parts = ", ".join(f"{(p['mount'][0].rstrip(chr(92)) + ' ') if p['mount'] else ''}{p['fs'] or '?'}"
                               for p in d["partitions"][:5])
-            sub = "Protected — boot this PC from the SectorSmith USB to clone onto it" if locked else \
+            sub = "Protected: boot this PC from the SectorSmith USB to clone onto it" if locked else \
                 f"{d['bus']} · {d['scheme']} · {parts or 'no partitions'}"
             ctk.CTkLabel(card, text=sub, font=theme.font(12), text_color=P["warn"] if locked else P["muted"]).grid(
                 row=1, column=1, sticky="w", pady=(0, 8))
@@ -181,7 +181,7 @@ class ConnectScreen(Screen):
         steps.pack(fill="x")
         for i, t in enumerate(["Remote into the other PC, or open your RMM's PowerShell shell on it",
                                "Open PowerShell as administrator",
-                               "Paste the command below and press Enter — the PC appears in a few seconds"], 1):
+                               "Paste the command below and press Enter. The PC appears in a few seconds"], 1):
             row = ctk.CTkFrame(steps, fg_color="transparent")
             row.pack(anchor="w", pady=2)
             ctk.CTkLabel(row, text=str(i), width=26, height=26, corner_radius=13, fg_color=P["accent"],
@@ -207,7 +207,7 @@ class ConnectScreen(Screen):
         self._fill_cmd()
         self.note(self.area, "Encrypted with a one-time certificate and token. Only this exact command can link, and "
                              "the link ends when you close SectorSmith. Windows may ask to allow SectorSmith through "
-                             "the firewall on this PC — choose Allow." if link.exe_path else
+                             "the firewall on this PC: choose Allow." if link.exe_path else
                   "Running from source: copy the SectorSmith folder to the other PC first, then run this command "
                   "there from that folder.").pack(anchor="w", pady=(4, 0))
 
@@ -220,12 +220,12 @@ class ConnectScreen(Screen):
     def _copy(self):
         self.clipboard_clear()
         self.clipboard_append(self.app.link.command(self.ip.get()))
-        self.app.toast("Command copied — paste it on the other PC")
+        self.app.toast("Command copied. Paste it on the other PC.")
         self.app.mascot.say(text="Copied! Now paste it on the other PC.")
 
     def _usb_tab(self):
         self.note(self.area, "Boot the other PC from a SectorSmith USB stick (see the guide). Its screen shows an "
-                             "address and a pairing code — type them here.").pack(anchor="w")
+                             "address and a pairing code. Type them here.").pack(anchor="w")
         row = ctk.CTkFrame(self.area, fg_color="transparent")
         row.pack(anchor="w", pady=10)
         self.u_ip = ctk.CTkEntry(row, width=200, height=40, corner_radius=12, placeholder_text="192.168.1.50",
@@ -260,7 +260,7 @@ class ConnectScreen(Screen):
             w.destroy()
         remote = [m for m in self.app.machines() if not m.is_local]
         if not remote:
-            ctk.CTkLabel(self.list, text="Nothing linked yet — waiting for the other PC…", font=theme.font(13),
+            ctk.CTkLabel(self.list, text="Nothing linked yet. Waiting for the other PC…", font=theme.font(13),
                          text_color=P["muted"]).pack(anchor="w")
             return
         for m in remote:
@@ -786,7 +786,7 @@ class MigrateWizard(Screen):
                  f"{res['skipped_unchanged']:,} already up to date"]
         if res["failed"]:
             lines.append(f"{len(res['failed'])} couldn't be copied.")
-            lines += res.get("hints") or ["Usually files open on the old PC — close apps / sign the user out, "
+            lines += res.get("hints") or ["Usually files open on the old PC. Close apps or sign the user out, "
                                           "then Run again."]
         lines += self._app_lines(res)
         where = self.dst.label if self.dst_kind == "profile" else offline.describe(self.dst_root)
@@ -812,7 +812,7 @@ class MigrateWizard(Screen):
 
 # ---------------------------------------------------------------------------
 class NetCloneWizard(Screen):
-    """Clone one disk to one or many disks — on this PC and/or linked PCs, any OS, full or used-space only."""
+    """Clone one disk to one or many disks, on this PC and/or linked PCs, any OS, full or used-space only."""
     guide_topic = "netclone"
 
     def __init__(self, master, app):
@@ -866,7 +866,7 @@ class NetCloneWizard(Screen):
             n = len(self.targets)
             summary.configure(text=("Selected: " + ", ".join(f"{mm.label} · {dd['name']}"
                                                             for mm, dd in self.targets.values())) if n else
-                              "Nothing selected yet — click disks to select (you can pick several, on any PC).")
+                              "Nothing selected yet. Click disks to select (you can pick several, on any PC).")
             nb.configure(state="normal" if n else "disabled",
                          text=f"Next ({n} disk{'s' if n != 1 else ''})" if n else "Next")
 
@@ -913,15 +913,15 @@ class NetCloneWizard(Screen):
             return
         self.app.mascot.set_mood("warn", "confirm")
         lines = [f"{m.label} · {d['name']} · {d['model'] or 'Disk'} · {human_size(d['size'])}"
-                 + ("  (bigger — extend C: afterwards)" if d["usable"] > need else "")
+                 + ("  (bigger, so extend C: afterwards)" if d["usable"] > need else "")
                  for m, d in self.targets.values()]
         if self.src_disk["is_system"] or any(p["mount"] for p in self.src_disk["partitions"]):
-            lines.append("The source is in use — a snapshot (VSS) is taken first so the copy is consistent.")
+            lines.append("The source is in use, so a snapshot (VSS) is taken first so the copy is consistent.")
         n = len(self.targets)
         self.result_card(body, "clone", "danger",
                          f"{self.src.label} · {self.src_disk['name']}  →  {n} disk{'s' if n != 1 else ''}", lines)
         self.smart = tk.BooleanVar(value=True)
-        ctk.CTkSwitch(body, text="Copy used space only — much faster. Works for NTFS, FAT, exFAT and ext; any other "
+        ctk.CTkSwitch(body, text="Copy used space only, much faster. Works for NTFS, FAT, exFAT and ext; any other "
                                  "filesystem or OS is copied sector by sector.", variable=self.smart,
                       progress_color=P["accent"], font=theme.font(12)).pack(anchor="w", pady=(0, 4))
         only = next(iter(self.targets.values()))[0]
@@ -951,7 +951,7 @@ class NetCloneWizard(Screen):
                 lines.append(f"Copied from a snapshot of {', '.join(res['snapshot'])}")
             for t in res["targets"]:
                 state = "✓ verified" if t["ok"] else f"✗ {t['error'] or str(t['verify_mismatches']) + ' block(s) differ'}"
-                lines.append(f"{t['machine']} · {t['path']}: {state}" + (f" — {t['grown']}" if t.get("grown") else ""))
+                lines.append(f"{t['machine']} · {t['path']}: {state}" + (f" ({t['grown']})" if t.get("grown") else ""))
             self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                              f"{len(res['targets'])} disk(s) cloned from {src.label}", lines)
             self.buttons(primary=("Back to home", self.app.home))

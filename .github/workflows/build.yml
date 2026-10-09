@@ -43,6 +43,8 @@ jobs:
         run: python tests/test_link.py "$RUNNER_TEMP/sstest"
       - name: Run Deploy tests (installer analysis, maintenance sessions, script export)
         run: python tests/test_deploy.py "$RUNNER_TEMP/ssdeploy"
+      - name: Run job history tests (store, filters, CSV export)
+        run: python tests/test_jobs.py "$RUNNER_TEMP/ssjobs"
 
   windows:
     name: Windows integration + build
@@ -60,7 +62,7 @@ jobs:
       - name: Build SectorSmith.exe
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name SectorSmith
-          --icon sectorsmith/ui/assets/icon.ico
+          --icon sectorsmith/ui/assets/mark.ico
           --add-data "sectorsmith/ui/assets;sectorsmith/ui/assets"
           --collect-all customtkinter --collect-all tkinterdnd2 run_sectorsmith.py
       - uses: actions/upload-artifact@v4

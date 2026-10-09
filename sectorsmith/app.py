@@ -29,7 +29,7 @@ class ExpertMixin:
     or as the Advanced tools window of the new UI."""
 
     def _init_expert(self, hosted: bool = False):
-        self.title(f"{APP_NAME} {APP_VERSION} — " + ("Advanced tools" if hosted else "disk toolkit"))
+        self.title(f"{APP_NAME} {APP_VERSION}: " + ("Advanced tools" if hosted else "disk toolkit"))
         self.geometry("1280x820")
         self.minsize(1050, 680)
         style = ttk.Style(self)
@@ -56,7 +56,7 @@ class ExpertMixin:
         self.after(100, self._poll)
         self.refresh_disks()
         if not is_admin():
-            self.status("Not running as administrator — physical disks will be unreadable. "
+            self.status("Not running as administrator, so physical disks will be unreadable. "
                         "Image files still work. Restart as admin for full access.", warn=True)
 
     # ================================================================ layout
@@ -503,7 +503,7 @@ class ExpertMixin:
                 messagebox.showerror("Clone", "Source and target are the same disk.")
                 return
             if tgt.is_system:
-                messagebox.showerror("Clone", "The target is the system disk — blocked.")
+                messagebox.showerror("Clone", "The target is the system disk. Blocked.")
                 return
             size = (count or dev.total_sectors) * dev.sector_size
             if tgt.usable_size < size:
@@ -581,9 +581,9 @@ class ExpertMixin:
         row = ttk.Frame(f)
         row.pack(fill="x")
         self.ps_mode = tk.StringVar(value="quick")
-        ttk.Radiobutton(row, text="Quick (1 MiB-aligned & classic boundaries — minutes)", value="quick",
+        ttk.Radiobutton(row, text="Quick (1 MiB-aligned & classic boundaries, minutes)", value="quick",
                         variable=self.ps_mode).pack(side="left")
-        ttk.Radiobutton(row, text="Full (every sector — slow, finds everything)", value="full",
+        ttk.Radiobutton(row, text="Full (every sector, slow, finds everything)", value="full",
                         variable=self.ps_mode).pack(side="left", padx=10)
         ttk.Button(row, text="Search for lost partitions", command=self.start_partscan).pack(side="right")
         cols = ("start", "end", "size", "fs", "label", "status", "source", "conf")
@@ -733,7 +733,7 @@ class ExpertMixin:
         self.fr_count = ttk.Label(r2, text="")
         self.fr_count.pack(side="left", padx=10)
 
-        bot = ttk.LabelFrame(f, text="2) Deep scan — find files by signature (any filesystem, formatted, RAW)",
+        bot = ttk.LabelFrame(f, text="2) Deep scan: find files by signature (any filesystem, formatted, RAW)",
                              padding=8)
         bot.pack(fill="x", pady=(8, 0))
         g = ttk.Frame(bot)
@@ -804,7 +804,7 @@ class ExpertMixin:
                      tags=("del",) if e.deleted else ())
         t.tag_configure("del", foreground="#b00020")
         total_del = sum(1 for e in self.ntfs_entries if e.deleted and not e.is_dir)
-        self.fr_count.configure(text=f"{shown:,} shown — {total_del:,} deleted files on this volume")
+        self.fr_count.configure(text=f"{shown:,} shown, {total_del:,} deleted files on this volume")
 
     def _sort_ntfs(self, col):
         key = {"name": lambda e: e.name.lower(), "path": lambda e: e.path.lower(), "size": lambda e: -e.size,
@@ -907,7 +907,7 @@ class ExpertMixin:
                     p.mount = letters.get(p.start_lba * d.sector_size, [])
                     m = f" ({', '.join(p.mount)})" if p.mount else ""
                     self.tree.insert(node, "end", iid=f"d{di}p{pi}",
-                                     text=f"#{p.index} {p.label or p.name or p.type_name}{m} — {p.fs or '?'} "
+                                     text=f"#{p.index} {p.label or p.name or p.type_name}{m}: {p.fs or '?'} "
                                           f"{human_size(p.size_bytes(d.sector_size))}")
             except OSError as e:
                 self.tree.insert(node, "end", text=f"(cannot read: {e.strerror or e})")
@@ -973,7 +973,7 @@ class ExpertMixin:
             f"{dev.name}   {dev.model}   {human_size(dev.size)} ({dev.size:,} bytes)\n"
             f"Bus: {dev.bus}   Sector: {dev.sector_size} B   Sectors: {dev.total_sectors:,}   "
             f"Serial: {dev.serial or '-'}   Table: {pt.scheme if pt else '?'}  ID: {pt.disk_guid if pt else ''}"
-            + ("\n⚠ SYSTEM DISK — write operations are blocked." if dev.is_system else "")))
+            + ("\n⚠ SYSTEM DISK: write operations are blocked." if dev.is_system else "")))
         if pt:
             for i, p in enumerate(pt.partitions):
                 self.ptree.insert("", "end", iid=str(i), values=(
@@ -1099,7 +1099,7 @@ class ExpertMixin:
                     self._add_found_row(len(self.found_parts) - 1, item[1])
                 elif kind == "carved":
                     self._carve_n += 1
-                    self.carve_status.configure(text=f"{self._carve_n} files found — {os.path.basename(item[1])}")
+                    self.carve_status.configure(text=f"{self._carve_n} files found: {os.path.basename(item[1])}")
                 elif kind in ("done", "cancelled", "error"):
                     self._finish(item)
         except queue.Empty:
@@ -1109,7 +1109,7 @@ class ExpertMixin:
             s = p.snapshot()
             self.pbar["value"] = s["pct"] * 10
             self.job_label.configure(text=s["label"])
-            spd = f"{human_size(s['speed'])}/s" if s["speed"] else "—"
+            spd = f"{human_size(s['speed'])}/s" if s["speed"] else "-"
             self.stats.configure(text=f"{s['pct']:6.2f}%   {human_size(s['done'])} / {human_size(s['total'])}   "
                                       f"speed {spd}   ETA {human_time(s['eta'])}   elapsed {human_time(s['elapsed'])}"
                                       f"   {s['detail']}")
@@ -1134,10 +1134,10 @@ class ExpertMixin:
                     log.error("on_done failed: %s", traceback.format_exc())
                     messagebox.showerror("Error", str(e))
         elif kind == "cancelled":
-            self.job_label.configure(text=f"{item[1]} — cancelled")
+            self.job_label.configure(text=f"{item[1]}: cancelled")
             self.status("Operation cancelled.")
         else:
-            self.job_label.configure(text=f"{item[1]} — failed")
+            self.job_label.configure(text=f"{item[1]}: failed")
             messagebox.showerror(item[1], f"{type(item[2]).__name__}: {item[2]}\n\nDetails in "
                                           f"{app_dir() / 'sectorsmith.log'}")
 
@@ -1207,6 +1207,11 @@ def main():
         sys.exit(agent_main(sys.argv[1:]))
     if "--no-elevate" not in sys.argv and relaunch_as_admin():
         return
+    try:  # per-monitor DPI awareness has to be set before Tk starts
+        from .ui.theme import enable_dpi_awareness
+        enable_dpi_awareness()
+    except ImportError:
+        pass  # no customtkinter: the classic UI runs at the system scaling
     if "--classic" in sys.argv:
         App().mainloop()
         return

@@ -10,11 +10,15 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+W, SHOTS = sys.argv[1], sys.argv[2]
+# settings, job history and logs go to a fresh folder, so runs don't see each other's jobs
+shutil.rmtree(os.path.join(W, "ui_appdata"), ignore_errors=True)
+os.environ["LOCALAPPDATA"] = os.path.join(W, "ui_appdata")
+
 from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.ui import main as M, screens as S, theme  # noqa: E402
 
-W, SHOTS = sys.argv[1], sys.argv[2]
 os.makedirs(SHOTS, exist_ok=True)
 img = os.path.join(W, "ui.img")
 shutil.copyfile(os.path.join(W, "disk.img"), img)
@@ -456,6 +460,198 @@ app.open_category("jobs")
 pump(0.6)
 assert isinstance(app.screen, WS.JobsScreen)
 shot("jobs")
+
+# --- job history: written to jobs.jsonl as jobs start and end, read back in the next session ---------------
+from sectorsmith import jobs as JB  # noqa: E402
+hist = JB.JobStore().load()
+assert len(hist) == len(app.jobs) and hist[-1]["id"] == app.jobs[-1]["id"], (len(hist), len(app.jobs))
+health = [j for j in hist if j["task"] == "Health check" and j["client"] == "Acme Legal"]
+assert health and health[-1]["result"] == "Done" and health[-1]["ticket"] == "48213", health
+wiped = [j for j in hist if j["title"] == "Wipe" and j["report"]]
+assert wiped and wiped[0]["report"].endswith("cert.html"), "certificate path kept with the wipe job"
+assert {"Done", "Cancelled"} <= {j["result"] for j in hist}
+assert app._load_jobs()[-1]["result"] != "Running"
+# a job cut short in an earlier session shows as Interrupted; Home and the tiles read the same history
+store = JB.JobStore()
+store.start(task="Erase and certify", title="Wipe", client="Bright Dental", ticket="77", technician="sam",
+            machine="This PC", detail="Disk 9", started=time.time() - 3 * 86400)
+app.jobs = app._load_jobs()
+assert any(j["result"] == "Interrupted" and j["client"] == "Bright Dental" for j in app.jobs)
+app.home()
+pump(0.6)
+assert app.screen.tile["Jobs today"].value.cget("text") == str(
+    sum(1 for j in app.jobs if time.strftime("%Y%m%d", time.localtime(j["started"])) == time.strftime("%Y%m%d")))
+
+app.open_category("jobs")
+pump(0.6)
+js = app.screen
+total = len(js.all)
+assert len(js.table.rows) == total and total == len(app.jobs), (len(js.table.rows), total)
+js._set("client", "Acme Legal")
+pump(0.2)
+assert js.table.rows and all(j["client"] == "Acme Legal" for j in js.table.rows.values())
+js._set("client", None)
+js._set("result", "Interrupted")
+assert [j["client"] for j in js.table.rows.values()] == ["Bright Dental"]
+js._set("result", None)
+js.search.set("health 48213")
+pump(0.5)
+assert js.table.rows and all(j["task"] == "Health check" for j in js.table.rows.values()), js.f
+js.search.set("")
+js._set_when("Custom range")
+js.start_v.set("not a date")
+pump(0.5)
+assert len(js.table.rows) == total, "a bad date is ignored, not fatal"
+assert tuple(js.start_e.cget("border_color")) == tuple(theme.PALETTE["danger"])
+day = time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400))
+js.start_v.set(day)
+js.end_v.set(day)
+pump(0.5)
+assert [j["client"] for j in js.table.rows.values()] == ["Bright Dental"], "custom date range"
+js._set_when("Today")
+assert all(j["client"] != "Bright Dental" for j in js.table.rows.values())
+js._clear()
+assert len(js.table.rows) == total
+# the wipe job opens its certificate; export writes the filtered list
+opened = []
+app.open_folder = opened.append
+iid = next(i for i, j in js.table.rows.items() if j.get("report"))
+js.table.tree.selection_set(iid)
+pump(0.2)
+assert js.report_btn.cget("state") == "normal"
+js.report_btn.invoke()
+assert opened and opened[-1].endswith("cert.html"), opened
+answers["save"] = os.path.join(W, "jobs.csv")
+js._set("client", "Acme Legal")
+js._export()
+import csv  # noqa: E402
+with open(answers["save"], encoding="utf-8-sig", newline="") as fh:
+    rows = list(csv.reader(fh))
+assert rows[0][0] == "Started" and len(rows) == 1 + len(js.shown) and all(r[4] == "Acme Legal" for r in rows[1:])
+js._clear()
+# presenting hides other clients in the table, the client menu and the search
+app.context["client"] = "Acme Legal"
+app.set_presentation(True)
+pump(0.4)
+js = app.screen
+assert all(j["client"] in ("Acme Legal", "", "Hidden") for j in js.table.rows.values())
+js.search.set("Bright")
+pump(0.5)
+assert not js.table.rows, "search can't find a hidden client"
+app.set_presentation(False)
+app.context["client"] = None
+app._jobs_filters.update(text="")
+app.go(WS.JobsScreen, animate=False)
+pump(0.4)
+
+# --- keyboard: Tab reaches buttons, cards, rail items, rows and inputs, each with a focus ring ---------------
+for top in [w for w in app.winfo_children() if isinstance(w, M.tk.Toplevel)]:
+    top.destroy()  # the Advanced tools window from earlier would cover the screenshots
+app.focus_force()
+pump(0.3)
+ring = tuple(theme.PALETTE["focus_ring"])
+
+
+def tab_from(w, back=False):
+    nxt = app.tk.call("tk_focusPrev" if back else "tk_focusNext", w)
+    app.tk.call("tk::TabToWindow", nxt)
+    pump(0.15)
+    return app.nametowidget(app.tk.call("focus"))
+
+
+def owner(w):
+    while w is not None and getattr(w, "_ring_saved", "unset") == "unset" and not isinstance(w, (Wd.DataTable,)):
+        w = w.master
+    return w
+
+
+item = app.rail.items["home"]
+item.focus_set()
+pump(0.2)
+assert tuple(item.cget("border_color")) == ring and item.cget("border_width") == 2, "rail item ring"
+seen = set()
+w = item
+for _ in range(60):
+    w = tab_from(w)
+    seen.add(type(owner(w)).__name__ if owner(w) is not None else type(w).__name__)
+assert {"RailItem", "NavRow", "Chip", "CTkButton", "CTkEntry", "DataTable"} <= seen, seen
+assert tuple(item.cget("border_color")) != ring, "ring cleared when focus leaves"
+# Enter presses a focused button; a danger button only answers Space
+hits = []
+b = Wd.secondary_button(app.screen.body, "probe", lambda: hits.append("enter"))
+b.pack()
+d = Wd.danger_button(app.screen.body, "erase probe", lambda: hits.append("danger"))
+d.pack()
+pump(0.2)
+b.focus_set()
+pump(0.1)
+b.event_generate("<Return>")
+d.focus_set()
+pump(0.1)
+assert tuple(d.cget("border_color")) == tuple(theme.PALETTE["focus_ring_fill"]), "filled ring"
+d._text_label.event_generate("<Return>")
+pump(0.1)
+assert hits == ["enter"], hits
+d._text_label.event_generate("<space>")
+pump(0.1)
+assert hits == ["enter", "danger"], hits
+b.destroy()
+d.destroy()
+# the typed confirmation still ignores Enter and keeps its red border
+tc = Wd.TypedConfirm(app.screen.body, "ERASE", lambda ok: hits.append(("typed", ok)))
+tc.pack()
+pump(0.2)
+tc.entry.focus_set()
+pump(0.2)
+assert tuple(tc.entry.cget("border_color")) == tuple(theme.PALETTE["danger"])
+tc.destroy()
+# table: focus rings the table and tints the row the arrow keys are on
+tbl = app.screen.table
+tbl.tree.focus_set()
+pump(0.3)
+assert tuple(tbl.cget("border_color")) == ring and tbl.tree.tag_has("focusrow"), "table focus"
+for mode in ("light", "dark"):
+    theme.set_mode(mode)
+    app.mode.set(mode.capitalize())
+    app.go(WS.JobsScreen, animate=False)
+    pump(0.5)
+    app.screen.table.tree.focus_set()
+    pump(0.3)
+    shot(f"jobs_table_focus_{mode}")
+    app.home()
+    pump(0.8)
+    first = app.screen.start_grid.winfo_children()[1]
+    first.focus_set()
+    pump(0.3)
+    assert first._ring_saved is not None, "quick action ring"
+    shot(f"home_focus_{mode}")
+    app.screen.new_job_btn.focus_set()
+    pump(0.3)
+    shot(f"home_button_focus_{mode}")
+
+# --- reduce motion and interface size ------------------------------------------------------------------------
+st = app.go(ST.SettingsScreen)
+pump(0.4)
+app.set_reduce_motion(True)
+assert theme.reduced_motion() and load_settings()["reduce_motion"] is True
+app.set_personality("Full")
+pump(0.4)
+comp = [w for w in walk(app.subnav) if isinstance(w, Mo.Mascot)]
+if comp:
+    x0 = comp[0].x
+    comp[0].set_mood("working")
+    pump(1.0)
+    assert comp[0].x == x0, "Mossbit stays put with Reduce motion"
+app.set_personality("Subtle")
+app.set_reduce_motion(False)
+assert not theme.reduced_motion()
+app.set_interface_size(115)
+pump(0.6)
+assert load_settings()["ui_size"] == 115 and abs(theme.scaling(app) - 1.15) < 1e-6
+shot("settings_size_115")
+app.set_interface_size(100)
+pump(0.4)
+assert abs(theme.scaling(app) - 1.0) < 1e-6
 
 print("toast errors:", errors)
 print("ALL UI CHECKS PASSED" if not errors else "UI ERRORS")

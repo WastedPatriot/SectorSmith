@@ -97,6 +97,12 @@ class Screen(ctk.CTkFrame):
     def header_action(self, text, command, primary=False, width=0):
         b = (primary_button if primary else secondary_button)(self.actions, text, command, width=width or 140)
         b.pack(side="right", padx=(10, 0))
+        # packed right to left: stack each new one under the last, so Tab goes left to right (never under the
+        # frame's own canvas, which would hide it)
+        last = getattr(self, "_last_action", None)
+        if last is not None and last.winfo_exists():
+            b.lower(last)
+        self._last_action = b
         return b
 
     def _open_guide(self):
@@ -172,15 +178,16 @@ class Screen(ctk.CTkFrame):
 
     def buttons(self, primary=None, secondary=None, extra=None):
         """primary/secondary: (text, command). Returns primary button."""
-        pb = None
-        if primary:
-            pb = primary_button(self.footer, primary[0], primary[1], width=180, height=40)
+        # created left to right, so Tab visits them in the order they appear: extra, secondary, primary
+        xb = secondary_button(self.footer, extra[0], extra[1], width=150, height=40) if extra else None
+        sb = secondary_button(self.footer, secondary[0], secondary[1], width=130, height=40) if secondary else None
+        pb = primary_button(self.footer, primary[0], primary[1], width=180, height=40) if primary else None
+        if pb is not None:
             pb.pack(side="right")
-        if secondary:
-            secondary_button(self.footer, secondary[0], secondary[1], width=130, height=40).pack(side="right",
-                                                                                                   padx=10)
-        if extra:
-            secondary_button(self.footer, extra[0], extra[1], width=150, height=40).pack(side="left")
+        if sb is not None:
+            sb.pack(side="right", padx=10)
+        if xb is not None:
+            xb.pack(side="left")
         return pb
 
     def progress(self, title, subtitle):
@@ -1160,6 +1167,7 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
         if not p:
             return
         cid = wipe_certificate(p, self.certificate_info(), branding())
+        self.app.attach_job_file(p, getattr(self, "record", {}).get("id"))  # Jobs can open it again later
         self.app.toast(f"Certificate {cid} saved. Open it and print to PDF.")
         self.app.open_folder(p)
 
