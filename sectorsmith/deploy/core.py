@@ -19,6 +19,11 @@ WINGET_INSTALL = "winget install --id {winget_id} -e --silent --accept-package-a
 WINGET_UNINSTALL = "winget uninstall --id {winget_id} -e --silent"
 # msiexec 1618: another installation is in progress (often Windows Update), so wait and try again
 BUSY_CODE, BUSY_TRIES, BUSY_WAIT = 1618, 6, 20
+# wanted states of a software deployment, as the UI names them
+STATES = {"latest": "Latest", "version": "Specific version", "installed": "Any version",
+          "uninstalled": "Uninstalled", "ignore": "Ignore"}
+# planned actions that change nothing on the PC
+IDLE = ("none", "audit", "refused")
 
 
 def _id():
@@ -69,7 +74,7 @@ class Client:
 class Deployment:
     item_type: str                         # software | task | bundle (several packages, ids in items)
     item_id: str
-    desired: str = "latest"                # software: installed|latest|version|uninstalled|ignore · task: enforce|audit
+    desired: str = "latest"                # software: see STATES (installed = any version) · task: enforce|audit
     version: str = ""
     target_kind: str = "all"               # all | client | machine
     target_value: str = ""
@@ -82,6 +87,7 @@ class Deployment:
     baseline: bool = False                 # a client's baseline: the packages every new PC for that client gets
     schedule: dict = field(default_factory=dict)   # see schedule.py: kind daily|weekly|connect, time, day, mode
     last_runs: dict = field(default_factory=dict)  # hostname (lower case) -> when its schedule last ran there
+    allow_downgrade: bool = False          # specific version older than the installed one: remove and reinstall
 
 
 # ---------------------------------------------------------------------------
@@ -529,29 +535,44 @@ def _registry_uninstall(entry: dict | None) -> str:
     return cmd
 
 
+def resolve(desired: str, installed: bool, current: str | None, want: str, allow_downgrade=False) -> str:
+    """What a software deployment needs on one PC: install, upgrade, reinstall (an allowed downgrade), refused (a
+    downgrade that isn't allowed), uninstall or none."""
+    if desired == "ignore":
+        return "none"
+    if desired == "uninstalled":
+        return "uninstall" if installed else "none"
+    if not installed:
+        return "install"
+    if desired in ("latest", "version") and want and vtuple(current) < vtuple(want):
+        return "upgrade"
+    if desired == "version" and want and vtuple(current) > vtuple(want):
+        return "reinstall" if allow_downgrade else "refused"
+    return "none"
+
+
 def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
     for d in applicable(store, hostname, onboarding, only):
         if d.item_type == "software":
             pkg = store.get("packages", d.item_id)
-            if pkg is None or d.desired == "ignore":
+            if pkg is None:
+                continue
+            if d.desired == "ignore":
+                # shown so it's clear a wider deployment is switched off here; nothing is checked or changed
+                actions.append({"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
+                                "desired": "ignore", "want": "", "current": "not checked", "action": "none",
+                                "entry": None, "result": "ignored on this PC"})
                 continue
             installed, ver, entry = detect(ep, pkg, inv)
             want = d.version if d.desired == "version" else pkg.version
             note = ""
-            if d.desired == "uninstalled":
-                act = "uninstall" if installed else "none"
-            elif not installed:
-                act = "install"
-            elif d.desired in ("latest", "version") and want and vtuple(ver) < vtuple(want):
-                act = "upgrade"
-            elif d.desired == "version" and want and vtuple(ver) > vtuple(want):
-                act = "reinstall"  # downgrade
-            else:
-                act = "none"
+            act = resolve(d.desired, installed, ver, want, d.allow_downgrade)
+            if act == "refused":
+                note = f"{ver} is newer than {want}; downgrades are off for this deployment"
             # the library holds one installer per package, so a pin to any other version can't be installed
-            if d.desired == "version" and act != "none" and want and pkg.version \
+            if d.desired == "version" and act not in ("none", "refused") and want and pkg.version \
                     and vtuple(pkg.version) != vtuple(want):
                 act, note = "audit", f"the library has {pkg.version}, this deployment pins {want}"
             a = {"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
@@ -563,7 +584,12 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
             actions.append(a)
         else:
             task = store.get("tasks", d.item_id)
-            if task is None or d.desired == "ignore":
+            if task is None:
+                continue
+            if d.desired == "ignore":
+                actions.append({"type": "task", "deployment": d.id, "item": task.id, "name": task.name,
+                                "desired": "ignore", "current": "not checked", "action": "none",
+                                "result": "ignored on this PC"})
                 continue
             r = ep.run_script(script=task.test, language=task.language, params={**task.params, **d.params},
                               timeout=600)
@@ -573,6 +599,13 @@ def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, onl
                             "desired": d.desired, "current": "compliant" if ok else "not compliant",
                             "action": act, "test_output": (r["out"] + r["err"])[-500:]})
     return actions
+
+
+def idle_status(a: dict) -> str:
+    """Status of an action that wasn't run: ignored, compliant, or non-compliant (audit, refused downgrade)."""
+    if a.get("desired") == "ignore":
+        return "ignored"
+    return "compliant" if a["action"] == "none" else "non-compliant"
 
 
 def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
@@ -694,10 +727,9 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
     inv = ep.installed_software()
     actions = plan(ep, store, host, inv, onboarding, only)
     sess["detected"] = [dict(a, entry=None) for a in actions]
-    todo = [a for a in actions if a["action"] not in ("none", "audit")]
+    todo = [a for a in actions if a["action"] not in IDLE]
     if mode == "detect" or not todo:
-        sess["actions"] = [dict(a, status="compliant" if a["action"] == "none" else
-                                ("non-compliant" if a["action"] == "audit" else "pending"), entry=None)
+        sess["actions"] = [dict(a, status=idle_status(a) if a["action"] in IDLE else "pending", entry=None)
                            for a in actions]
     else:
         prog.reset(len(todo), f"Maintaining {host}: {len(todo)} change(s)")
@@ -715,15 +747,13 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
                 done[part["deployment"]] = part
             sess["actions"] = [dict(done.get(a["deployment"]) or
                                     (dict(a, status="cancelled", result="not run: cancelled")
-                                     if a["action"] not in ("none", "audit") else
-                                     dict(a, status="compliant" if a["action"] == "none" else "non-compliant")),
+                                     if a["action"] not in IDLE else dict(a, status=idle_status(a))),
                                     entry=None) for a in actions]
             _finish(store, sess, cancelled=True)
             c.info["session"] = sess
             raise
-        sess["actions"] = [dict(done.get(a["deployment"]) or
-                                dict(a, status="compliant" if a["action"] == "none" else "non-compliant"),
-                                entry=None) for a in actions]
+        sess["actions"] = [dict(done.get(a["deployment"]) or dict(a, status=idle_status(a)), entry=None)
+                           for a in actions]
     return _finish(store, sess)
 
 
@@ -732,7 +762,7 @@ def _finish(store, sess, cancelled=False):
     st = [a["status"] for a in sess["actions"]]
     sess["summary"] = {"compliant": st.count("compliant"), "failed": st.count("failed"),
                        "pending": st.count("pending"), "non_compliant": st.count("non-compliant"),
-                       "cancelled": st.count("cancelled"),
+                       "cancelled": st.count("cancelled"), "ignored": st.count("ignored"),
                        "reboot": any(a.get("reboot") for a in sess["actions"])}
     if cancelled:
         sess["cancelled"] = True
