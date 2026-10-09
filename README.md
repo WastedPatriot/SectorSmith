@@ -27,45 +27,44 @@
 <tr>
 <td width="50%" valign="top">
 
-### Step-by-step wizards
-Every job uses the same pattern: **pick a drive → choose options → confirm → done**. Progress dots show where you are, and a **How this works** button is always one click away.
+### Built around the job
+The menu is grouped by what you're doing: **Recover, Erase, Drives, Machines, Manage, Jobs**. Every wizard follows the same pattern, **pick → choose → confirm → done**, and **Ctrl+K** finds any job, drive or machine from anywhere.
 
 </td>
 <td width="50%" valign="top">
 
-### Meet Mossbit
-<img src="docs/images/mossbit.gif" align="right" width="110">
-
-Mossbit is a hand-shaded pixel sprite that reacts to what's happening. It **sweeps across every progress bar**, celebrates when a job finishes, and looks worried when a drive has errors.
+### Client and ticket on every job
+Pick the client and type the ticket number in the top bar. Every job, report and certificate is stamped with **client, ticket and technician**, and the Jobs page shows what ran, where and for whom.
 
 </td>
 </tr>
 <tr>
 <td valign="top">
 
-### Move users to a new PC
-Paste **one PowerShell command** on the new machine (remote session or RMM shell). Both PCs then appear in one window. You choose the user and what comes across, and the files move over an **encrypted link**. Run it again later and only the changes are copied.
+### Migrate users, with their apps
+Paste **one PowerShell command** on the new PC (remote session or RMM shell), or plug the old disk into a USB caddy. Pick the user and what comes across, and SectorSmith reinstalls their apps before copying files over an **encrypted link**. Run it again later and only changes are copied.
 
 </td>
 <td valign="top">
 
-### Mossbit roams around
-<img src="docs/images/mossbit_roam.gif" width="100%">
-Mossbit strolls around the sidebar, turns to glance back, sweeps while work runs, and hops when a job is done. Click it for a little celebration.
+### Erase and certify
+Uses the drive's own **ATA Secure Erase or NVMe Sanitize** when it can (NIST 800-88 Purge), checks the result, and produces a **branded A4 certificate** with your logo, the drive's serial and a QR code.
 
 </td>
 </tr>
 <tr>
 <td valign="top">
 
-### Built for MSP work
-Wipe certificates with drive model, serial number, method and verification result. ddrescue-style imaging that keeps going through bad sectors. The system disk is protected, and a partition-table backup is saved before any change.
+### Deploy software (preview)
+Drop an installer to build a package with silent switches and detection. Deploy to every PC, one client or one PC, and run maintenance with a **check step before anything changes**.
 
 </td>
 <td valign="top">
 
-### Light, Dark or System
-The appearance follows Windows or your own choice, and it's remembered. Drag and drop works everywhere: drop files to shred them, or drop a `.img` / `.vhd` to open it as a drive.
+### Mossbit, on your terms
+<img src="docs/images/mossbit.gif" align="right" width="90">
+
+The pixel helper sweeps progress bars and reacts to results. Choose **Full, Subtle (default) or Off** in Settings, and press **Ctrl+Shift+P** for Presentation mode when you're sharing your screen with a client.
 
 </td>
 </tr>
@@ -73,7 +72,7 @@ The appearance follows Windows or your own choice, and it's remembered. Drag and
 
 <div align="center">
 <img src="docs/images/sweep.gif" alt="Mossbit sweeping the progress bar" width="80%">
-<br><sub>Mossbit sweeps the progress bar clean while a wipe runs.</sub>
+<br><sub>Mossbit sweeps the progress bar clean while an erase runs.</sub>
 </div>
 
 ---
@@ -90,24 +89,36 @@ The appearance follows Windows or your own choice, and it's remembered. Drag and
 
 <table>
 <tr>
-<td><img src="docs/images/redesign/home_light.png" alt="Home, light"><p align="center"><sub><b>Home</b> · light</sub></p></td>
-<td><img src="docs/images/redesign/home_dark.png" alt="Home, dark"><p align="center"><sub><b>Home</b> · dark</sub></p></td>
+<td><img src="docs/images/home_light.png" alt="Home, light"><p align="center"><sub><b>Home</b>: today's jobs, linked machines, start a job</sub></p></td>
+<td><img src="docs/images/home_dark.png" alt="Home, dark"><p align="center"><sub><b>Home</b> · dark</sub></p></td>
 </tr>
 <tr>
-<td><img src="docs/images/redesign/drives_light.png" alt="Drives"><p align="center"><sub><b>Drives</b>: pick a drive, then the job</sub></p></td>
-<td><img src="docs/images/redesign/palette_light.png" alt="Command palette"><p align="center"><sub><b>Ctrl+K</b> to find any job</sub></p></td>
+<td><img src="docs/images/drives_light.png" alt="Drives"><p align="center"><sub><b>Drives</b>: pick a drive, then the job</sub></p></td>
+<td><img src="docs/images/palette_dark.png" alt="Command palette"><p align="center"><sub><b>Ctrl+K</b> finds any job, drive or machine</sub></p></td>
 </tr>
 <tr>
 <td><img src="docs/images/recover_results.png" alt="Deleted files found"><p align="center"><sub><b>Recover files</b> with original names and folders</sub></p></td>
-<td><img src="docs/images/progress_dark.png" alt="Wipe in progress"><p align="center"><sub><b>Live progress</b>: speed, time left, processed</sub></p></td>
+<td><img src="docs/images/wipe_confirm.png" alt="Erase confirmation"><p align="center"><sub><b>Erase and certify</b>: typed confirmation</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/images/progress_dark.png" alt="Erase in progress"><p align="center"><sub><b>Live progress</b>: speed, time left, processed</sub></p></td>
+<td><img src="docs/images/health_result.png" alt="Health check"><p align="center"><sub><b>Drive health</b> in plain English</sub></p></td>
 </tr>
 <tr>
 <td><img src="docs/images/connect.png" alt="Connect a machine"><p align="center"><sub><b>Connect a machine</b> with one command</sub></p></td>
-<td><img src="docs/images/migrate_what.png" alt="Move a user"><p align="center"><sub><b>Move a user</b>: pick what comes across</sub></p></td>
+<td><img src="docs/images/migrate_what.png" alt="Migrate user"><p align="center"><sub><b>Migrate user</b>: pick what comes across</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/images/machines_dark.png" alt="Machines"><p align="center"><sub><b>Machines</b>: linked PCs, migration and network clone</sub></p></td>
+<td><img src="docs/images/jobs_light.png" alt="Jobs"><p align="center"><sub><b>Jobs</b>: every job with client, ticket and result</sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/images/manage_light.png" alt="Manage"><p align="center"><sub><b>Manage</b>: software library and deployments</sub></p></td>
+<td><img src="docs/images/settings_light.png" alt="Settings"><p align="center"><sub><b>Settings</b>: theme, Mossbit, presentation mode, branding</sub></p></td>
 </tr>
 <tr>
 <td><img src="docs/images/partitions_found.png" alt="Lost partitions found"><p align="center"><sub><b>Lost partitions</b> found and ready to restore</sub></p></td>
-<td><img src="docs/images/health_result.png" alt="Health check"><p align="center"><sub><b>Drive health</b> in plain English</sub></p></td>
+<td><img src="docs/images/shred_drop.png" alt="Shred files"><p align="center"><sub><b>Shred files</b>: drop them in</sub></p></td>
 </tr>
 </table>
 
@@ -176,12 +187,12 @@ Use this when a drive suddenly shows as unallocated, RAW or "needs formatting", 
 <img src="docs/images/partitions_found.png" width="70%">
 
 > [!TIP]
-> Afterwards, Windows may need a rescan: **Disk Management → Action → Rescan Disks**. To undo, restore the saved backup from **Advanced tools → Overview**.
+> Afterwards, Windows may need a rescan: **Disk Management → Action → Rescan Disks**. To undo, restore the saved backup from **Drives → Expert tools → Overview**.
 
 </details>
 
 <details>
-<summary><b>🧽 Wipe a drive</b></summary>
+<summary><b>🧽 Erase and certify a drive</b></summary>
 
 <br>
 
@@ -198,7 +209,7 @@ Securely erase a whole disk or a single partition before it's reused, returned o
    | **Thorough** | DoD 5220.22-M 3-pass + verify | Policy requires multi-pass |
    | *More…* | HMG IS5, DoD 7-pass, Schneier, Gutmann 35, custom pattern | Special requirements |
 
-4. **Type to confirm**, e.g. `WIPE DISK 2`.
+4. **Type to confirm**, e.g. `ERASE DISK 2 A1B2C3` (the last 6 characters of the serial) or `ERASE PARTITION 1`.
 5. **Save the certificate.** A sober A4 page (print it to PDF) with your company name and logo (Settings, Branding), client, ticket, technician, machine, drive model, serial and capacity, method, hardware or software erase, NIST category, verification result, times, a certificate ID and a QR code holding the ID and a SHA-256 of the record.
 
 <img src="docs/images/wipe_strength.png" width="49%"> <img src="docs/images/wipe_confirm.png" width="49%">
@@ -258,9 +269,9 @@ Copying works like ddrescue. A fast pass skips problem areas, then they're retri
 
 Link another PC on the same network (same site or over a VPN) so you can work on both from one window. This is ideal when you're remoted into a new machine.
 
-1. Open **Connect a machine** (on Home, or **+ Connect a machine** in the sidebar). SectorSmith starts a secure listener and shows a one-line PowerShell command.
+1. Open **Machines → Connect a machine** (or **Connect a machine** on Home). SectorSmith starts a secure listener and shows a one-line PowerShell command.
 2. On the other PC, either remote in or use your RMM's PowerShell shell (Datto RMM works). Open PowerShell **as administrator**, paste the command and press **Enter**.
-3. The command downloads SectorSmith **from your PC**, checks its **SHA-256**, and links up. The other PC then appears under **MACHINES** in the sidebar.
+3. The command downloads SectorSmith **from your PC**, checks its **SHA-256**, and links up. The other PC then appears on the **Machines** page and under **Working on** in the side panel.
 
 <img src="docs/images/connect.png" width="70%">
 
@@ -315,7 +326,7 @@ Copy a whole disk, sector by sector, from one PC to another over the network. Em
 </details>
 
 <details>
-<summary><b>🛠 Advanced tools (expert mode)</b></summary>
+<summary><b>🛠 Expert tools</b></summary>
 
 <br>
 
@@ -326,11 +337,11 @@ The classic tabbed interface opens in its own window, with every option exposed:
 
 Run `SectorSmith.exe --classic` to open straight into this view.
 
-<img src="docs/images/advanced.png" width="70%">
+Open it from **Drives → Expert tools**, or with Ctrl+K.
 
 </details>
 
-There's also a **How to use** button in the app's sidebar, with these guides built in.
+These guides are built in too: **Settings → How to use**, or the **?** in the top bar.
 
 <img src="docs/images/guide_dark.png" width="70%">
 
@@ -341,7 +352,7 @@ There's also a **How to use** button in the app's sidebar, with these guides bui
 | | |
 |---|---|
 | 🔒 **System disk protected** | The disk Windows is running from can't be wiped, cloned over, restored over or edited. To wipe it, boot from USB. |
-| ⌨️ **Typed confirmations** | Anything permanent asks you to type a phrase like `WIPE DISK 2`, so a stray click can't destroy data. |
+| ⌨️ **Typed confirmations** | Anything permanent asks you to type a phrase like `ERASE DISK 2 A1B2C3`, so a stray click can't destroy data. |
 | 💾 **Automatic backups** | The partition-table area (first and last 1 MiB of the disk) is saved before any table change. |
 | 🔐 **Safe raw writes** | Volumes on the target disk are locked and dismounted before raw writes, then released. |
 | 📝 **Logs** | Every operation is logged to `%LOCALAPPDATA%\SectorSmith\sectorsmith.log`. |
@@ -351,7 +362,7 @@ There's also a **How to use** button in the app's sidebar, with these guides bui
 ## ❓ FAQ
 
 <details><summary><b>Why can't I see my drives?</b></summary>
-SectorSmith needs administrator rights to open physical disks. Accept the UAC prompt, or right-click → <i>Run as administrator</i>. The sidebar shows <b>● Administrator</b> when it's elevated.
+SectorSmith needs administrator rights to open physical disks. Accept the UAC prompt, or right-click → <i>Run as administrator</i>. The top bar shows <b>Admin</b> when it's elevated.
 </details>
 
 <details><summary><b>Quick scan is greyed out</b></summary>
@@ -359,7 +370,7 @@ Quick scan reads the NTFS file table, so it needs an NTFS partition. Pick one, o
 </details>
 
 <details><summary><b>How many wipe passes do I need?</b></summary>
-For modern hard drives, one verified pass (NIST 800-88 Clear) is the accepted standard. Extra passes add time, not security. For SSDs, see the warning in the Wipe guide.
+For modern hard drives, one verified pass (NIST 800-88 Clear) is the accepted standard. Extra passes add time, not security. For SSDs and NVMe drives, use the drive's own erase (see the Erase guide).
 </details>
 
 <details><summary><b>Can I recover files from a drive that's failing?</b></summary>
