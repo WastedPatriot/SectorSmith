@@ -1198,8 +1198,25 @@ class AdvancedWindow(ExpertMixin, tk.Toplevel):
 from .util import relaunch_as_admin  # noqa: E402,F401  (kept for compatibility)
 
 
+def selftest(out_path: str | None) -> int:
+    """`SectorSmith.exe --selftest out.txt`: check every screen loads, without opening a window."""
+    from .ui import nav
+    bad = nav.selftest()
+    lines = bad or [f"OK: {len({it.target for _c, it in nav.all_items()})} routes load"]
+    text = "\n".join(lines) + "\n"
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    else:
+        print(text, end="")
+    return 1 if bad else 0
+
+
 def main():
     import sys
+    if "--selftest" in sys.argv:
+        i = sys.argv.index("--selftest")
+        sys.exit(selftest(sys.argv[i + 1] if i + 1 < len(sys.argv) else None))
     if "--agent" in sys.argv:
         if "--no-elevate" not in sys.argv and relaunch_as_admin():
             return

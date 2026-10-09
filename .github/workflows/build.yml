@@ -71,7 +71,13 @@ jobs:
           python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name SectorSmith
           --icon sectorsmith/ui/assets/mark.ico
           --add-data "sectorsmith/ui/assets;sectorsmith/ui/assets"
-          --collect-all customtkinter --collect-all tkinterdnd2 run_sectorsmith.py
+          --collect-submodules sectorsmith --collect-all customtkinter --collect-all tkinterdnd2 run_sectorsmith.py
+      - name: Self-test the built exe (every screen must load)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\SectorSmith.exe -ArgumentList "--no-elevate","--selftest","selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "exe self-test failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: SectorSmith-windows
