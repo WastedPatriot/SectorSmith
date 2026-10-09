@@ -1,4 +1,5 @@
-"""Settings: appearance, Mossbit personality, presentation mode, technician name, branding, shortcuts and About."""
+"""Settings: appearance (theme, interface size, reduce motion), Mossbit personality, presentation mode, technician
+name, branding, shortcuts and About."""
 from __future__ import annotations
 
 import os
@@ -28,7 +29,9 @@ SHORTCUTS = [("Ctrl+K or /", "Search or jump to anything"), ("Ctrl+1 to Ctrl+7",
                                                                                   "Machines, Manage, Jobs"),
              ("Ctrl+B", "Show or hide the side panel"), ("Ctrl+Shift+C", "Choose a client"),
              ("Ctrl+Shift+P", "Start or stop presenting"), ("F5", "Refresh the drive list"),
-             ("Esc", "Close a menu or the search")]
+             ("Tab or Shift+Tab", "Move between buttons, cards, lists and fields"),
+             ("Enter or Space", "Press the focused button (Space only on red erase buttons)"),
+             ("Up and Down", "Move through a list or an open menu"), ("Esc", "Close a menu or the search")]
 
 
 class SettingsScreen(Screen):
@@ -53,6 +56,7 @@ class SettingsScreen(Screen):
         seg.set(app.mode.get())
         seg.pack(side="left")
         app.mode.widgets.append(seg)
+        self._display_settings(card.body)
 
         card = Card(col, "Mossbit personality")
         card.pack(fill="x", pady=(0, 16))
@@ -149,6 +153,31 @@ class SettingsScreen(Screen):
         ctk.CTkLabel(t, text=theme.TAGLINE, font=theme.font_style("body"), text_color=P["muted"], anchor="w").pack(
             fill="x")
         secondary_button(row, "How to use", lambda: app.open_guide(), width=120).pack(side="right")
+
+    # -- interface size and reduce motion (Appearance card) ---------------------------------------------------
+    def _display_settings(self, parent):
+        app = self.app
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(row, text="Interface size", font=theme.font_style("body_strong"), text_color=P["text"],
+                     width=140, anchor="w").pack(side="left")
+        sizes = [f"{v}%" for v in theme.UI_SIZES]
+        seg = segmented(row, sizes, command=lambda v: app.set_interface_size(int(v.rstrip("%"))))
+        seg.set(f"{theme.ui_size()}%")
+        seg.pack(side="left")
+        ctk.CTkLabel(row, text="On top of Windows display scaling", font=theme.font_style("small"),
+                     text_color=P["muted"]).pack(side="left", padx=(12, 0))
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(row, text="Motion", font=theme.font_style("body_strong"), text_color=P["text"], width=140,
+                     anchor="w").pack(side="left")
+        var = tk.BooleanVar(value=theme.reduce_motion_setting())
+        ctk.CTkSwitch(row, text="Reduce motion", variable=var, font=theme.font_style("body"),
+                      command=lambda: app.set_reduce_motion(var.get())).pack(side="left")
+        ctk.CTkLabel(parent, text="Screens switch without sliding, progress bars don't animate and Mossbit stays "
+                                  "still. Also on when Windows animations are turned off.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
+                     wraplength=540).pack(fill="x", pady=(8, 0), padx=(140, 0))
 
     def _show_logo(self):
         self.logo_lbl.configure(text=os.path.basename(self.logo) if self.logo else "No logo")

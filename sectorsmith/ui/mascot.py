@@ -89,7 +89,7 @@ class SpeechBubble(ctk.CTkFrame):
     def say(self, text: str):
         if self._job:
             self.after_cancel(self._job)
-        self._full, self._i = text, 0
+        self._full, self._i = text, len(text) if theme.reduced_motion() else 0
         self._type()
 
     def _type(self):
@@ -168,7 +168,7 @@ class Mascot(tk.Canvas, _Pixels):
         if mood != self.mood or mood == "happy":
             self.mood = mood
             self.mood_t = time.monotonic()
-            if mood == "happy":
+            if mood == "happy" and not theme.reduced_motion():
                 self.burst(self.x + self._body_mid(), self.H * .45)
         if self.bubble and (text or line_key):
             self.bubble.say(text or random.choice(LINES.get(line_key, LINES["hello"])))
@@ -199,12 +199,16 @@ class Mascot(tk.Canvas, _Pixels):
             self._draw()
         except tk.TclError:
             return
-        self.after(40, self._tick)
+        self.after(400 if theme.reduced_motion() else 40, self._tick)
 
     def _step(self):
         now = time.monotonic()
         dt = min(.1, now - self.last)
         self.last = now
+        if theme.reduced_motion():  # Reduce motion: Mossbit stays put
+            self.state = "rest"
+            self.state_until = now + 2
+            return
         lo, hi = self._bounds()
         if self.mood == "working":  # sweep back and forth
             self.x += self.facing * 34 * dt
@@ -247,8 +251,13 @@ class Mascot(tk.Canvas, _Pixels):
             anim = "idle"
         if self.mood == "idle" and self.state == "walk":
             anim = "walk"
+        still = theme.reduced_motion()
+        if still and anim in ("walk", "sweep"):
+            anim = "idle"
         frames, fps, _w, _h = Sprites.get(self, anim, self.SCALE, flip=self.facing == -1)
         i = int(mt * fps) % len(frames) if anim != "walk" else int(time.monotonic() * fps) % len(frames)
+        if still:
+            i = 0
         self.delete("all")
         if self.hidden:
             return
@@ -296,15 +305,16 @@ class SweepTrack(tk.Canvas, _Pixels):
             self._draw()
         except tk.TclError:
             return
-        self.after(40, self._tick)
+        self.after(200 if theme.reduced_motion() else 40, self._tick)
 
     def _draw(self):
-        self.value += (self.target - self.value) * .12
+        still = theme.reduced_motion()
+        self.value = self.target if still else self.value + (self.target - self.value) * .12
         self.delete("all")
         if not self.SCALE:
             self._draw_plain()
             return
-        t = time.monotonic() - self.t0
+        t = 0.0 if still else time.monotonic() - self.t0  # Reduce motion: one still frame, no sparkles
         full = self.mode == "Full"
         g = self.SCALE * 2  # bar block size
         x0 = 30
@@ -327,7 +337,7 @@ class SweepTrack(tk.Canvas, _Pixels):
             self.create_rectangle(bx, bar_top, bx + g - 1, bar_top + bar_h, fill=col, outline="")
             self.create_rectangle(bx, bar_top, bx + g - 1, bar_top + g * .5,
                                   fill=theme.lerp_color(col, "#ffffff", .35), outline="")
-        if full:
+        if full and not still:
             sparkle_k = int(t * 14) % max(1, nblocks) if nblocks else -1
             if sparkle_k >= 0:
                 sx = x0 + sparkle_k * g
@@ -394,6 +404,10 @@ class MossbitView(tk.Canvas):
 
     def _tick(self):
         try:
+            if theme.reduced_motion():  # one still frame: the first of a loop, the end pose of a one-shot
+                self.delete("all")
+                self.create_image(0, 0, image=self.frames[0 if self.loop else -1], anchor="nw")
+                return
             i = int((time.monotonic() - self.t0) * self.fps)
             i = i % len(self.frames) if self.loop else min(i, len(self.frames) - 1)
             self.delete("all")

@@ -71,6 +71,148 @@ class AutoScroll(ctk.CTkScrollableFrame):
             pass  # frame destroyed before the check ran
 
 
+# ---------------------------------------------------------------------------- keyboard focus
+RING = 2
+STRONG_FILLS = ("accent", "accent_hover", "danger", "danger_hover", "success", "info", "teal", "warn")
+
+
+def _same(a, b) -> bool:
+    def norm(v):
+        return tuple(str(x).lower() for x in v) if isinstance(v, (list, tuple)) else (str(v).lower(),)
+    return norm(a) == norm(b)
+
+
+def _fill_is(widget, *tones) -> bool:
+    try:
+        fg = widget.cget("fg_color")
+    except (ValueError, tk.TclError, AttributeError):
+        return False
+    return any(_same(fg, P[t]) for t in tones)
+
+
+def _show_ring(widget, on, inner=None):
+    """2 px ring in the widget's own border, so it never needs extra room. The widget's border is put back
+    when focus leaves. Filled buttons get focus_ring_fill, which contrasts with both the fill and the page."""
+    try:
+        if on:
+            if widget._ring_saved is None:
+                widget._ring_saved = (widget.cget("border_width"), widget.cget("border_color"))
+            filled = _fill_is(widget, *STRONG_FILLS) if inner is None else inner
+            widget.configure(border_width=RING, border_color=P["focus_ring_fill" if filled else "focus_ring"])
+        elif widget._ring_saved is not None:
+            bw, bc = widget._ring_saved
+            widget._ring_saved = None
+            widget.configure(border_width=bw, border_color=bc)
+    except (tk.TclError, ValueError, AttributeError):
+        pass  # widget destroyed while focus moved
+
+
+def set_border(widget, color):
+    """Hover and selection borders on a widget that may be showing the focus ring: while it has focus the colour
+    is kept for when focus leaves."""
+    saved = getattr(widget, "_ring_saved", None)
+    if saved is not None:
+        widget._ring_saved = (saved[0], color)
+    else:
+        widget.configure(border_color=color)
+
+
+def focusable(widget, command=None, targets=(), inner=None):
+    """Let Tab reach a CTk control (a button, card, rail item or menu row). A focus ring shows while it has
+    keyboard focus and Enter or Space runs command (or the button's own command). Buttons filled with the danger
+    colour ignore Enter, like the typed confirmation, so a stray Enter never starts something destructive; Space
+    and a click still work."""
+    if getattr(widget, "_ring_saved", "unset") != "unset":
+        return widget
+    widget._ring_saved = None
+    paths = {str(widget)} | {str(t) for t in targets if t is not None}
+
+    def ok(_path=None):
+        try:
+            on = bool(widget.winfo_viewable()) and getattr(widget, "_state", "normal") != "disabled"
+        except tk.TclError:
+            on = False
+        return "1" if on else "0"
+
+    def sync(_e=None):
+        def later():
+            try:
+                cur = widget.tk.call("focus")
+            except tk.TclError:
+                return
+            _show_ring(widget, str(cur) in paths, inner)
+        try:
+            widget.after_idle(later)
+        except tk.TclError:
+            pass
+
+    def activate(e):
+        if e.keysym in ("Return", "KP_Enter") and _fill_is(widget, "danger", "danger_hover"):
+            return "break"
+        if command is not None:
+            command()
+        elif hasattr(widget, "invoke"):
+            widget.invoke()
+        return "break"
+    tk.Frame.configure(widget, takefocus=widget.register(ok))
+    for t in [widget, *targets]:
+        if t is None:
+            continue
+        if t is not widget:
+            try:
+                t.configure(takefocus=0)  # the inner label is part of the same stop
+            except (tk.TclError, ValueError):
+                pass
+        for seq in ("<FocusIn>", "<FocusOut>"):
+            tk.Misc.bind(t, seq, sync, add="+")
+        for seq in ("<Return>", "<KP_Enter>", "<space>"):
+            tk.Misc.bind(t, seq, activate, add="+")
+    return widget
+
+
+def _ring_input(widget, inner_entry):
+    """Inputs: the border turns into the focus ring while the caret is in them."""
+    widget._ring_saved = None
+
+    def sync(_e=None):
+        if getattr(widget, "_no_ring", False):
+            return
+        try:
+            on = str(widget.tk.call("focus")) == str(inner_entry)
+        except tk.TclError:
+            return
+        _show_ring(widget, on, False)
+    for seq in ("<FocusIn>", "<FocusOut>"):
+        tk.Misc.bind(inner_entry, seq, lambda _e: widget.after_idle(sync), add="+")
+
+
+def install_keyboard_support():
+    """Patch CustomTkinter so every button, segmented button, checkbox and switch can be reached with Tab and shows
+    a focus ring, and every entry, combo box and text box rings while it has the caret. Call once before building
+    widgets."""
+    if getattr(ctk.CTkButton, "_smith_keys", False):
+        return
+
+    def patch(cls, after):
+        orig = cls.__init__
+
+        def init(self, *args, **kw):
+            orig(self, *args, **kw)
+            try:
+                after(self)
+            except Exception:  # noqa: BLE001  keyboard support must never stop a widget being built
+                pass
+        cls.__init__ = init
+    patch(ctk.CTkButton, lambda b: focusable(b, targets=[b._text_label, b._image_label]))
+    patch(ctk.CTkCheckBox, lambda b: focusable(b, b.toggle, targets=[b._text_label], inner=False))
+    patch(ctk.CTkSwitch, lambda b: focusable(b, b.toggle, targets=[b._text_label], inner=False))
+    patch(ctk.CTkRadioButton, lambda b: focusable(b, b.invoke, targets=[b._text_label], inner=False))
+    patch(ctk.CTkEntry, lambda w: _ring_input(w, w._entry))
+    patch(ctk.CTkComboBox, lambda w: _ring_input(w, w._entry))
+    patch(ctk.CTkTextbox, lambda w: _ring_input(w, w._textbox))
+    ctk.CTkButton._smith_keys = True
+
+
 # ---------------------------------------------------------------------------- icons
 class Icon(tk.Canvas):
     """A bare outline glyph that follows the theme."""
@@ -189,8 +331,8 @@ STATUS_TONES = {
     "passed": "success", "bad sectors": "warn", "reboot pending": "warn", "waiting in usb mode": "warn",
     "update ready": "warn", "not administrator": "warn", "presenting": "warn", "system": "warn",
     "failed": "danger", "disk failing": "danger", "running": "info", "migrating": "info", "onboarding": "info",
-    "busy": "info", "erasing": "info", "offline": "neutral", "cancelled": "neutral", "read only": "neutral",
-    "this pc": "neutral", "usb": "neutral", "image": "neutral",
+    "busy": "info", "erasing": "info", "offline": "neutral", "cancelled": "neutral", "interrupted": "warn",
+    "read only": "neutral", "this pc": "neutral", "usb": "neutral", "image": "neutral",
 }
 
 
@@ -259,9 +401,10 @@ class StatusTile(ctk.CTkFrame):
         self.sub.pack(fill="x", padx=20, pady=(2, 16))
         if command:
             bind_all(self, "<Button-1>", lambda _e: command())
-            bind_all(self, "<Enter>", lambda _e: self.configure(border_color=P["border_strong"]))
-            bind_all(self, "<Leave>", lambda _e: self.configure(border_color=P["border"]))
+            bind_all(self, "<Enter>", lambda _e: set_border(self, P["border_strong"]))
+            bind_all(self, "<Leave>", lambda _e: set_border(self, P["border"]))
             self.configure(cursor="hand2")
+            focusable(self, command)
 
 
 class QuickAction(ctk.CTkFrame):
@@ -278,6 +421,7 @@ class QuickAction(ctk.CTkFrame):
         bind_all(self, "<Button-1>", lambda _e: self.command())
         bind_all(self, "<Enter>", lambda _e: self._hot(True))
         bind_all(self, "<Leave>", lambda _e: self._hot(False))
+        focusable(self, lambda: self.command())
 
     def _hot(self, on):
         if not on:
@@ -310,9 +454,10 @@ class TaskCard(ctk.CTkFrame):
         bind_all(self, "<Enter>", self._enter)
         bind_all(self, "<Leave>", self._leave)
         bind_all(self, "<Button-1>", lambda _e: self.command())
+        focusable(self, lambda: self.command())
 
     def _enter(self, _e=None):
-        self.configure(border_color=P["accent"])
+        set_border(self, P["accent"])
 
     def _leave(self, e=None):
         x, y = self.winfo_pointerxy()
@@ -321,7 +466,7 @@ class TaskCard(ctk.CTkFrame):
             if w is self:
                 return
             w = w.master
-        self.configure(border_color=P["border"])
+        set_border(self, P["border"])
 
 
 class OptionCard(ctk.CTkFrame):
@@ -348,6 +493,7 @@ class OptionCard(ctk.CTkFrame):
         self.desc.grid(row=1, column=col, sticky="w", padx=(16 if not icon else 0, 16), pady=(2, 14))
         self.grid_columnconfigure(col, weight=1)
         bind_all(self, "<Button-1>", lambda _e: self.select())
+        focusable(self, self.select)
         self.on_select = None
 
     def select(self):
@@ -355,8 +501,8 @@ class OptionCard(ctk.CTkFrame):
             return
         for o in self.group:
             o.selected = o is self
-            o.configure(border_color=P["accent"] if o is self else P["border"],
-                        fg_color=P["selected"] if o is self else P["surface"])
+            set_border(o, P["accent"] if o is self else P["border"])
+            o.configure(fg_color=P["selected"] if o is self else P["surface"])
             if getattr(o, "badge", None):
                 o.badge.set_bg("selected" if o is self else "surface")
         if self.on_select:
@@ -382,19 +528,25 @@ class DataTable(ctk.CTkFrame):
     columns: [(key, title, width, anchor)], anchor optional ('w', 'e', 'center'); the first column stretches."""
 
     def __init__(self, master, columns, height=8, on_open=None, on_select=None, empty=None):
-        super().__init__(master, fg_color="transparent")
+        super().__init__(master, fg_color="transparent", corner_radius=6, border_width=RING, border_color=P["surface"])
         self.columns = columns
         keys = [c[0] for c in columns]
         self.tree = ttk.Treeview(self, columns=keys, show="headings", style="Smith.Treeview", height=height,
                                  selectmode="browse")
+        k = theme.scaling(self)
         for i, col in enumerate(columns):
             key, title, width = col[0], col[1], col[2]
             anchor = col[3] if len(col) > 3 else "w"
             self.tree.heading(key, text=title.upper(), anchor=anchor)
-            self.tree.column(key, width=width, minwidth=40, anchor=anchor, stretch=i == 0)
+            self.tree.column(key, width=round(width * k), minwidth=40, anchor=anchor, stretch=i == 0)
         self.sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview, style="Smith.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=self._scroll)
-        self.tree.pack(side="left", fill="both", expand=True)
+        # the 2 px frame around the tree is the focus ring while the table has keyboard focus
+        self.tree.pack(side="left", fill="both", expand=True, padx=RING, pady=RING)
+        self.tree.bind("<FocusIn>", lambda _e: self._focus(True), add="+")
+        self.tree.bind("<FocusOut>", lambda _e: self._focus(False), add="+")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._focus_row(), add="+")
+        self.tree.bind("<KeyRelease>", lambda _e: self._focus_row(), add="+")
         self.rows: dict = {}
         self._hover = None
         self._empty_spec = empty
@@ -416,8 +568,32 @@ class DataTable(ctk.CTkFrame):
         elif not self.sb.winfo_ismapped():
             self.sb.pack(side="right", fill="y", padx=(0, 2), before=self.tree)
 
+    def _focus(self, on):
+        try:
+            self.configure(border_color=P["focus_ring"] if on else P["surface"])
+            if on and not self.tree.focus() and self.tree.get_children():
+                self.tree.focus(self.tree.get_children()[0])
+            self._focus_row()
+        except tk.TclError:
+            pass  # table destroyed while focus moved
+
+    def _focus_row(self):
+        """The row the arrow keys are on gets a tint while the table has focus (ttk draws no focus mark)."""
+        try:
+            has = str(self.tree.tk.call("focus")) == str(self.tree)
+            cur = self.tree.focus()
+            for iid in self.tree.tag_has("focusrow"):
+                if iid != cur or not has:
+                    self.tree.item(iid, tags=[t for t in self.tree.item(iid, "tags") if t != "focusrow"])
+            if has and cur and "focusrow" not in self.tree.item(cur, "tags"):
+                self.tree.item(cur, tags=list(self.tree.item(cur, "tags")) + ["focusrow"])
+                self.tree.see(cur)
+        except tk.TclError:
+            pass
+
     def _tags(self):
         self.tree.tag_configure("hover", background=theme.c("hover"))
+        self.tree.tag_configure("focusrow", background=theme.lerp_color(theme.c("surface"), theme.c("focus_ring"), .16))
         for tone in ("success", "warn", "danger", "info", "muted"):
             self.tree.tag_configure(tone, foreground=theme.c(tone))
 
@@ -599,6 +775,11 @@ class Popover(ctk.CTkFrame):
         super().__init__(root, corner_radius=12, fg_color=P["raised"], border_width=1,
                          border_color=P["border_strong"], width=width)
         self.root, self.anchor = root, anchor
+        self.rows = []
+        try:  # opened from the keyboard: focus goes into the menu, and back to the anchor when it closes
+            self.keyboard = str(root.tk.call("focus")) in {str(anchor)} | {str(w) for w in anchor.winfo_children()}
+        except tk.TclError:
+            self.keyboard = False
         self.shadow = Shadow(root)
         if build:
             build(self)
@@ -626,6 +807,12 @@ class Popover(ctk.CTkFrame):
         place_sized(self, x, y, width)
         self.lift()
         root._smith_overlays.append(self)
+        if self.keyboard and self.rows:
+            self.rows[0].focus_set()
+            for i, r in enumerate(self.rows):
+                for key, step in (("<Down>", 1), ("<Up>", -1)):
+                    tk.Misc.bind(r, key, lambda _e, j=i + step: self.rows[j % len(self.rows)].focus_set() or "break",
+                                 add="+")
 
     def row(self, label, cmd, icon=None, hint=None, enabled=True):
         b = ctk.CTkFrame(self, fg_color="transparent", corner_radius=8, height=34)
@@ -653,6 +840,8 @@ class Popover(ctk.CTkFrame):
         bind_all(b, "<Enter>", lambda _e: hot(True))
         bind_all(b, "<Leave>", lambda _e: hot(False))
         bind_all(b, "<Button-1>", fire)
+        focusable(b, fire)
+        self.rows.append(b)
         return b
 
     def close(self):
@@ -662,6 +851,11 @@ class Popover(ctk.CTkFrame):
             pass  # already closed, or the root never had overlays
         self.shadow.destroy()
         self.destroy()
+        if self.keyboard:
+            try:
+                self.anchor.focus_set()
+            except (tk.TclError, AttributeError):
+                pass  # anchor gone with the screen
 
 
 class Toast(ctk.CTkFrame):
@@ -795,9 +989,11 @@ class DrivePicker(AutoScroll):
 
         def click(_e=None):
             for c2, b2, _t in self.rows:
-                c2.configure(border_color=P["border"], fg_color=P["surface"])
+                set_border(c2, P["border"])
+                c2.configure(fg_color=P["surface"])
                 b2.set_bg("surface")
-            card.configure(border_color=P["accent"], fg_color=P["selected"])
+            set_border(card, P["accent"])
+            card.configure(fg_color=P["selected"])
             badge.set_bg("selected")
             self.selected = target
             if self.on_select:
@@ -805,13 +1001,14 @@ class DrivePicker(AutoScroll):
 
         def enter(_e=None):
             if self.selected is not target:
-                card.configure(border_color=P["border_strong"])
+                set_border(card, P["border_strong"])
 
         def leave(_e=None):
             if self.selected is not target:
-                card.configure(border_color=P["border"])
+                set_border(card, P["border"])
         card.click = click
         bind_all(card, "<Button-1>", click)
+        focusable(card, click)
         card.bind("<Enter>", enter)
         card.bind("<Leave>", leave)
 
@@ -910,6 +1107,7 @@ class TypedConfirm(ctk.CTkFrame):
         self.entry = ctk.CTkEntry(self, textvariable=self.var, height=42, corner_radius=8, font=theme.mono(14),
                                   border_width=2, border_color=P["danger"], fg_color=P["surface"],
                                   text_color=P["text"])
+        self.entry._no_ring = True  # keeps its red border; focus is plain from the caret
         self.entry.pack(fill="x", padx=22, pady=(0, 4))
         self.left = ctk.CTkLabel(self, text="", font=theme.font_style("small"), text_color=P["danger"], anchor="w")
         self.left.pack(anchor="w", padx=22, pady=(0, 14))

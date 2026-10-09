@@ -4,7 +4,7 @@ cd /d "%~dp0"
 set PY=py -3
 where py >nul 2>nul || set PY=python
 %PY% -m pip install --upgrade pyinstaller -r requirements.txt || goto :fail
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name SectorSmith --icon sectorsmith\ui\assets\icon.ico --add-data "sectorsmith\ui\assets;sectorsmith\ui\assets" --collect-all customtkinter --collect-all tkinterdnd2 run_sectorsmith.py || goto :fail
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name SectorSmith --icon sectorsmith\ui\assets\mark.ico --add-data "sectorsmith\ui\assets;sectorsmith\ui\assets" --collect-all customtkinter --collect-all tkinterdnd2 run_sectorsmith.py || goto :fail
 echo.
 echo Done! Your app is here:
 echo   %~dp0dist\SectorSmith.exe

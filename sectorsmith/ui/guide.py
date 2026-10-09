@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import customtkinter as ctk
 
@@ -22,7 +23,7 @@ GUIDES = {
             ("Choose a drive", "Drives are listed with their letters, labels, sizes and free space. The disk "
                                "Windows runs from is marked SYSTEM and protected."),
             ("Follow the steps", "The coloured dots at the top right show where you are. Mossbit sweeps the "
-                                 "progress bar while work happens — Cancel is always available."),
+                                 "progress bar while work happens. Cancel is always available."),
         ],
         "tips": ["Drop a .img or .vhd file onto the window to work on a disk image like a real drive.",
                  "Switch Light / Dark / System in the bottom-left. Your choice is remembered.",
@@ -34,12 +35,12 @@ GUIDES = {
                  "formatted.",
         "steps": [
             ("Stop using the drive", "Every new file written can overwrite what you want back. Don't install "
-                                     "anything onto it — run SectorSmith from another drive or USB stick."),
+                                     "anything onto it. Run SectorSmith from another drive or USB stick."),
             ("Pick the partition", "Choose the drive letter the files were on (for example D:). For a drive "
                                    "that shows as RAW or empty, pick the whole disk."),
             ("Choose Quick or Deep", "Quick scan reads the NTFS file table: original names, folders and dates, "
                                      "usually in seconds. Deep scan finds files by their content on any drive "
-                                     "(photos, documents, video, archives) — names aren't kept."),
+                                     "(photos, documents, video, archives), but names aren't kept."),
             ("Select and recover", "Filter by type or search by name, tick the rows you need, press Recover, "
                                    "and save them to a different drive."),
         ],
@@ -110,7 +111,7 @@ GUIDES = {
             ("Pick a drive or partition", "Testing a partition is quicker when you only care about one area."),
             ("Watch the map", "Each square is a slice of the drive: green is fast, yellow and orange are slow, "
                               "red is unreadable."),
-            ("Read the verdict", "Healthy, slow in places, or bad sectors found — with what to do next."),
+            ("Read the verdict", "Healthy, slow in places, or bad sectors found, with what to do next."),
         ],
         "tips": ["Bad sectors? Back the drive up straight away with Image and clone, then replace it.",
                  "'Try repairing' rewrites unreadable sectors so the drive swaps them for spares. Whatever was "
@@ -118,7 +119,7 @@ GUIDES = {
     },
     "clone": {
         "title": "Image and clone", "icon": "clone", "tone": "violet", "task": "CloneWizard",
-        "intro": "Make an exact sector-by-sector copy of a drive or partition — into a file, or onto another "
+        "intro": "Make an exact sector-by-sector copy of a drive or partition, into a file or onto another "
                  "drive.",
         "steps": [
             ("Pick the source", "A whole drive, or a single partition."),
@@ -132,7 +133,7 @@ GUIDES = {
     },
     "upgrade": {
         "title": "Upgrade to a new SSD / NVMe", "icon": "clone", "tone": "success", "task": "CloneWizard",
-        "intro": "Move a whole PC onto a new, bigger drive using a USB enclosure or adapter — no reinstall.",
+        "intro": "Move a whole PC onto a new, bigger drive using a USB enclosure or adapter. No reinstall.",
         "steps": [
             ("Plug in the new drive", "Put the new SSD/NVMe in a USB enclosure and plug it into the PC (or into a "
                                       "linked PC). It shows up marked USB."),
@@ -152,7 +153,7 @@ GUIDES = {
     },
     "connect": {
         "title": "Connect a machine", "icon": "link", "tone": "accent", "task": "ConnectScreen",
-        "intro": "Link another PC on the same network so you can work on both from one window — perfect when "
+        "intro": "Link another PC on the same network so you can work on both from one window. Perfect when "
                  "you're remoted into a new machine.",
         "steps": [
             ("Open Connect a machine", "SectorSmith starts a secure listener on this PC and shows a one-line "
@@ -171,7 +172,7 @@ GUIDES = {
     },
     "migrate": {
         "title": "Migrate user", "icon": "migrate", "tone": "success", "task": "MigrateWizard",
-        "intro": "Copy a user's folders and app data from their old PC to their new one — no USB drives, no "
+        "intro": "Copy a user's folders and app data from their old PC to their new one. No USB drives, no "
                  "reboots.",
         "steps": [
             ("Link the new PC", "Use Connect a machine. Ideally run SectorSmith on the old PC and link the new "
@@ -186,14 +187,14 @@ GUIDES = {
                                          "are shown before you start."),
             ("Bring the apps", "The old PC's apps are listed. Ones in your Deploy library or on winget install "
                                "silently on the new PC; the rest are listed for you to install."),
-            ("Run it — then run it again", "The first run copies everything. Later runs copy only new or changed "
+            ("Run it, then run it again", "The first run copies everything. Later runs copy only new or changed "
                                            "files, so you can pre-stage the day before and do a quick final sync."),
         ],
-        "tips": ["Close the user's apps (or sign them out) on the old PC for a clean copy — open files are listed "
+        "tips": ["Close the user's apps (or sign them out) on the old PC for a clean copy. Open files are listed "
                  "in the report so you can re-run.",
                  "Chrome/Edge saved passwords are locked to the old PC by Windows. Export them first (or rely on "
                  "browser sync).",
-                 "OneDrive folders are off by default — they re-sync on their own when the user signs in.",
+                 "OneDrive folders are off by default; they re-sync on their own when the user signs in.",
                  "A report of every run is saved in %LOCALAPPDATA%\\SectorSmith\\reports.",
                  "Cancel is safe: what was copied stays, and Run again carries on from there.",
                  ("A disk with no drive letter? 'Drives without a letter' reads its NTFS partition directly "
@@ -212,7 +213,7 @@ GUIDES = {
             ("Confirm and clone", "Empty areas are skipped on the wire, data is compressed, and every block is "
                                   "verified with SHA-256 on both ends."),
         ],
-        "tips": ["For data disks (not the Windows disk) both PCs can stay running — just link with the command.",
+        "tips": ["For data disks (not the Windows disk) both PCs can stay running. Just link with the command.",
                  "Cloning Windows onto different hardware can need driver updates on first boot. For a new PC, "
                  "Migrate user is usually the better choice.",
                  "Make the USB stick with tools/make_usb.ps1 (needs the free Windows ADK + WinPE add-on)."],
@@ -244,7 +245,7 @@ GUIDES = {
     },
     "advanced": {
         "title": "Expert tools", "icon": "advanced", "tone": "violet",
-        "intro": "The classic tabbed interface for experienced technicians — opens in its own window.",
+        "intro": "The classic tabbed interface for experienced technicians. It opens in its own window.",
         "steps": [
             ("Sector editor", "View any sector in hex, decode values in the data inspector, search the disk, and "
                               "edit bytes (typed confirmation required)."),
@@ -262,7 +263,9 @@ ORDER = ["start", "recover", "partition", "wipe", "shred", "health", "clone", "u
 # ---------------------------------------------------------------------------
 def load_settings() -> dict:
     try:
-        return json.load(open(app_dir() / "settings.json"))
+        with open(app_dir() / "settings.json", encoding="utf-8") as fh:
+            s = json.load(fh)
+        return s if isinstance(s, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -270,8 +273,12 @@ def load_settings() -> dict:
 def save_settings(**kw):
     s = load_settings()
     s.update(kw)
-    try:
-        json.dump(s, open(app_dir() / "settings.json", "w"), indent=1)
+    path = app_dir() / "settings.json"
+    tmp = path.with_name("settings.json.tmp")
+    try:  # write a temp file and rename it over, so a crash mid-save can't leave half a file
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(s, fh, indent=1)
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -351,7 +358,7 @@ class GuideScreen(Screen):
 
 WELCOME = [
     ("happy", "Meet Mossbit", "Hi! I'm Mossbit. I'll help you recover files, wipe drives, check drive health and "
-                              "more — one simple step at a time."),
+                              "more, one simple step at a time."),
     ("sweep", "Pick a task, follow the steps", "Choose a job on the Home screen, pick a drive, and follow the "
                                                "steps. I'll sweep the progress bar while I work."),
     ("warn", "Safe by design", "The Windows system disk is protected, anything permanent asks you to type a "
@@ -387,7 +394,8 @@ class WelcomeScreen(Screen):
                 cv.delete("all")
                 cv.create_image(0, 0, anchor="nw", image=frames[start[0] % len(frames)])
                 start[0] += 1
-                cv.after(int(1000 / fps), anim)
+                if not theme.reduced_motion():
+                    cv.after(int(1000 / fps), anim)
             except Exception:  # noqa: BLE001
                 pass
         anim()

@@ -9,8 +9,8 @@ import tkinter as tk
 import customtkinter as ctk
 
 from ..util import is_admin
-from . import icons, nav, theme
-from .widgets import Icon, Popover, StatusPill, bind_all, caption, divider, link_button
+from . import icons, mark, nav, theme
+from .widgets import Icon, Popover, StatusPill, bind_all, caption, divider, focusable, link_button
 
 P = theme.PALETTE
 
@@ -51,6 +51,7 @@ class Clickable:
         bind_all(self, "<Leave>", lambda _e: self._paint(False))
         bind_all(self, "<Button-1>", lambda _e: command())
         self.configure(cursor="hand2")
+        focusable(self, command)
 
     def _paint(self, on):
         if not on:
@@ -100,7 +101,8 @@ class Chip(ctk.CTkFrame, Clickable):
 
 
 class ProductMark(tk.Canvas):
-    """Indigo rounded square with a white disk sector."""
+    """The product mark (see mark.py): indigo tile, a disk with one sector struck out, on an anvil. The same in
+    both themes, like the app icon."""
 
     def __init__(self, master, size=36, bg="rail"):
         super().__init__(master, width=size, height=size, highlightthickness=0, bd=0)
@@ -112,13 +114,20 @@ class ProductMark(tk.Canvas):
         s = self.size
         self.delete("all")
         self.configure(background=theme.c(self.bg))
-        icons.rounded_rect(self, 0, 0, s, s, s * .26, fill=theme.c("accent"), outline="")
-        fg = theme.c("on_accent")
-        r = s * .27
-        cx = cy = s / 2
-        self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=fg, width=max(2, s / 15))
-        self.create_arc(cx - r, cy - r, cx + r, cy + r, start=90, extent=-90, style="pieslice", fill=fg, outline=fg)
-        self.create_oval(cx - s * .05, cy - s * .05, cx + s * .05, cy + s * .05, fill=theme.c("accent"), outline="")
+        icons.rounded_rect(self, 0, 0, s, s, s * mark.CORNER, fill=mark.INDIGO, outline="")
+        fg = "#FFFFFF"
+        disk = mark.DISK_SMALL if mark.simple(s) else mark.DISK
+        if not mark.simple(s):
+            self.create_polygon([v * s for pt in mark.ANVIL for v in pt], fill=fg, outline="")
+        cx, cy, r = disk["cx"] * s, disk["cy"] * s, disk["r"] * s
+        w = disk["ring"] * s
+        # Tk centres the outline on the oval's edge, so pull it in by half the width to match the icon files
+        self.create_oval(cx - r + w / 2, cy - r + w / 2, cx + r - w / 2, cy + r - w / 2, outline=fg, width=w)
+        start, extent = disk["sector"]
+        self.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent, style="pieslice", fill=fg,
+                        outline="")
+        h = disk["hole"] * s
+        self.create_oval(cx - h, cy - h, cx + h, cy + h, fill=mark.INDIGO, outline="")
 
 
 # ---------------------------------------------------------------------------- rail
@@ -357,6 +366,7 @@ class ContextBar(ctk.CTkFrame):
                      fg_color=P["surface_2"], corner_radius=4, height=20).pack(side="right", padx=8)
         bind_all(self.search, "<Button-1>", lambda _e: app.open_palette())
         self.search.configure(cursor="hand2")
+        focusable(self.search, app.open_palette)
         self.edge.lift()  # keep the bottom rule above the packed halves
         self.update_context()
 
