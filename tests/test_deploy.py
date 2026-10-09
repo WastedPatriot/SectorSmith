@@ -1562,5 +1562,54 @@ check([x.id for x in lstore.licences] == [fallback.id] and lic_k.secret["secret"
       "removing a client removes its licences and their encrypted keys and files")
 dpapi.protect, dpapi.unprotect = _real
 
+# --- 18. Audit log: who changed what in the library, and what every session did -----------------------------------
+from sectorsmith.deploy import audit as AUD  # noqa: E402
+
+astore = Store(os.path.join(W, "lib18"))
+astore.actor = lambda: "Dominic"
+set_inventory()
+ap = installer_pkg(astore, "Audit App", "1.0")
+ad = deploy(astore, ap, "installed")
+ad.enabled = False
+astore.upsert("deployments", ad)
+ad.enabled = True
+ad.params = {"Pw": {"secret": "abc"}}
+astore.upsert("deployments", ad)
+astore.upsert("deployments", ad)                     # nothing changed: no line
+astore.set_tags("AUDIT-PC", ["Kiosk"])
+m_ = astore.machine("AUDIT-PC")
+m_.last_seen = time.time()
+astore.upsert("machines", m_)                        # only the last-seen time: no line
+s_ = core.run_session(WinCodes(), astore, Progress(1), mode="full")
+astore.delete("deployments", ad.id)
+rows = AUD.read(astore)
+lines = [(r["action"], r["kind"], r["name"], r["detail"]) for r in reversed(rows)]
+check(all(r["who"] == "Dominic" and r["when"] for r in rows), "every line says who and when")
+check(lines[:2] == [("added", "packages", "Audit App", ""), ("added", "deployments", "Audit App", "")]
+      and ("changed", "deployments", "Audit App", "enabled: True -> False") in lines,
+      "library changes logged with the field that changed")
+pw = [x for x in lines if x[0] == "changed" and "params" in x[3]]
+check(len(pw) == 1 and pw[0][3] == "enabled: False -> True; params" and "abc" not in json.dumps(rows),
+      "secret-bearing fields are named, never shown")
+check(sum(1 for x in lines if x[1] == "deployments" and x[0] == "changed") == 2
+      and ("first seen", "machines", "AUDIT-PC", "") in lines
+      and not [x for x in lines if x[1] == "machines" and "last_seen" in x[3]],
+      "saving without a change, or a PC's last-seen time, adds no line")
+check(any(x[0] == "installed" and x[1] == "session" and x[2] == f"Audit App on {host}" for x in lines)
+      and any(x[0] == "maintenance" and x[2] == host and "1 OK" in x[3] for x in lines),
+      "each session action and the session itself are logged")
+check(lines[-1] == ("removed", "deployments", "Audit App", ""), "removals logged")
+csv_path = os.path.join(W, "audit.csv")
+evil_row = dict(rows[0], name="=HYPERLINK(\"http://x\")")
+AUD.export_csv([evil_row] + rows, csv_path)
+with open(csv_path, encoding="utf-8-sig") as _f:
+    exported = _f.read().splitlines()
+check(exported[0] == "When,Who,Action,Kind,Name,Details,Id" and len(exported) == len(rows) + 2
+      and "'=HYPERLINK" in exported[1] and ",Deployment," in exported[1], "export to CSV, safe to open in Excel")
+check(AUD.matches(rows[0], "dominic deployment") and not AUD.matches(rows[0], "nobody"), "audit search")
+with open(os.path.join(astore.root, AUD.FILE), "a") as _f:
+    _f.write("not json\n")
+check(len(AUD.read(astore)) == len(rows), "a damaged line is skipped, the rest still read")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)
