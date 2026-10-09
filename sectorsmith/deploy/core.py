@@ -81,6 +81,16 @@ class Client:
 
 
 @dataclass
+class Machine:
+    """A PC SectorSmith knows by name: its tags (for targeting) and when it was last seen."""
+    hostname: str
+    tags: list = field(default_factory=list)
+    notes: str = ""
+    last_seen: float = 0
+    id: str = field(default_factory=_id)
+
+
+@dataclass
 class Deployment:
     item_type: str                         # software | task | bundle (several packages, ids in items)
     item_id: str
@@ -99,13 +109,16 @@ class Deployment:
     last_runs: dict = field(default_factory=dict)  # hostname (lower case) -> when its schedule last ran there
     allow_downgrade: bool = False          # specific version older than the installed one: remove and reinstall
     reboot_policy: str = "never"           # see REBOOT_POLICIES
+    tags: list = field(default_factory=list)       # only PCs with at least one of these tags
+    filter_script: str = ""                # only PCs where this prints True (run during the check)
+    filter_language: str = "powershell"
 
 
 # ---------------------------------------------------------------------------
 class Store:
     """JSON-backed library under %LOCALAPPDATA%\\SectorSmith\\deploy (or a given folder)."""
 
-    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment}
+    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment, "machines": Machine}
 
     def __init__(self, root: str | None = None):
         self.root = root or str(app_dir() / "deploy")
@@ -147,6 +160,50 @@ class Store:
     @property
     def deployments(self):
         return self.data["deployments"]
+
+    @property
+    def machines(self):
+        return self.data["machines"]
+
+    def machine(self, hostname: str, create=False) -> Machine | None:
+        h = (hostname or "").lower()
+        m = next((x for x in self.machines if x.hostname.lower() == h), None)
+        if m is None and create and h:
+            m = Machine(hostname=hostname)
+            self.machines.append(m)
+        return m
+
+    def tags_of(self, hostname: str) -> list[str]:
+        m = self.machine(hostname)
+        return list(m.tags) if m else []
+
+    def set_tags(self, hostname: str, tags) -> Machine:
+        m = self.machine(hostname, create=True)
+        m.tags = clean_tags(tags)
+        return self.upsert("machines", m)
+
+    def all_tags(self) -> list[str]:
+        seen = {}
+        for m in self.machines:
+            for t in m.tags:
+                seen.setdefault(t.lower(), t)
+        for d in self.deployments:
+            for t in d.tags:
+                seen.setdefault(t.lower(), t)
+        return sorted(seen.values(), key=str.lower)
+
+    def known_hosts(self) -> list[str]:
+        """Every PC the library knows by name: in a client, tagged or seen, or named by a deployment."""
+        seen = {}
+        for c in self.clients:
+            for h in c.machines:
+                seen.setdefault(h.lower(), h)
+        for m in self.machines:
+            seen.setdefault(m.hostname.lower(), m.hostname)
+        for d in self.deployments:
+            if d.target_kind == "machine" and d.target_value:
+                seen.setdefault(d.target_value.lower(), d.target_value)
+        return sorted(seen.values(), key=str.lower)
 
     def get(self, kind, id_):
         return next((x for x in self.data[kind] if x.id == id_), None)
@@ -597,8 +654,26 @@ def source_id(deployment_id: str) -> str:
     return (deployment_id or "").split("/")[0]
 
 
+def clean_tags(tags) -> list[str]:
+    """'Laptops, kiosk , laptops' -> ['Laptops', 'kiosk'] (case-insensitive, first spelling kept)."""
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    seen = {}
+    for t in tags or []:
+        t = " ".join(str(t).split())[:40]
+        if t:
+            seen.setdefault(t.lower(), t)
+    return list(seen.values())
+
+
 def targets(store: Store, d: Deployment, hostname: str) -> bool:
+    """Does the deployment's target (every PC, a client or one PC, narrowed by tags) take in this PC? The filter
+    script is checked separately, on the PC (see filter_passes)."""
     h = hostname.lower()
+    if d.tags:
+        have = {t.lower() for t in store.tags_of(hostname)}
+        if not have & {t.lower() for t in d.tags}:
+            return False
     if d.target_kind == "all":
         return True
     if d.target_kind == "machine":
@@ -606,19 +681,56 @@ def targets(store: Store, d: Deployment, hostname: str) -> bool:
     return d.target_kind == "client" and d.target_value in {c.id for c in store.clients_of(hostname)}
 
 
-def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list[Deployment]:
+def applies_to(store: Store, d: Deployment, hosts: list[str] | None = None) -> list[str]:
+    """The known PCs a deployment's target takes in (before its filter script, which only the PC can answer)."""
+    hosts = store.known_hosts() if hosts is None else hosts
+    if d.target_kind == "machine" and d.target_value and d.target_value.lower() not in {h.lower() for h in hosts}:
+        hosts = hosts + [d.target_value]
+    return [h for h in hosts if targets(store, d, h)]
+
+
+TRUE_WORDS = ("true", "$true", "1", "yes")
+
+
+def filter_passes(ep, d: Deployment, cache: dict | None = None) -> tuple[bool, str]:
+    """Runs the deployment's filter script on the PC: (applies, why). It applies when the script exits 0 and its
+    last line says True. Same script, same answer within one check (cache)."""
+    if not d.filter_script.strip():
+        return True, ""
+    key = (d.filter_language, d.filter_script)
+    if cache is not None and key in cache:
+        return cache[key]
+    r = ep.run_script(script=d.filter_script, language=d.filter_language or "powershell", timeout=300)
+    lines = [ln.strip() for ln in (r.get("out") or "").splitlines() if ln.strip()]
+    last = lines[-1].lower() if lines else ""
+    if r["code"] != 0:
+        res = (False, f"the filter script failed (exit {r['code']}): {(r.get('err') or '').strip()[:120]}")
+    else:
+        res = (last in TRUE_WORDS, "" if last in TRUE_WORDS else f"the filter script said {last or 'nothing'}")
+    if cache is not None:
+        cache[key] = res
+    return res
+
+
+def applicable(store: Store, hostname: str, onboarding: bool, only=None, check=None) -> list[Deployment]:
     """What applies to this PC, most specific first wins per item. ``only``: deployment ids; the run is limited to
-    their items (a more specific deployment of the same item still decides what happens to it)."""
+    their items (a more specific deployment of the same item still decides what happens to it). ``check(d)``: the
+    PC's answer to a deployment's filter script (True applies); without it filter scripts aren't run."""
     res = []
     for d in store.deployments:
         if not d.enabled or (d.onboarding_only and not onboarding):
             continue
-        if targets(store, d, hostname):
+        if targets(store, d, hostname) and (check is None or not d.filter_script.strip() or check(d)):
             res.extend(expand_bundle(d))
-    # most specific deployment wins per item: machine > client > all
-    rank = {"machine": 0, "client": 1, "all": 2}
+    # most specific deployment wins per item: one PC > a client > every PC; narrowed by tags or a filter beats
+    # the same target without
+    rank = {"machine": 0, "client": 2, "all": 4}
+
+    def score(d):
+        src = store.get("deployments", source_id(d.id)) or d
+        return rank.get(d.target_kind, 6) - (1 if (src.tags or src.filter_script.strip()) else 0)
     best = {}
-    for d in sorted(res, key=lambda d: rank.get(d.target_kind, 3)):
+    for d in sorted(res, key=score):
         best.setdefault((d.item_type, d.item_id), d)
     if only is not None:
         wanted = set(only)
@@ -695,12 +807,23 @@ def resolve(desired: str, installed: bool, current: str | None, want: str, allow
     return "none"
 
 
-def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None) -> list[dict]:
+def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None,
+         filtered: list | None = None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
-    deps = applicable(store, hostname, onboarding, only)
+    cache: dict = {}
+    skipped = []
+
+    def check(d):
+        ok, why = filter_passes(ep, d, cache)
+        if not ok:
+            skipped.append({"deployment": d.id, "why": why})
+        return ok
+    deps = applicable(store, hostname, onboarding, only, check)
     # a package that something staying on the PC needs isn't removed (judged over everything aimed at the PC)
-    needs = needed_by(store, deps if only is None else applicable(store, hostname, onboarding))
+    needs = needed_by(store, deps if only is None else applicable(store, hostname, onboarding, check=check))
+    if filtered is not None:
+        filtered.extend({x["deployment"]: x for x in skipped}.values())
     for d in deps:
         if d.item_type == "software":
             pkg = store.get("packages", d.item_id)
@@ -963,7 +1086,10 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
     if before is not None:
         sess["pending_reboot"] = before.get("reasons") or []
     inv = ep.installed_software()
-    actions = plan(ep, store, host, inv, onboarding, only)
+    filtered: list = []
+    actions = plan(ep, store, host, inv, onboarding, only, filtered)
+    if filtered:
+        sess["filtered"] = filtered
     sess["detected"] = [dict(a, entry=None) for a in actions]
     todo = [a for a in actions if a["action"] not in IDLE]
     if mode == "detect" or not todo:

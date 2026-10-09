@@ -69,6 +69,8 @@ CATEGORIES = [
                       Item("run", "Run maintenance", "play", "deploy_screens:RunWizard", hint="deploy apply")]),
         ("Endpoints", [Item("clients", "Clients", "building", "manage_screens:ClientsScreen",
                             hint="baseline onboarding new pc"),
+                       Item("inventory", "Inventory", "pc", "manage_inventory:InventoryScreen",
+                            hint="pcs tags hardware serial model bitlocker"),
                        Item("tasks", "Tasks", "task", "manage_screens:TasksScreen", hint="scripts upkeep"),
                        Item("sessions", "Sessions", "clock", "manage_screens:SessionsScreen",
                             hint="history results")]),

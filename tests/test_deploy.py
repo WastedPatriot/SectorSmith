@@ -1368,5 +1368,54 @@ check(tasklib.add(tstore, "time-zone").id == one.id and one.library_id == "time-
       and Store(tstore.root).get("tasks", one.id).parameters[0]["name"] == "TimeZone",
       "adding a built-in task twice keeps one copy, with its parameters")
 
+# --- 15. Targeting: tags on PCs, filter scripts, applies-to counts ---------------------------------------------------
+gstore = Store(os.path.join(W, "lib15"))
+check(core.clean_tags("Laptops, kiosk , laptops,, ") == ["Laptops", "kiosk"], "tags tidied, case-insensitive")
+gstore.set_tags(host, ["Kiosk", "Laptops"])
+gstore.set_tags("PC-2", "laptops")
+gstore.set_tags("PC-3", [])
+cl15 = gstore.upsert("clients", Client(name="Acme", machines=["PC-2", "PC-4"]))
+check(Store(gstore.root).tags_of(host.upper()) == ["Kiosk", "Laptops"] and gstore.all_tags() == ["Kiosk", "Laptops"]
+      and gstore.known_hosts() == sorted([host, "PC-2", "PC-3", "PC-4"], key=str.lower),
+      "tags saved per PC; known PCs come from clients and tagged PCs")
+set_inventory(entry("Tag App", "1.0"))
+tag_app = installer_pkg(gstore, "Tag App", "1.0")
+d_all = deploy(gstore, tag_app, "installed")
+d_kiosk = deploy(gstore, tag_app, "uninstalled", tags=["kiosk"])
+d_lap = deploy(gstore, tag_app, "installed", target_kind="client", target_value=cl15.id, tags=["Laptops"])
+check(core.applies_to(gstore, d_all) == gstore.known_hosts() and core.applies_to(gstore, d_kiosk) == [host]
+      and core.applies_to(gstore, d_lap) == ["PC-2"], "applies-to: every PC, tag only, client and tag together")
+check([d.desired for d in core.applicable(gstore, host, False) if d.item_id == tag_app.id] == ["uninstalled"],
+      "a tagged deployment beats the untagged one for the same target")
+check([d.desired for d in core.applicable(gstore, "PC-3", False) if d.item_id == tag_app.id] == ["installed"],
+      "an untagged PC gets the wider deployment")
+for d_ in (d_all, d_kiosk, d_lap):
+    gstore.delete("deployments", d_.id)
+
+f_yes = installer_pkg(gstore, "Filter Yes", "1.0")
+f_no = installer_pkg(gstore, "Filter No", "1.0")
+f_bad = installer_pkg(gstore, "Filter Broken", "1.0")
+f_wide = installer_pkg(gstore, "Filter Wide", "1.0")
+probe = os.path.join(W, "filter_runs")
+yes_script = f'echo run >> "{probe}"; echo checking; echo True'
+deploy(gstore, f_yes, "installed", filter_script=yes_script, filter_language="shell")
+deploy(gstore, f_no, "installed", filter_script="echo False", filter_language="shell")
+deploy(gstore, f_bad, "installed", filter_script="exit 3", filter_language="shell")
+deploy(gstore, f_wide, "installed")
+deploy(gstore, f_wide, "uninstalled", target_kind="machine", target_value=host, filter_script=yes_script,
+       filter_language="shell")
+set_inventory(entry("Filter Wide", "1.0"))
+s_ = core.run_session(WinCodes(), gstore, Progress(1), mode="detect")
+by = {a["name"]: a for a in s_["actions"]}
+why = {gstore.get("deployments", f["deployment"]).item_id: f["why"] for f in s_["filtered"]}
+with open(probe) as _f:
+    runs = _f.read().count("run")
+check("Filter Yes" in by and "Filter No" not in by and "Filter Broken" not in by,
+      "filter scripts decide on the PC: True applies, anything else doesn't")
+check(why.get(f_no.id) == "the filter script said false" and "exit 3" in why.get(f_bad.id, ""),
+      f"the session says why a deployment was filtered out {why}")
+check(runs == 1, "the same filter script runs once per check, not once per deployment")
+check(by["Filter Wide"]["action"] == "uninstall", "a filtered one-PC deployment still beats the wider one when it passes")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)

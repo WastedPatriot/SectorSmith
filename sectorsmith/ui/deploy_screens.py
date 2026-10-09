@@ -1039,12 +1039,15 @@ class DeploymentWizard(Screen):
         self.reboot_seg.pack(anchor="w")
         reboot_help.configure(text=REBOOT_HELP["never"])
         reboot_help.pack(anchor="w", pady=(4, 0))
-        right = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
-        right.grid(row=0, column=1, sticky="new")
+        side = ctk.CTkFrame(cols, fg_color="transparent")
+        side.grid(row=0, column=1, sticky="new")
+        right = ctk.CTkFrame(side, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        right.pack(fill="x")
         from .manage_screens import ScheduleEditor
         self.schedule_editor = ScheduleEditor(right, None, None, compact=True)
         caption(right, "When it runs").pack(anchor="w", padx=18, pady=(16, 4))
         self.schedule_editor.pack(fill="x", padx=18, pady=(0, 16))
+        self._narrow(side)
 
         def changed(label):
             key = _key(states, label)
@@ -1059,6 +1062,41 @@ class DeploymentWizard(Screen):
         changed(first)
         self.state_seg = seg
         self.buttons(primary=("Save deployment", self._save), secondary=("Back", self._where))
+
+    def _narrow(self, side):
+        """Tags and a filter script narrow the target down; shows how many known PCs it takes in."""
+        box = ctk.CTkFrame(side, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        box.pack(fill="x", pady=(12, 0))
+        caption(box, "Only some of those PCs").pack(anchor="w", padx=18, pady=(16, 4))
+        known = self.store.all_tags()
+        self.tags = ctk.CTkEntry(box, height=32, font=theme.font_style("body"),
+                                 placeholder_text="Tags, e.g. Laptops, Kiosk")
+        self.tags.pack(fill="x", padx=18)
+        ctk.CTkLabel(box, text=("PCs with any of these tags. Known: " + ", ".join(known[:8])) if known else
+                     "PCs with any of these tags. Tag PCs on the Inventory page.", font=theme.font_style("small"),
+                     text_color=P["muted"], anchor="w", justify="left", wraplength=340).pack(anchor="w", padx=18)
+        ctk.CTkLabel(box, text="Filter script (PowerShell, optional)", font=theme.font_style("small"),
+                     text_color=P["text_2"], anchor="w").pack(anchor="w", padx=18, pady=(10, 2))
+        self.filter_box = ctk.CTkTextbox(box, height=64, font=theme.mono(11), border_color=P["control_border"])
+        self.filter_box.pack(fill="x", padx=18)
+        ctk.CTkLabel(box, text="Runs on each PC during the check. It applies where the last line printed is True.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
+                     wraplength=340).pack(anchor="w", padx=18)
+        self.applies_lbl = ctk.CTkLabel(box, text="", font=theme.font_style("body_strong"), text_color=P["text"],
+                                        anchor="w")
+        self.applies_lbl.pack(anchor="w", padx=18, pady=(8, 16))
+        self.tags.bind("<KeyRelease>", lambda _e: self._applies(), add="+")
+        self.filter_box.bind("<KeyRelease>", lambda _e: self._applies(), add="+")
+        self._applies()
+
+    def _applies(self):
+        d = core.Deployment("software", "", target_kind=self.target[0], target_value=self.target[1],
+                            tags=core.clean_tags(self.tags.get()))
+        n, total = len(core.applies_to(self.store, d)), len(self.store.known_hosts())
+        text = f"Applies to {_plural(n, 'known PC')}" + (f" of {total}" if total else "")
+        if self.filter_box.get("1.0", "end-1c").strip():
+            text += ", if the filter says so"
+        self.applies_lbl.configure(text=text)
 
     def _target_text(self):
         kind, value = self.target
@@ -1085,7 +1123,8 @@ class DeploymentWizard(Screen):
         common = dict(params=params, desired=desired, version=version, target_kind=self.target[0],
                       target_value=self.target[1], onboarding_only=bool(self.onboarding.get()), schedule=sched,
                       allow_downgrade=desired == "version" and bool(self.downgrade.get()),
-                      reboot_policy=_key(REBOOT_LABEL, self.reboot_seg.get()))
+                      reboot_policy=_key(REBOOT_LABEL, self.reboot_seg.get()),
+                      tags=core.clean_tags(self.tags.get()), filter_script=self.filter_box.get("1.0", "end-1c").strip())
         if len(self.picked) > 1:
             d = core.Deployment(item_type="bundle", item_id="", items=[i for _k, i in self.picked],
                                 name=self.name.get().strip(), **common)
