@@ -1611,5 +1611,41 @@ with open(os.path.join(astore.root, AUD.FILE), "a") as _f:
     _f.write("not json\n")
 check(len(AUD.read(astore)) == len(rows), "a damaged line is skipped, the rest still read")
 
+# --- 19. Migration: the client's baseline on the new PC, and the domain account's notes in the report ---------------
+from sectorsmith.integrations.ad import ADUser  # noqa: E402
+
+bstore = Store(os.path.join(W, "lib19"))
+set_inventory()
+bl_pkg = installer_pkg(bstore, "Baseline Office", "2.0")
+mig_client = bstore.upsert("clients", Client(name="Mig Co"))
+bstore.set_baseline(mig_client.id, [bl_pkg.id])
+prof19 = os.path.join(W, "mig19_src", "sam")
+os.makedirs(os.path.join(prof19, "Desktop"), exist_ok=True)
+with open(os.path.join(prof19, "Desktop", "notes.txt"), "w") as _f:
+    _f.write("x")
+dst19 = os.path.join(W, "mig19_dst", "sam")
+user = ADUser(sam="sam", home_drive="H:", home_folder="\\\\fs1\\home\\sam", logon_script="logon.bat")
+plan19 = migrate.Plan(LocalEndpoint(), prof19, WinCodes(), dst19, desk, store=bstore, baseline_client=mig_client.id,
+                      domain_notes=user.migration_notes())
+res = migrate.run(plan19, Progress(1))
+b_ = res["baseline"]
+with open(res["report"]) as fh:
+    rep = fh.read()
+check(b_ and b_["client"] == "Mig Co" and [(a["name"], a["status"]) for a in b_["actions"]] ==
+      [("Baseline Office", "compliant")] and inventory().get("Baseline Office") == "2.0"
+      and host.lower() in [m_.lower() for m_ in bstore.get("clients", mig_client.id).machines],
+      "the new PC joins the client and gets its baseline at the end of the move")
+check("Mig Co baseline: 1 of 1 packages in place" in rep and "H: maps to \\\\fs1\\home\\sam" in rep
+      and "logon.bat" in rep and os.path.exists(os.path.join(dst19, "Desktop", "notes.txt")),
+      "the report has the baseline and the domain account's notes; the files came across")
+check(any(s_.get("trigger") == "onboarding" for s_ in bstore.sessions()), "the baseline ran as an onboarding session")
+taken = bstore.upsert("clients", Client(name="Other Co"))
+bstore.set_baseline(taken.id, [bl_pkg.id])
+res = migrate.run(migrate.Plan(LocalEndpoint(), prof19, WinCodes(), dst19, desk, store=bstore,
+                               baseline_client=taken.id), Progress(1))
+check("already in Mig Co" in res["baseline"]["error"] and "not installed" in migrate.baseline_lines(
+    res["baseline"])[0] and not res["failed"], "a PC in another client: the baseline is refused with why, files "
+                                                 "still copied")
+
 print(f"\n{sum(OK)}/{len(OK)} deploy checks passed")
 sys.exit(0 if all(OK) else 1)
