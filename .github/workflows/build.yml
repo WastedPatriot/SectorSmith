@@ -84,7 +84,7 @@ jobs:
           path: dist/SectorSmith.exe
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/SectorSmith.exe
           generate_release_notes: true
