@@ -356,7 +356,8 @@ class WinCodes(LocalEndpoint):
 store = Store(os.path.join(W, "lib2"))
 host = LocalEndpoint().info()["hostname"]
 set_inventory(entry("Foo App", "1.0"), entry("Bar Tool", "3.0"), entry("Old Junk", "1.0"), entry("Pinned", "3.0"),
-              entry("Pin Mismatch", "3.0"), entry("Machine Wins", "1.0"))
+              entry("Pin Mismatch", "3.0"), entry("Machine Wins", "1.0"), entry("No Downgrade", "3.0"),
+              entry("Ignored App", "1.0"))
 foo = installer_pkg(store, "Foo App", "2.0")                          # 1.0 installed -> upgrade
 bar = installer_pkg(store, "Bar Tool", "3.0")                         # up to date -> nothing
 runtime = installer_pkg(store, "Runtime", "1.0")                      # only a prerequisite
@@ -366,6 +367,8 @@ broken = installer_pkg(store, "Broken", "1.0", " --noop 1 --exit 1603")
 liar = installer_pkg(store, "Liar", "1.0", " --noop 1")               # exit 0 but never registers
 reboot = installer_pkg(store, "Needs Reboot", "1.0", " --exit 3010")
 pinned = installer_pkg(store, "Pinned", "2.0")                        # 3.0 installed, pinned to 2.0 -> roll back
+nodown = installer_pkg(store, "No Downgrade", "2.0")                  # same, but downgrades not allowed -> refused
+ignored = installer_pkg(store, "Ignored App", "2.0")                  # ignore: never checked or changed
 mismatch = installer_pkg(store, "Pin Mismatch", "2.0")                # pinned to 1.0 the library doesn't have
 mwins = installer_pkg(store, "Machine Wins", "1.0")
 onb = installer_pkg(store, "Onboard Only", "1.0")
@@ -390,8 +393,11 @@ cl = store.upsert("clients", Client(name="Contoso", machines=[host.upper()]))
 for pkg in (foo, bar, newt, broken, liar, reboot, fpkg):
     deploy(store, pkg, "latest" if pkg is foo else "installed")
 deploy(store, junk, "uninstalled")
-deploy(store, pinned, "version", version="2.0")
-deploy(store, mismatch, "version", version="1.0")
+deploy(store, pinned, "version", version="2.0", allow_downgrade=True)
+deploy(store, nodown, "version", version="2.0")
+deploy(store, ignored, "latest")
+deploy(store, ignored, "ignore", target_kind="machine", target_value=host)
+deploy(store, mismatch, "version", version="1.0", allow_downgrade=True)
 deploy(store, mwins, "installed")
 deploy(store, mwins, "uninstalled", target_kind="machine", target_value=host.lower())
 deploy(store, onb, "installed", onboarding_only=True)
@@ -438,9 +444,20 @@ check({n: by[n]["action"] for n in ("Foo App", "Bar Tool", "New Thing", "Runtime
        "Old Junk": "uninstall", "Pinned": "reinstall", "Pin Mismatch": "audit", "Machine Wins": "uninstall",
        "Script Pkg": "install", "File Pkg": "install", "Flag file": "set", "Audit only": "audit"},
       "detection plans the right action for every deployment")
+check(by["No Downgrade"]["action"] == "refused" and by["No Downgrade"]["status"] == "non-compliant"
+      and "newer" in by["No Downgrade"]["result"], "a pin older than the installed version is refused, not run")
+check(by["Ignored App"]["action"] == "none" and by["Ignored App"]["status"] == "ignored"
+      and by["Ignored App"]["current"] == "not checked" and by["PowerShell task"]["status"] == "ignored"
+      and s1["summary"]["ignored"] == 2, "ignore on this PC beats the wider deployment and is shown as ignored")
 check(by["Foo App"]["status"] == "pending" and by["Bar Tool"]["status"] == "compliant"
-      and by["Audit only"]["status"] == "non-compliant" and "PowerShell task" not in by,
-      "detect statuses: pending / compliant / non-compliant, ignored task skipped")
+      and by["Audit only"]["status"] == "non-compliant", "detect statuses: pending / compliant / non-compliant")
+R = core.resolve
+check([R("latest", False, None, "2"), R("latest", True, "1.0", "2.0"), R("latest", True, "2.0", "2.0"),
+       R("latest", True, "3.0", "2.0"), R("version", True, "3.0", "2.0"), R("version", True, "3.0", "2.0", True),
+       R("version", True, "1.0", "2.0"), R("installed", True, "0.1", "2.0"), R("installed", False, None, ""),
+       R("uninstalled", True, "1", ""), R("uninstalled", False, None, ""), R("ignore", False, None, "")] ==
+      ["install", "upgrade", "none", "none", "refused", "reinstall", "upgrade", "none", "install", "uninstall",
+       "none", "none"], "desired states resolve to install / upgrade / downgrade refused / uninstall / nothing")
 check("1.0" in by["Pin Mismatch"].get("result", ""), "pin to a version the library lacks is reported, not run")
 check(s1["client"] == "Contoso" and s1["summary"]["pending"] >= 8, f"session summary {s1['summary']}")
 
@@ -453,6 +470,7 @@ check(inv.get("Runtime") == "1.0" and inv.get("New Thing") == "1.5", "prerequisi
 check("Old Junk" not in inv and by["Old Junk"]["result"] == "removed", "uninstall via the registry uninstall string")
 check(inv.get("Pinned") == "2.0" and by["Pinned"]["status"] == "compliant", "pinned version rolled back (remove + install)")
 check(inv.get("Pin Mismatch") == "3.0" and by["Pin Mismatch"]["status"] == "non-compliant", "unavailable pin left alone")
+check(inv.get("No Downgrade") == "3.0" and inv.get("Ignored App") == "1.0", "refused downgrade and ignored app untouched")
 check("Machine Wins" not in inv, "machine-specific removal applied")
 check(by["Broken"]["status"] == "failed" and "1603" in by["Broken"]["result"], "installer error code reported")
 check(by["Liar"]["status"] == "failed" and "still missing" in by["Liar"]["result"],
@@ -473,7 +491,7 @@ s3 = core.run_session(WinCodes(), store, Progress(1), mode="full")
 again = {a["name"]: a["action"] for a in s3["detected"]}
 fixed = [n for n, a in by.items() if a["status"] == "compliant"]
 check(all(again[n] == "none" for n in fixed), "second run finds everything that was fixed still fine")
-check(set(n for n, a in again.items() if a not in ("none", "audit")) == {"Broken", "Liar", "Can't fix"},
+check(set(n for n, a in again.items() if a not in core.IDLE) == {"Broken", "Liar", "Can't fix"},
       "second run only retries what failed")
 hist = store.sessions()
 check([h["id"] for h in hist] == [s3["id"], s2["id"], s1["id"]], "sessions saved, newest first")

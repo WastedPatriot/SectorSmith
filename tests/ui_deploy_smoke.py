@@ -355,7 +355,7 @@ pump(.5)
 scr = app.screen
 press("Next")
 press("Next")
-scr.state_seg.set("Installed")
+scr.state_seg.set("Any version")
 press("Save deployment")
 
 seven = next(p for p in store().packages if p.name == "7-Zip")

@@ -26,12 +26,13 @@ BADGE = "PREVIEW"
 PAGES = ["Library", "Deployments", "Clients", "Tasks", "Sessions"]
 INSTALLER_EXTS = (".msi", ".exe", ".msix", ".msixbundle", ".appx", ".appxbundle")
 
-SOFTWARE_STATES = {"latest": "Keep up to date", "installed": "Installed", "version": "Set version",
-                   "uninstalled": "Removed", "ignore": "Leave alone"}
+SOFTWARE_STATES = dict(core.STATES)
 STATE_HELP = {
-    "latest": "Installs it where it's missing and updates older versions to the one in the library.",
+    "latest": "Installs it where it's missing and updates older versions to the newest: the library's version, "
+              "or what its version source says today.",
     "installed": "Installs it where it's missing. Any version already there is left alone.",
-    "version": "Installs exactly this version, updating or rolling back if needed.",
+    "version": "Installs exactly this version and updates older ones. A newer version already there is reported, "
+               "not rolled back, unless you allow it below.",
     "uninstalled": "Removes it wherever it's found.",
     "ignore": "Does nothing. Handy for switching a client or PC off a wider deployment.",
     "enforce": "Runs the check, and the fix if the check fails, then checks again.",
@@ -43,9 +44,9 @@ DETECTION = {"registry": "Name in Add/Remove Programs", "msi_product_code": "MSI
 LANGUAGES = {"powershell": "PowerShell", "shell": "Shell (sh)"}
 KIND_LABEL = {"msi": "MSI", "exe": "EXE", "msix": "MSIX", "winget": "winget", "script": "Script"}
 ACTION_LABEL = {"none": "Nothing to do", "install": "Install", "upgrade": "Update", "reinstall": "Roll back",
-                "uninstall": "Remove", "set": "Fix", "audit": "Report only"}
+                "uninstall": "Remove", "set": "Fix", "audit": "Report only", "refused": "Downgrade refused"}
 STATUS_LABEL = {"compliant": "OK", "failed": "Failed", "pending": "Needs a change", "non-compliant": "Not OK",
-                "cancelled": "Stopped"}
+                "cancelled": "Stopped", "ignored": "Ignored"}
 WINGET_INSTALL = core.WINGET_INSTALL
 WINGET_UNINSTALL = core.WINGET_UNINSTALL
 
@@ -847,6 +848,9 @@ class DeploymentWizard(Screen):
         if obj is not None and getattr(obj, "version", ""):
             self.version.insert(0, obj.version)
         self.version.pack(side="left", padx=10)
+        self.downgrade = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(vrow, text="Allow rolling back a newer version", variable=self.downgrade,
+                        font=theme.font_style("small")).pack(side="left", padx=(6, 0))
         opts = ctk.CTkFrame(left, fg_color="transparent")
         opts.pack(fill="x", pady=(16, 0))
         self.name = ctk.CTkEntry(opts, width=300, height=34, placeholder_text="Name for this group, e.g. Office apps")
@@ -899,7 +903,8 @@ class DeploymentWizard(Screen):
             self.app.toast(str(e), "warn")
             return
         common = dict(desired=desired, version=version, target_kind=self.target[0], target_value=self.target[1],
-                      onboarding_only=bool(self.onboarding.get()), schedule=sched)
+                      onboarding_only=bool(self.onboarding.get()), schedule=sched,
+                      allow_downgrade=desired == "version" and bool(self.downgrade.get()))
         if len(self.picked) > 1:
             d = core.Deployment(item_type="bundle", item_id="", items=[i for _k, i in self.picked],
                                 name=self.name.get().strip(), **common)
@@ -1202,7 +1207,7 @@ class RunWizard(Screen):
                     continue
                 sm = sess["summary"]
                 if mode == "detect":
-                    todo = sum(1 for a in sess["actions"] if a["action"] not in ("none", "audit"))
+                    todo = sum(1 for a in sess["actions"] if a["action"] not in core.IDLE)
                     self._set_live(m, f"{_plural(todo, 'change')} needed" if todo else "All good",
                                    "warn" if todo else "success")
                 else:
@@ -1227,7 +1232,7 @@ class RunWizard(Screen):
                              secondary=("Back", self._pcs)))
 
     def _changes(self, sess):
-        return [a for a in sess.get("actions", []) if a.get("action") not in ("none", "audit")]
+        return [a for a in sess.get("actions", []) if a.get("action") not in core.IDLE]
 
     def _checked(self, results):
         self.results = results
@@ -1294,7 +1299,7 @@ class RunWizard(Screen):
         lines = []
         acts = sess.get("actions", [])
         ran = [a for a in acts if a.get("status") in ("compliant", "failed")
-               and a.get("action") not in ("none", "audit")]
+               and a.get("action") not in core.IDLE]
         part = [a for a in acts if a.get("status") == "cancelled" and "part-way" in a.get("result", "")]
         left = [a for a in acts if a.get("status") == "cancelled" and a not in part]
         if sess:
@@ -1311,7 +1316,7 @@ class RunWizard(Screen):
                              primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")))
 
     def _done(self, results):
-        acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in ("none", "audit")]
+        acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in core.IDLE]
         failed = [a for a in acts if a.get("status") == "failed"]
         errors = [s for _m, s in results if s.get("error")]
         reboot = any(s.get("summary", {}).get("reboot") for _m, s in results)
