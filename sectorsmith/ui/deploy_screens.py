@@ -12,12 +12,13 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ..deploy import analyze, core, schedule
+from ..deploy import analyze, core, schedule, versions
 from ..util import Cancelled, get_logger, human_time
 from . import theme
 from .link_screens import MachinePicker
 from .screens import Screen
-from .widgets import DataTable, DropZone, IconBadge, OptionCard, Pill, bind_all, caption, ghost_button, segmented
+from .widgets import AutoScroll, DataTable, DropZone, IconBadge, OptionCard, Pill, bind_all, caption, \
+    ghost_button, segmented
 
 log = get_logger()
 P = theme.PALETTE
@@ -39,6 +40,8 @@ STATE_HELP = {
     "audit": "Runs the check and reports. Nothing is changed.",
 }
 TASK_STATES = {"enforce": "Check and fix", "audit": "Check only"}
+FIXED_VERSION = "Fixed: the version above"
+SOURCE_LABEL = {"": FIXED_VERSION, **versions.KINDS}
 DETECTION = {"registry": "Name in Add/Remove Programs", "msi_product_code": "MSI product code",
              "file": "A file exists", "script": "Detection script"}
 LANGUAGES = {"powershell": "PowerShell", "shell": "Shell (sh)"}
@@ -427,8 +430,10 @@ class PackageBuilder(Screen):
         cols.grid_columnconfigure(0, weight=11, uniform="d")
         cols.grid_columnconfigure(1, weight=9, uniform="d")
         cols.grid_rowconfigure(0, weight=1)
-        form = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
-        form.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        card = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        form = AutoScroll(card)
+        form.pack(fill="both", expand=True, padx=2, pady=(2, 10))
         form.grid_columnconfigure(1, weight=1)
         self.form = form
         self.v = {k: tk.StringVar(value=str(s.get(k) or "")) for k in
@@ -461,6 +466,7 @@ class PackageBuilder(Screen):
         self.lang = s.get("language") or "powershell"
         self._field("Success codes", "codes", hint="Installer exit codes that count as success.")
         self._det_changed()
+        self._source_rows(s.get("version_source") or {})
 
         side = ctk.CTkFrame(cols, fg_color="transparent")
         side.grid(row=0, column=1, sticky="nsew")
@@ -554,6 +560,98 @@ class PackageBuilder(Screen):
                      anchor="w").grid(row=2, column=1, sticky="w", padx=(0, 18))
         self._preview_soon()
 
+    # -- where the newest version comes from (versions.py) --------------------
+    def _source_rows(self, src):
+        self._label("Newest from")
+        self.vs = {k: tk.StringVar(value=src.get(k, "")) for k in ("id", "repo", "asset", "url", "regex")}
+        self.vs_script = src.get("script", "")
+        self.vs_text = None
+        self.vs_kind = ctk.CTkOptionMenu(self.form, values=list(SOURCE_LABEL.values()), height=32, width=260,
+                                         font=theme.font_style("body"), command=lambda _v: self._source_changed())
+        self.vs_kind.set(SOURCE_LABEL.get(src.get("kind", ""), FIXED_VERSION))
+        self.vs_kind.grid(row=self._row, column=1, sticky="w", padx=(0, 18), pady=4)
+        self._row += 1
+        self.vs_box = ctk.CTkFrame(self.form, fg_color="transparent")
+        self.vs_box.grid(row=self._row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        self.vs_box.grid_columnconfigure(1, weight=1)
+        self._row += 1
+        self._source_changed()
+
+    def _source_changed(self):
+        if self.vs_text is not None and self.vs_text.winfo_exists():
+            self.vs_script = self.vs_text.get("1.0", "end-1c")
+        for w in self.vs_box.winfo_children():
+            w.destroy()
+        self.vs_text = None
+        kind = _key(SOURCE_LABEL, self.vs_kind.get())
+        if kind == "winget" and not self.vs["id"].get():
+            self.vs["id"].set(self.v["winget_id"].get())
+        rows = {"winget": [("winget ID", "id", "e.g. 7zip.7zip")],
+                "github": [("Repository", "repo", "owner/name"), ("Asset pattern", "asset", r"e.g. x64\.msi$")],
+                "page": [("Page", "url", "https://vendor.example/download"),
+                         ("Pattern", "regex", r"e.g. setup-(?P<version>[\d.]+)\.exe")]}.get(kind, [])
+        r = 0
+        for label, key, ph in rows:
+            ctk.CTkLabel(self.vs_box, text=label, font=theme.font_style("body_strong"), text_color=P["text"],
+                         anchor="w", width=110).grid(row=r, column=0, sticky="w", padx=(18, 10), pady=(4, 0))
+            ctk.CTkEntry(self.vs_box, textvariable=self.vs[key], height=32, placeholder_text=ph,
+                         font=theme.mono(12)).grid(row=r, column=1, sticky="ew", padx=(0, 18), pady=(4, 0))
+            r += 1
+        if kind == "script":
+            self.vs_text = ctk.CTkTextbox(self.vs_box, height=74, font=theme.mono(11),
+                                          border_color=P["control_border"])
+            self.vs_text.insert("1.0", self.vs_script)
+            self.vs_text.grid(row=r, column=1, sticky="ew", padx=(0, 18), pady=(4, 0))
+            r += 1
+        hint = {"": "Latest means the version above, from the library's installer.",
+                "winget": "Runs winget show on this PC each day for the version, link and SHA256.",
+                "github": "Reads the repository's latest release: its tag is the version, the matching file "
+                          "the installer.",
+                "page": "Named groups version, and optionally url and sha256, pick out the parts.",
+                "script": "Runs here once a day. Print the version, then the https download link (or JSON)."}[kind]
+        ctk.CTkLabel(self.vs_box, text=hint, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                     justify="left", wraplength=380).grid(row=r, column=1, sticky="w", padx=(0, 18))
+        if kind:
+            row = ctk.CTkFrame(self.vs_box, fg_color="transparent")
+            row.grid(row=r + 1, column=1, sticky="w", padx=(0, 18), pady=(6, 0))
+            self.vs_check = soft_button(row, "Check now", self._source_check, width=110)
+            self.vs_check.pack(side="left")
+            self.vs_result = ctk.CTkLabel(self.vs_box, text="", font=theme.font_style("small"),
+                                          text_color=P["muted"], anchor="w", justify="left", wraplength=380)
+            self.vs_result.grid(row=r + 2, column=1, sticky="w", padx=(0, 18), pady=(4, 0))
+
+    def _version_source(self, strict=True):
+        kind = _key(SOURCE_LABEL, self.vs_kind.get())
+        if self.vs_text is not None and self.vs_text.winfo_exists():
+            self.vs_script = self.vs_text.get("1.0", "end-1c")
+        src = {"kind": kind, **{k: v.get() for k, v in self.vs.items()}, "script": self.vs_script}
+        try:
+            return versions.validate(src)
+        except ValueError:
+            if strict:
+                raise
+            return {}
+
+    def _source_check(self):
+        try:
+            src = self._version_source()
+        except ValueError as e:
+            self.vs_result.configure(text=str(e), text_color=P["danger"])
+            return
+        store, lbl = self.store, self.vs_result
+        lbl.configure(text="Asking...", text_color=P["muted"])
+
+        def done(found):
+            if lbl.winfo_exists():
+                bits = [f"Newest: {found['version']}", "download link found" if found.get("url") else "no link",
+                        "SHA256 known" if found.get("sha256") else "no SHA256"]
+                lbl.configure(text=" · ".join(bits), text_color=P["success"])
+
+        def failed(e):
+            if lbl.winfo_exists():
+                lbl.configure(text=_short(f"Didn't work: {e}", 70), text_color=P["danger"])
+        self.app.background(lambda: versions.resolve(src, store.fetcher, store.runner), done, failed)
+
     def _detection(self):
         method = _key(DETECTION, self.det_method.get())
         if method == "script":
@@ -573,6 +671,7 @@ class PackageBuilder(Screen):
                 raise ValueError("Success codes should be numbers, like 0, 3010.") from None
             f["success_codes"] = [0]
         f["detection"] = self._detection()
+        f["version_source"] = self._version_source(strict)
         if strict:
             if not f["name"]:
                 raise ValueError("Give the package a name.")
@@ -584,11 +683,13 @@ class PackageBuilder(Screen):
                 raise ValueError("Say how to detect it: add the file path or detection script.")
             if f["detection"]["method"] == "msi_product_code" and not f["product_code"]:
                 raise ValueError("Add the MSI product code, or pick another way to detect it.")
+            if f["version_source"].get("kind") == "winget" and self.kind == "winget" and not f["winget_id"]:
+                f["winget_id"] = f["version_source"]["id"]
         return f
 
     def _apply(self, pkg, f):
         for k in ("name", "version", "publisher", "install", "uninstall", "winget_id", "product_code",
-                  "success_codes", "detection"):
+                  "success_codes", "detection", "version_source"):
             setattr(pkg, k, f[k])
         pkg.language = self.lang
         return pkg
