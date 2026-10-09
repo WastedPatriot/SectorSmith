@@ -42,7 +42,8 @@ def frames(anim, scale):
 # --------------------------------------------------------------------------- screenshots
 def take_screenshots():
     from tkinter import filedialog, messagebox
-    from sectorsmith.ui import main as M, screens as S, theme
+    from sectorsmith.ui import main as M, screens as S, theme, workspace as WS, settings as ST
+    from sectorsmith.ui import deploy_screens as DS
     from sectorsmith.util import app_dir
     try:
         os.remove(app_dir() / "settings.json")
@@ -108,6 +109,8 @@ def take_screenshots():
     pump(1.2)
     shot("welcome")
     press("Skip")
+    app.set_client("Northwind Dental")
+    app.set_ticket("48213")
     # hide the unreadable sandbox disks so the drive list looks like a real PC
     real = app.inventory()
     app._inventory = []
@@ -116,9 +119,6 @@ def take_screenshots():
     app._inventory = [x for x in app.inventory(True) if x[0].is_image]
     _ = real
     pump(4)  # let toasts disappear
-    shot("home_light")
-    mode("dark")
-    shot("home_dark")
 
     mode("light")
     app.go(S.RecoverWizard)
@@ -138,20 +138,20 @@ def take_screenshots():
     press("Next")
     shot("wipe_strength")
     press("Next")
-    type_confirm("WIPE PARTITION 1")
+    type_confirm("ERASE PARTITION 1")
     shot("wipe_confirm")
     # progress screen with a slow fake job so the sweeper is visible
-    _, panel = app.screen.progress("Wiping…", "NIST 800-88 Clear (1 pass + verify) on Disk 2 · Samsung T7 · 1 TB")
+    _, panel = app.screen.progress("Erasing...", "NIST 800-88 Clear (1 pass + verify) on Disk 2 · Samsung T7 · 1 TB")
     app.screen._draw_steps(3)
 
     def fake(prog):
-        prog.reset(2 * 1024 ** 3, "Pass 1 of 1 — writing zeros")
+        prog.reset(2 * 1024 ** 3, "Pass 1 of 1: writing zeros")
         prog.set_detail("pattern 0x00")
         for i in range(100):
             prog.check()
             time.sleep(.05)
             prog.update(int(.52 * prog.total * i / 100))
-    app.run_job("demo", fake, lambda r: None, panel)
+    app.run_job("Erase and certify", fake, lambda r: None, panel)
     pump(4.5)
     shot("progress_dark")
     wait()
@@ -173,7 +173,7 @@ def take_screenshots():
     shot("partitions_found")
 
     mode("light")
-    tmpd = os.path.join(W, "docs_shred")
+    tmpd = os.path.join("/tmp", "Desktop")  # short path, it shows on screen
     os.makedirs(tmpd, exist_ok=True)
     names = ["Payroll 2025.xlsx", "Client contracts", "old-passwords.txt"]
     for n in names:
@@ -199,12 +199,43 @@ def take_screenshots():
     pump(.8)
     shot("guide_dark")
 
+    shutil.rmtree(tmpd, ignore_errors=True)
+
+    # the new workspace pages
+    mode("light")
+    app.go(WS.DrivesScreen)
+    pump(1.5)
+    shot("drives_light")
+    mode("dark")
+    app.go(WS.MachinesScreen)
+    pump(1)
+    shot("machines_dark")
+    mode("light")
+    app.go(WS.JobsScreen)
+    pump(1)
+    shot("jobs_light")
+    app.go(DS.DeployScreen)
+    pump(1.2)
+    shot("manage_light")
+    app.go(ST.SettingsScreen)
+    pump(1)
+    shot("settings_light")
+    mode("dark")
+    app.home()
+    pump(.8)
+    app.open_palette()
+    pump(.8)
+    shot("palette_dark")
+    app.event_generate("<Escape>")
+    pump(.4)
+
+    # Home last, so recent jobs are filled in
     mode("light")
     app.home()
-    pump(.5)
-    app.open_advanced()
-    pump(1.5)
-    shot("advanced")
+    pump(1.2)
+    shot("home_light")
+    mode("dark")
+    shot("home_dark")
     app.destroy()
 
 
@@ -277,13 +308,15 @@ def roam_gif():
 
 def link_shots(folder):
     """Frame screenshots produced by tests/ui_link_smoke.py."""
-    mapping = {"L02_connect_linked": ("connect", False), "L05_migrate_what": ("migrate_what", False),
-               "L06_migrate_done": ("migrate_done", False), "L08_netclone_dest": ("netclone_dest", True),
-               "L10_netclone_running": ("netclone_running", True)}
+    mapping = {"connect_linked": ("connect", False), "migrate_from": ("migrate_from", False),
+               "migrate_what": ("migrate_what", False), "migrate_apps": ("migrate_apps", False),
+               "migrate_done": ("migrate_done", False), "netclone_dest": ("netclone_dest", True),
+               "netclone_running": ("netclone_running", True)}
+    files = sorted(os.listdir(folder))
     for raw, (out, dark) in mapping.items():
-        p = os.path.join(folder, raw + ".png")
-        if os.path.exists(p):
-            framed(raw, src=p, out=out, dark=dark)
+        hits = [f for f in files if f.endswith("_" + raw + ".png")]
+        if hits:
+            framed(raw, src=os.path.join(folder, hits[0]), out=out, dark=dark)
 
 
 def hero():
@@ -297,7 +330,7 @@ def hero():
     glow = Image.new("RGBA", (Wd, Hd), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gd.ellipse((-120, 220, 620, 900), fill=(82, 201, 142, 70))
-    gd.ellipse((1050, -260, 1800, 380), fill=(255, 92, 153, 60))
+    gd.ellipse((1050, -260, 1800, 380), fill=(99, 102, 241, 80))
     glow = glow.filter(ImageFilter.GaussianBlur(110))
     bg.alpha_composite(glow)
     # pixel grid texture
@@ -321,17 +354,17 @@ def hero():
     bg.alpha_composite(m, (300, Hd - m.height + 10))
     d = ImageDraw.Draw(bg)
     d.text((80, 96), "SectorSmith", font=font("xb", 92), fill=(244, 241, 255))
-    d.text((84, 204), "The friendly disk toolkit", font=font("sb", 32), fill=(214, 206, 240))
-    d.text((84, 246), "for Windows techs.", font=font("sb", 32), fill=(214, 206, 240))
-    chips = ["Recover", "Wipe", "Partitions", "Health", "Clone"]
+    d.text((84, 204), "The bench toolkit", font=font("sb", 32), fill=(214, 206, 240))
+    d.text((84, 246), "for MSP technicians.", font=font("sb", 32), fill=(214, 206, 240))
+    chips = ["Recover", "Erase", "Migrate", "Deploy", "Clone"]
     x = 86
     layer = Image.new("RGBA", (Wd, Hd), (0, 0, 0, 0))
     ld = ImageDraw.Draw(layer)
     for c in chips:
         w = ld.textlength(c, font=font("b", 19)) + 32
-        ld.rounded_rectangle((x, 308, x + w, 346), 19, fill=(255, 92, 153, 46), outline=(255, 120, 170, 190),
+        ld.rounded_rectangle((x, 308, x + w, 346), 19, fill=(99, 102, 241, 56), outline=(129, 140, 248, 200),
                              width=2)
-        ld.text((x + w / 2, 327), c, font=font("b", 19), fill=(255, 214, 230, 255), anchor="mm")
+        ld.text((x + w / 2, 327), c, font=font("b", 19), fill=(224, 231, 255, 255), anchor="mm")
         x += w + 10
     bg.alpha_composite(layer)
     bg.convert("RGB").save(os.path.join(OUT, "hero.png"), optimize=True)
@@ -378,8 +411,8 @@ def sweep_gif():
         bx = left + 22 * 3
         by = top - 4
         w = 18 + 11 * len(txt)
-        d.rectangle((bx - w / 2 - 3, by - 30, bx + w / 2 + 3, by + 3), fill=(178, 52, 104))
-        d.rectangle((bx - w / 2, by - 27, bx + w / 2, by), fill=(255, 92, 153))
+        d.rectangle((bx - w / 2 - 3, by - 30, bx + w / 2 + 3, by + 3), fill=(55, 48, 163))
+        d.rectangle((bx - w / 2, by - 27, bx + w / 2, by), fill=(99, 102, 241))
         d.text((bx, by - 13), txt, font=font("b", 16), fill=(255, 255, 255), anchor="mm")
         imgs.append(im)
     imgs[0].save(os.path.join(OUT, "sweep.gif"), save_all=True, append_images=imgs[1:], duration=70, loop=0,
@@ -414,7 +447,8 @@ if __name__ == "__main__":
         take_screenshots()
     for n in ["welcome", "home_light", "home_dark", "recover_pick", "recover_type", "recover_results",
               "wipe_strength", "wipe_confirm", "progress_dark", "health_result", "partitions_found", "shred_drop",
-              "clone_dest", "guide_dark", "advanced"]:
+              "clone_dest", "guide_dark", "drives_light", "machines_dark", "jobs_light", "manage_light",
+              "settings_light", "palette_dark"]:
         framed(n)
     hero()
     sweep_gif()
