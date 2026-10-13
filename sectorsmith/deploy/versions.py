@@ -192,7 +192,8 @@ def validate(src: dict) -> dict:
         s["repo"] = (src.get("repo") or "").strip().strip("/")
         s["asset"] = (src.get("asset") or "").strip()
         if not GITHUB_REPO.match(s["repo"]):
-            raise ValueError("Give the GitHub repository as owner/name, for example notepad-plus-plus/notepad-plus-plus.")
+            raise ValueError("Give the GitHub repository as owner/name, for example "
+                             "notepad-plus-plus/notepad-plus-plus.")
         _rx(s["asset"], "asset pattern")
     elif kind == "page":
         s["url"], s["regex"] = (src.get("url") or "").strip(), (src.get("regex") or "").strip()

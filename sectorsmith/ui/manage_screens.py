@@ -979,9 +979,13 @@ class TaskLibraryScreen(ManagePage):
 
     def _show(self, e):
         have = self._have(e)
-        params = [f"{p.get('label') or p['name']}: {taskparams.TYPES[p.get('type', 'text')].lower()}"
-                  + (f", default {p['default']}" if p.get("default") not in (None, "") else "")
-                  for p in e["parameters"]]
+        def line(p):
+            d = p.get("default")
+            text = f"{p.get('label') or p['name']}: {taskparams.TYPES[p.get('type', 'text')].lower()}"
+            if d not in (None, ""):
+                text += f", default {taskparams.shown(p, d).lower() if isinstance(d, bool) else d}"
+            return text
+        params = [line(p) for p in e["parameters"]]
         sections = [("What it does", e["description"], False)]
         if params:
             sections.append(("Settings", "\n".join(params), False))

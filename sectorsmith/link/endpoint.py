@@ -733,12 +733,16 @@ $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $cpu = @(Get-CimInstance Win32_Processor)
 $disks = @(Get-CimInstance Win32_DiskDrive | ForEach-Object {
-    [ordered]@{ name = "$($_.Model)".Trim(); size_gb = [math]::Round($_.Size / 1GB, 1); type = "$($_.InterfaceType)" } })
+    [ordered]@{ name = "$($_.Model)".Trim(); size_gb = [math]::Round($_.Size / 1GB, 1);
+                type = "$($_.InterfaceType)" } })
 $vols = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
     [ordered]@{ drive = $_.DeviceID; size_gb = [math]::Round($_.Size / 1GB, 1);
                 free_gb = [math]::Round($_.FreeSpace / 1GB, 1) } })
 $bl = 'Unknown'
-try { $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop; $bl = "$($v.ProtectionStatus)" } catch { }
+try {
+    $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+    $bl = "$($v.ProtectionStatus)"
+} catch { }
 $boot = ''
 if ($os.LastBootUpTime) { $boot = $os.LastBootUpTime.ToUniversalTime().ToString('o') }
 [ordered]@{
@@ -792,7 +796,8 @@ def _linux_inventory():
             "manufacturer": _read(dmi + "sys_vendor"), "serial": _read(dmi + "product_serial"), "cpu": cpu,
             "cores": os.cpu_count() or 0, "ram_gb": round(mem / 1024 / 1024, 1), "bitlocker": "Not Windows",
             "domain": "", "disks": [],
-            "volumes": [{"drive": "/", "size_gb": round(du.total / 1024 ** 3, 1), "free_gb": round(du.free / 1024 ** 3, 1)}],
+            "volumes": [{"drive": "/", "size_gb": round(du.total / 1024 ** 3, 1),
+                         "free_gb": round(du.free / 1024 ** 3, 1)}],
             "last_boot": (time.time() - up) if up else None}
 
 

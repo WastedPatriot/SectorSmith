@@ -55,9 +55,9 @@ def take(ep, store, software: list | None = None, host: str | None = None) -> di
     snap = dict(facts or {})
     snap["hostname"] = host
     snap["taken"] = time.time()
-    snap["software"] = sorted(({"name": e.get("name", ""), "version": e.get("version") or "",
-                                "publisher": e.get("publisher") or "", "key": e.get("key") or ""} for e in software or [] if e.get("name")
-                               and not e.get("system_component")), key=lambda e: e["name"].lower())
+    apps = [e for e in software or [] if e.get("name") and not e.get("system_component")]
+    snap["software"] = sorted(({"name": e["name"], "version": e.get("version") or "", "key": e.get("key") or "",
+                                "publisher": e.get("publisher") or ""} for e in apps), key=lambda e: e["name"].lower())
     save(store, host, snap)
     return snap
 

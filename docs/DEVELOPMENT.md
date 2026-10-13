@@ -13,8 +13,13 @@ Portable Windows toolkit for MSP technicians (Python 3.11+, CustomTkinter). Prop
 - `sectorsmith/integrations/` optional integrations, off until set up (see docs/INTEGRATIONS.md): screenconnect.py,
   ad.py (domain user lookup via ADSI), dpapi.py (secrets via Windows DPAPI). UI glue in ui/integrations_ui.py
 - `sectorsmith/deploy/` SectorSmith Deploy (desired-state software deployment):
-  analyze.py (MSI/EXE to silent switches and detection), core.py (Store, Package/Task/Client/Deployment,
-  detect, execute, re-check sessions, export of Install/Uninstall/Detect.ps1)
+  analyze.py (MSI/EXE to silent switches and detection), core.py (Store, Package/Task/Client/Deployment/Machine/
+  Licence, desired states, dependencies, targeting, restart policy, detect, execute, re-check sessions, export of
+  Install/Uninstall/Detect.ps1), versions.py (winget, GitHub, vendor page or script version sources behind an
+  injectable fetcher), taskparams.py (typed task parameters, quoted script headers, DPAPI secrets), tasklib.py
+  (built-in Test/Get/Set tasks), inventory.py (per-PC snapshots and conditions), licences.py, audit.py
+  (audit.jsonl), catalogue.py, schedule.py. Manage pages: ui/manage_screens.py, manage_inventory.py,
+  manage_licences.py, manage_audit.py
 - `sectorsmith/ui/` UI (main.py, screens.py, link_screens.py, deploy_screens.py, guide.py, mascot.py for Mossbit).
   theme.py holds the design tokens; nav.py is the route table behind the rail, sub-nav, breadcrumbs and
   Ctrl+K palette (palette.py); shell.py draws the rail, sub-nav and context bar; workspace.py has the Drives,

@@ -808,6 +808,31 @@ app.open_target("manage", "clients")
 pump(.4)
 assert table_text(app.screen)[0][0] == "Front office"
 
+# --- the new Manage pages, full, in both themes (named for docs/images/redesign) ------------------------------
+dpapi.available = lambda: True
+dpapi.protect = dpapi.unprotect = lambda b: bytes(x ^ 0x33 for x in b)
+from sectorsmith.deploy import licences as lic_mod  # noqa: E402
+from sectorsmith.deploy.core import Licence  # noqa: E402
+lic_mod.save(store(), Licence(package_id=handy.id, client_id=store().client_of(host).id), key="QWERT-YUIOP-7Q2X")
+lic_mod.save(store(), Licence(package_id=pkg.id, kind="file", notes="Site licence"), file_path=setup)
+for mode in ("dark", "light"):
+    theme.set_mode(mode)
+    app.mode.set(mode.capitalize())
+    for key, pick in (("inventory", lambda t: next(i for i, h in t.rows.items() if h.lower() == host.lower())),
+                      ("licences", lambda t: next(iter(t.rows))), ("audit", lambda t: next(iter(t.rows)))):
+        app.open_target("manage", key)
+        pump(.5)
+        app.screen.table.tree.selection_set(pick(app.screen.table))
+        pump(.4)
+        shot(f"manage_{key}_{mode}")
+    app.go(MS.TaskLibraryScreen)
+    pump(.5)
+    scr = app.screen
+    scr.table.tree.selection_set(next(i for i, e in scr.table.rows.items() if e["library_id"] == "windows-update"))
+    pump(.4)
+    shot(f"manage_task_library_{mode}")
+dpapi.available, dpapi.protect, dpapi.unprotect = real_dpapi
+
 theme.set_mode("light")
 app.mode.set("Light")
 app.open_target("manage", "library")
