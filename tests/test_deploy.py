@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
@@ -1011,7 +1012,7 @@ calls = []
 
 def fake_fetch(url, **kw):
     calls.append(url)
-    if "api.github.com" in url:
+    if urllib.parse.urlsplit(url).hostname == "api.github.com":
         return GH.encode()
     return page.encode()
 
@@ -1533,8 +1534,9 @@ with open(os.path.join(lstore.root, TP.SECRETS)) as _f:
     raw_secrets = _f.read()
 with open(os.path.join(lstore.root, "licences.json")) as _f:
     raw_lic = _f.read()
-check(KEY not in raw_secrets and KEY not in raw_lic and b"seats" not in open(os.path.join(
-    lstore.root, "licences", lic_f.id, "licence.bin"), "rb").read(), "keys and files are stored encrypted")
+with open(os.path.join(lstore.root, "licences", lic_f.id, "licence.bin"), "rb") as _f:
+    raw_file = _f.read()
+check(KEY not in raw_secrets and KEY not in raw_lic and b"seats" not in raw_file, "keys and files are stored encrypted")
 check(LIC.masked(lic_k) == "Key ending 7Q2X" and LIC.masked(lic_f) == "File site.lic",
       "licences shown masked: the key's last four characters only")
 check(LIC.for_host(lstore, lk.id, host).id == lic_k.id and LIC.for_host(lstore, lk.id, "PC-OTHER").id == fallback.id

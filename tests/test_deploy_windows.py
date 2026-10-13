@@ -361,8 +361,8 @@ try:
     store.upsert("packages", rpkg)
     for d in list(store.deployments):
         store.delete("deployments", d.id)
-    rd = store.upsert("deployments", Deployment("software", rpkg.id, "installed", target_kind="machine",
-                                                target_value=host, reboot_policy="end"))
+    store.upsert("deployments", Deployment("software", rpkg.id, "installed", target_kind="machine",
+                                           target_value=host, reboot_policy="end"))
     s5 = full(store)
     a5 = by(s5)["Restart test"]
     check(a5["status"] == "failed" and "3010" in a5["result"],
