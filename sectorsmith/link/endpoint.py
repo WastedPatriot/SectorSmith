@@ -38,11 +38,11 @@ OPS = {"info", "list_disks", "list_profiles", "scan_tree", "dir_size", "read_fil
        "write_files", "mkdirs", "free_space", "path_exists", "disk_open", "disk_read", "disk_write", "disk_close",
        "ping", "list_dir", "disk_fix_gpt", "disk_plan", "make_folder",
        "installed_software", "put_file", "run_command", "run_script", "file_version", "remove_path", "deploy_dir",
-       "list_volumes", "offline_profiles", "apps_on_disk"}
+       "list_volumes", "offline_profiles", "apps_on_disk", "pending_reboot", "inventory"}
 # ops that can take a while: inside a cancel_scope a controller runs these as background jobs on the agent,
 # polls them and can cancel them (see Session)
 LONG_OPS = {"scan_tree", "dir_size", "run_command", "run_script", "disk_open", "disk_plan", "installed_software",
-            "offline_profiles", "list_disks", "apps_on_disk"}
+            "offline_profiles", "list_disks", "apps_on_disk", "inventory"}
 DEV_FIELDS = ("path", "name", "size", "sector_size", "model", "bus", "serial", "is_image", "is_system", "removable",
               "disk_number", "data_size")
 
@@ -624,6 +624,10 @@ class LocalEndpoint:
 
         def unavailable(msg):
             return {"code": 127, "out": "", "err": msg, "seconds": 0}
+        import re
+        bad = [k for k in params if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))]
+        if bad:
+            return unavailable(f"Parameter names can only use letters, digits and _: {bad[0]!r}")
         if language == "powershell":
             exe = "powershell.exe" if win else shutil.which("pwsh")
             if not exe:
@@ -664,6 +668,33 @@ class LocalEndpoint:
             except OSError:
                 pass
 
+    def inventory(self):
+        """Hardware and Windows facts for Manage, Inventory: os, build, model, manufacturer, serial, cpu, cores,
+        ram_gb, disks, volumes, bitlocker, domain and last_boot (a timestamp). Unknown values are empty."""
+        if sys.platform == "win32":
+            import base64
+            import json
+            enc = base64.b64encode(INVENTORY_PS.encode("utf-16-le")).decode("ascii")
+            r = self.run_command(f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {enc}", timeout=180)
+            if r["code"] != 0:
+                raise LinkError(f"Couldn't read the inventory: {(r['err'] or r['out']).strip()[:300]}")
+            raw = json.loads(r["out"].strip().splitlines()[-1])
+            out = {k: raw.get(k) for k in INVENTORY_FIELDS}
+            out["disks"] = _as_list(raw.get("disks"))
+            out["volumes"] = _as_list(raw.get("volumes"))
+            out["last_boot"] = _iso_ts(raw.get("last_boot"))
+            return out
+        return _linux_inventory()
+
+    def pending_reboot(self):
+        """Is Windows waiting for a restart? {"pending": bool, "reasons": [...]} from Component Based Servicing,
+        Windows Update and PendingFileRenameOperations (on Linux: /var/run/reboot-required)."""
+        if sys.platform == "win32":
+            reasons = pending_reboot_reasons(_WinReg())
+        else:
+            reasons = ["A package update asked for a restart"] if os.path.exists("/var/run/reboot-required") else []
+        return {"pending": bool(reasons), "reasons": reasons}
+
     def file_version(self, path):
         if not os.path.exists(path):
             return None
@@ -694,6 +725,124 @@ class LocalEndpoint:
 
 
 # ---------------------------------------------------------------------------
+INVENTORY_FIELDS = ("os", "build", "version", "model", "manufacturer", "serial", "cpu", "cores", "ram_gb", "bitlocker",
+                    "domain", "hostname")
+INVENTORY_PS = r"""$ErrorActionPreference = 'SilentlyContinue'
+$os = Get-CimInstance Win32_OperatingSystem
+$cs = Get-CimInstance Win32_ComputerSystem
+$bios = Get-CimInstance Win32_BIOS
+$cpu = @(Get-CimInstance Win32_Processor)
+$disks = @(Get-CimInstance Win32_DiskDrive | ForEach-Object {
+    [ordered]@{ name = "$($_.Model)".Trim(); size_gb = [math]::Round($_.Size / 1GB, 1);
+                type = "$($_.InterfaceType)" } })
+$vols = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
+    [ordered]@{ drive = $_.DeviceID; size_gb = [math]::Round($_.Size / 1GB, 1);
+                free_gb = [math]::Round($_.FreeSpace / 1GB, 1) } })
+$bl = 'Unknown'
+try {
+    $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+    $bl = "$($v.ProtectionStatus)"
+} catch { }
+$boot = ''
+if ($os.LastBootUpTime) { $boot = $os.LastBootUpTime.ToUniversalTime().ToString('o') }
+[ordered]@{
+    hostname = $env:COMPUTERNAME; os = "$($os.Caption)".Trim(); build = "$($os.BuildNumber)"; version = "$($os.Version)"
+    model = "$($cs.Model)".Trim(); manufacturer = "$($cs.Manufacturer)".Trim(); serial = "$($bios.SerialNumber)".Trim()
+    cpu = "$($cpu[0].Name)".Trim(); cores = [int](($cpu | Measure-Object NumberOfCores -Sum).Sum)
+    ram_gb = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1); bitlocker = $bl; domain = "$($cs.Domain)"
+    disks = $disks; volumes = $vols; last_boot = $boot
+} | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+def _as_list(v):
+    if v is None:
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+def _iso_ts(text):
+    import datetime
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _read(path, default=""):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def _linux_inventory():
+    """The same facts on Linux (the WinPE and test side): os-release, DMI, /proc."""
+    osr = dict(ln.split("=", 1) for ln in _read("/etc/os-release").splitlines() if "=" in ln)
+    cpu = next((ln.split(":", 1)[1].strip() for ln in _read("/proc/cpuinfo").splitlines()
+                if ln.lower().startswith("model name")), platform.processor())
+    mem = next((int(ln.split()[1]) for ln in _read("/proc/meminfo").splitlines() if ln.startswith("MemTotal")), 0)
+    try:
+        up = float(_read("/proc/uptime", "0").split()[0])
+    except (ValueError, IndexError):
+        up = 0
+    du = shutil.disk_usage("/")
+    dmi = "/sys/class/dmi/id/"
+    return {"hostname": socket.gethostname(), "os": osr.get("PRETTY_NAME", "").strip('"') or platform.platform(),
+            "build": platform.release(), "version": platform.version(), "model": _read(dmi + "product_name"),
+            "manufacturer": _read(dmi + "sys_vendor"), "serial": _read(dmi + "product_serial"), "cpu": cpu,
+            "cores": os.cpu_count() or 0, "ram_gb": round(mem / 1024 / 1024, 1), "bitlocker": "Not Windows",
+            "domain": "", "disks": [],
+            "volumes": [{"drive": "/", "size_gb": round(du.total / 1024 ** 3, 1),
+                         "free_gb": round(du.free / 1024 ** 3, 1)}],
+            "last_boot": (time.time() - up) if up else None}
+
+
+REBOOT_KEYS = [
+    (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+     "Windows servicing (CBS) has changes waiting for a restart"),
+    (r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+     "Windows Update installed updates that need a restart"),
+]
+RENAME_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager"
+
+
+def pending_reboot_reasons(reg) -> list[str]:
+    """Why Windows wants a restart, read through ``reg`` (key_exists(path), value(path, name)) so tests can fake
+    the registry. All paths are under HKLM."""
+    out = [why for key, why in REBOOT_KEYS if reg.key_exists(key)]
+    renames = reg.value(RENAME_KEY, "PendingFileRenameOperations")
+    if renames and any(str(x).strip() for x in (renames if isinstance(renames, list) else [renames])):
+        out.append("Files are waiting to be replaced at the next restart (PendingFileRenameOperations)")
+    return out
+
+
+class _WinReg:
+    """HKLM reads for pending_reboot_reasons, always the 64-bit view."""
+
+    def _open(self, path):
+        import winreg
+        return winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+
+    def key_exists(self, path):
+        try:
+            self._open(path).Close()
+            return True
+        except OSError:
+            return False
+
+    def value(self, path, name):
+        import winreg
+        try:
+            with self._open(path) as k:
+                return winreg.QueryValueEx(k, name)[0]
+        except OSError:
+            return None
+
+
 BLOB_ARG_OPS = {"write_file", "write_files", "disk_write", "put_file"}
 
 

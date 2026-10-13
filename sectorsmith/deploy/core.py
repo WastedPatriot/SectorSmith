@@ -19,6 +19,15 @@ WINGET_INSTALL = "winget install --id {winget_id} -e --silent --accept-package-a
 WINGET_UNINSTALL = "winget uninstall --id {winget_id} -e --silent"
 # msiexec 1618: another installation is in progress (often Windows Update), so wait and try again
 BUSY_CODE, BUSY_TRIES, BUSY_WAIT = 1618, 6, 20
+# wanted states of a software deployment, as the UI names them
+STATES = {"latest": "Latest", "version": "Specific version", "installed": "Any version",
+          "uninstalled": "Uninstalled", "ignore": "Ignore"}
+# planned actions that change nothing on the PC
+IDLE = ("none", "audit", "refused")
+# what a deployment does about restarts: never restart (report it), restart at the end when needed, or tell
+# installers not to restart (MSI REBOOT=ReallySuppress) and report it
+REBOOT_POLICIES = {"never": "Never restart", "end": "Restart at the end if needed", "suppress": "Suppress restarts"}
+REBOOT_DELAY = 120   # seconds of warning a signed-in user gets before a restart
 
 
 def _id():
@@ -36,6 +45,7 @@ class Package:
     uninstall: str = ""                    # may use {registry_uninstall}
     detection: dict = field(default_factory=lambda: {"method": "registry", "value": ""})
     success_codes: list = field(default_factory=lambda: [0, 3010, 1641])
+    reboot_codes: list = field(default_factory=lambda: [3010, 1641])  # exit codes that mean "restart needed"
     language: str = "powershell"           # for script detection
     product_code: str = ""
     upgrade_code: str = ""
@@ -45,6 +55,7 @@ class Package:
     notes: list = field(default_factory=list)
     id: str = field(default_factory=_id)
     created: float = field(default_factory=time.time)
+    version_source: dict = field(default_factory=dict)  # see versions.py: winget, github, page or script
 
 
 @dataclass
@@ -54,8 +65,12 @@ class Task:
     set: str = ""                          # makes it compliant
     language: str = "powershell"
     description: str = ""
-    params: dict = field(default_factory=dict)
+    params: dict = field(default_factory=dict)       # older untyped defaults (name -> value)
     id: str = field(default_factory=_id)
+    get: str = ""                          # optional: prints the current state, run after a fix
+    parameters: list = field(default_factory=list)   # typed parameters, see taskparams.py
+    category: str = ""
+    library_id: str = ""                   # set when it came from the built-in task library (tasklib.py)
 
 
 @dataclass
@@ -66,10 +81,33 @@ class Client:
 
 
 @dataclass
+class Machine:
+    """A PC SectorSmith knows by name: its tags (for targeting) and when it was last seen."""
+    hostname: str
+    tags: list = field(default_factory=list)
+    notes: str = ""
+    last_seen: float = 0
+    id: str = field(default_factory=_id)
+
+
+@dataclass
+class Licence:
+    """A client's licence key or file for a package (client_id "" = every client without its own). See licences.py."""
+    package_id: str
+    client_id: str = ""
+    kind: str = "key"                      # key | file
+    secret: dict = field(default_factory=dict)     # {"secret": ref} into the encrypted secrets
+    hint: str = ""                         # last characters of the key, for telling licences apart
+    file_name: str = ""
+    notes: str = ""
+    id: str = field(default_factory=_id)
+
+
+@dataclass
 class Deployment:
     item_type: str                         # software | task | bundle (several packages, ids in items)
     item_id: str
-    desired: str = "latest"                # software: installed|latest|version|uninstalled|ignore · task: enforce|audit
+    desired: str = "latest"                # software: see STATES (installed = any version) · task: enforce|audit
     version: str = ""
     target_kind: str = "all"               # all | client | machine
     target_value: str = ""
@@ -82,16 +120,25 @@ class Deployment:
     baseline: bool = False                 # a client's baseline: the packages every new PC for that client gets
     schedule: dict = field(default_factory=dict)   # see schedule.py: kind daily|weekly|connect, time, day, mode
     last_runs: dict = field(default_factory=dict)  # hostname (lower case) -> when its schedule last ran there
+    allow_downgrade: bool = False          # specific version older than the installed one: remove and reinstall
+    reboot_policy: str = "never"           # see REBOOT_POLICIES
+    tags: list = field(default_factory=list)       # only PCs with at least one of these tags
+    filter_script: str = ""                # only PCs where this prints True (run during the check)
+    filter_language: str = "powershell"
+    conditions: str = ""                   # only PCs whose inventory matches, e.g. "ram_gb >= 8" (inventory.py)
 
 
 # ---------------------------------------------------------------------------
 class Store:
     """JSON-backed library under %LOCALAPPDATA%\\SectorSmith\\deploy (or a given folder)."""
 
-    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment}
+    KINDS = {"packages": Package, "tasks": Task, "clients": Client, "deployments": Deployment, "machines": Machine,
+             "licences": Licence}
 
     def __init__(self, root: str | None = None):
         self.root = root or str(app_dir() / "deploy")
+        # network and programs used by version sources (versions.py); tests put fakes here
+        self.fetcher = self.runner = self.downloader = None
         os.makedirs(os.path.join(self.root, "files"), exist_ok=True)
         os.makedirs(os.path.join(self.root, "sessions"), exist_ok=True)
         self.data = {}
@@ -103,6 +150,9 @@ class Store:
                     raw = json.load(f)
             names = {f.name for f in dataclasses.fields(cls)}
             self.data[k] = [cls(**{a: b for a, b in r.items() if a in names}) for r in raw]
+        # what was last saved of each object, so the audit log can say what changed
+        self._saved = {(k, x.id): dataclasses.asdict(x) for k in self.KINDS for x in self.data[k]}
+        self.actor = None   # who makes the changes (a name, or a function giving one); the UI sets the technician
 
     def save(self, kind=None):
         for k in ([kind] if kind else self.KINDS):
@@ -129,10 +179,66 @@ class Store:
     def deployments(self):
         return self.data["deployments"]
 
+    @property
+    def machines(self):
+        return self.data["machines"]
+
+    @property
+    def licences(self):
+        return self.data["licences"]
+
+    def machine(self, hostname: str, create=False) -> Machine | None:
+        h = (hostname or "").lower()
+        m = next((x for x in self.machines if x.hostname.lower() == h), None)
+        if m is None and create and h:
+            m = Machine(hostname=hostname)
+            self.machines.append(m)
+        return m
+
+    def tags_of(self, hostname: str) -> list[str]:
+        m = self.machine(hostname)
+        return list(m.tags) if m else []
+
+    def set_tags(self, hostname: str, tags) -> Machine:
+        m = self.machine(hostname, create=True)
+        m.tags = clean_tags(tags)
+        return self.upsert("machines", m)
+
+    def all_tags(self) -> list[str]:
+        seen = {}
+        for m in self.machines:
+            for t in m.tags:
+                seen.setdefault(t.lower(), t)
+        for d in self.deployments:
+            for t in d.tags:
+                seen.setdefault(t.lower(), t)
+        return sorted(seen.values(), key=str.lower)
+
+    def known_hosts(self) -> list[str]:
+        """Every PC the library knows by name: in a client, tagged or seen, or named by a deployment."""
+        seen = {}
+        for c in self.clients:
+            for h in c.machines:
+                seen.setdefault(h.lower(), h)
+        for m in self.machines:
+            seen.setdefault(m.hostname.lower(), m.hostname)
+        for d in self.deployments:
+            if d.target_kind == "machine" and d.target_value:
+                seen.setdefault(d.target_value.lower(), d.target_value)
+        return sorted(seen.values(), key=str.lower)
+
     def get(self, kind, id_):
         return next((x for x in self.data[kind] if x.id == id_), None)
 
     def upsert(self, kind, obj):
+        if kind == "tasks":
+            from .taskparams import tidy_parameters
+            obj.parameters = tidy_parameters(obj.parameters)
+        if kind == "packages":
+            loop = dependency_loop(self, obj)
+            if loop:
+                raise ValueError("That would make a loop: " + " needs ".join(loop) + ". A package can't end up "
+                                 "needing itself, so remove one of those.")
         lst = self.data[kind]
         for i, x in enumerate(lst):
             if x.id == obj.id:
@@ -141,12 +247,61 @@ class Store:
         else:
             lst.append(obj)
         self.save(kind)
+        self._audit_change(kind, obj)
         return obj
 
+    def audit_name(self, kind, obj) -> str:
+        if kind == "machines":
+            return obj.hostname
+        if kind == "deployments":
+            if obj.item_type == "bundle":
+                return obj.name or "Bundle"
+            item = self.get("packages" if obj.item_type == "software" else "tasks", obj.item_id)
+            return item.name if item else obj.item_id
+        if kind == "licences":
+            p, c = self.get("packages", obj.package_id), self.get("clients", obj.client_id)
+            return f"{p.name if p else '?'} for {c.name if c else 'every client'}"
+        return getattr(obj, "name", "") or obj.id
+
+    def _audit_change(self, kind, obj):
+        from . import audit
+        after = dataclasses.asdict(obj)
+        before = self._saved.get((kind, obj.id))
+        self._saved[(kind, obj.id)] = after
+        if before is None:
+            audit.record(self, "first seen" if kind == "machines" else "added", kind, obj.id,
+                         self.audit_name(kind, obj))
+            return
+        detail = audit.describe_change(kind, before, after)
+        if detail:
+            audit.record(self, "changed", kind, obj.id, self.audit_name(kind, obj), detail)
+
     def delete(self, kind, id_):
+        gone_obj = self.get(kind, id_)
+        if gone_obj is not None:
+            from . import audit
+            audit.record(self, "removed", kind, id_, self.audit_name(kind, gone_obj))
+            self._saved.pop((kind, id_), None)
+        if kind in ("packages", "clients"):
+            for lic in [x for x in self.licences if id_ in (x.package_id, x.client_id)]:
+                self.delete("licences", lic.id)
+        if kind == "licences":
+            gone = self.get("licences", id_)
+            if gone is not None:
+                from .licences import forget
+                forget(self, gone)
+        if kind == "deployments":
+            gone = self.get("deployments", id_)
+            for v in (gone.params.values() if gone is not None else []):
+                if isinstance(v, dict) and v.get("secret"):
+                    from .taskparams import forget_secret
+                    forget_secret(self.root, v["secret"])
         self.data[kind] = [x for x in self.data[kind] if x.id != id_]
         if kind == "packages":
             shutil.rmtree(os.path.join(self.root, "files", id_), ignore_errors=True)
+            for p in self.packages:
+                if id_ in p.prerequisites:
+                    p.prerequisites = [x for x in p.prerequisites if x != id_]
             self.data["deployments"] = [d for d in self.deployments if not (d.item_type == "software"
                                                                             and d.item_id == id_)]
             for d in self.deployments:
@@ -399,6 +554,51 @@ def expand(template: str, pkg: Package, installer: str = "", registry_uninstall:
             .replace("{registry_uninstall}", registry_uninstall))
 
 
+def exit_outcome(pkg: Package, code: int) -> str:
+    """'reboot' (worked, needs a restart), 'ok' or 'failed' for an installer's exit code."""
+    if code in (pkg.reboot_codes or []):
+        return "reboot"
+    return "ok" if code in (pkg.success_codes or [0]) else "failed"
+
+
+def suppress_reboot(cmd: str) -> str:
+    """An msiexec command told not to restart by itself (other commands as they are)."""
+    if re.match(r'^\s*"?(?:[^"]*\\)?msiexec(?:\.exe)?"?\s', cmd, re.I) and "reboot=" not in cmd.lower():
+        return cmd.rstrip() + " REBOOT=ReallySuppress"
+    return cmd
+
+
+def is_this_pc(ep) -> bool:
+    """The technician's own PC (never restarted automatically): this endpoint, or an agent on the same host."""
+    import socket
+    if getattr(ep, "is_local", False):
+        return True
+    try:
+        host = (ep.info() or {}).get("hostname") or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return host.lower() == socket.gethostname().lower()
+
+
+def pending_reboot(ep) -> dict | None:
+    """{"pending", "reasons"} from the PC, or None when it can't say (an older agent, or an error)."""
+    try:
+        r = ep.pending_reboot()
+    except Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.info("Couldn't read pending restarts: %s", e)
+        return None
+    return r if isinstance(r, dict) else None
+
+
+def restart_command(os_name: str) -> str:
+    if "windows" in (os_name or "").lower() or not os_name:
+        return (f'shutdown.exe /r /t {REBOOT_DELAY} /d p:4:1 /c "SectorSmith maintenance finished and this PC needs a '
+                'restart. Save your work."')
+    return f"shutdown -r +{max(1, REBOOT_DELAY // 60)}"
+
+
 def vtuple(v: str | None):
     if not v:
         return ()
@@ -438,6 +638,71 @@ def detect(ep, pkg: Package, inv: list[dict]) -> tuple[bool, str | None, dict | 
 
 
 # ---------------------------------------------------------------------------
+def dependency_loop(store: Store, pkg: Package) -> list[str]:
+    """Package names around a dependency loop through pkg (as it would be saved), or [] when there is none."""
+    graph = {p.id: list(p.prerequisites) for p in store.packages}
+    graph[pkg.id] = list(pkg.prerequisites)
+    done: set = set()
+
+    def walk(n, stack):
+        if n in stack:
+            return stack[stack.index(n):] + [n]
+        if n in done:
+            return None
+        for m in graph.get(n, []):
+            r = walk(m, stack + [n])
+            if r:
+                return r
+        done.add(n)
+        return None
+    loop = walk(pkg.id, [])
+    if not loop:
+        return []
+    names = {p.id: p.name for p in store.packages}
+    names[pkg.id] = pkg.name
+    return [names.get(i, "a deleted package") for i in loop]
+
+
+def dependency_order(store: Store) -> dict:
+    """{package id: position} with every package after the ones it needs (loops are cut where found)."""
+    order: dict = {}
+    visiting: set = set()
+
+    def visit(pid):
+        if pid in order or pid in visiting:
+            return
+        visiting.add(pid)
+        p = store.get("packages", pid)
+        for pre in (p.prerequisites if p else []):
+            visit(pre)
+        visiting.discard(pid)
+        order[pid] = len(order)
+    for p in store.packages:
+        visit(p.id)
+    return order
+
+
+def needed_by(store: Store, deps: list) -> dict:
+    """{package id: names of the packages that need it}, over the deployments that keep software on the PC."""
+    out: dict = {}
+
+    def walk(pid, who, seen):
+        p = store.get("packages", pid)
+        for pre in (p.prerequisites if p else []):
+            if pre not in seen:
+                seen.add(pre)
+                out.setdefault(pre, [])
+                if who not in out[pre]:
+                    out[pre].append(who)
+                walk(pre, who, seen)
+    for d in deps:
+        if d.item_type == "software" and d.desired not in ("uninstalled", "ignore"):
+            p = store.get("packages", d.item_id)
+            if p is not None:
+                walk(p.id, p.name, {p.id})
+    return out
+
+
 def expand_bundle(d: Deployment) -> list[Deployment]:
     """A bundle as one software deployment per package (ids '<bundle id>/<package id>'); anything else as is."""
     if d.item_type != "bundle":
@@ -451,8 +716,26 @@ def source_id(deployment_id: str) -> str:
     return (deployment_id or "").split("/")[0]
 
 
+def clean_tags(tags) -> list[str]:
+    """'Laptops, kiosk , laptops' -> ['Laptops', 'kiosk'] (case-insensitive, first spelling kept)."""
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    seen = {}
+    for t in tags or []:
+        t = " ".join(str(t).split())[:40]
+        if t:
+            seen.setdefault(t.lower(), t)
+    return list(seen.values())
+
+
 def targets(store: Store, d: Deployment, hostname: str) -> bool:
+    """Does the deployment's target (every PC, a client or one PC, narrowed by tags) take in this PC? The filter
+    script is checked separately, on the PC (see filter_passes)."""
     h = hostname.lower()
+    if d.tags:
+        have = {t.lower() for t in store.tags_of(hostname)}
+        if not have & {t.lower() for t in d.tags}:
+            return False
     if d.target_kind == "all":
         return True
     if d.target_kind == "machine":
@@ -460,19 +743,75 @@ def targets(store: Store, d: Deployment, hostname: str) -> bool:
     return d.target_kind == "client" and d.target_value in {c.id for c in store.clients_of(hostname)}
 
 
-def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list[Deployment]:
+def applies_to(store: Store, d: Deployment, hosts: list[str] | None = None, unknown: list | None = None) -> list[str]:
+    """The known PCs a deployment's target takes in, with its inventory conditions judged from each PC's last
+    snapshot (before its filter script, which only the PC can answer). PCs with conditions but no snapshot go in
+    ``unknown``."""
+    from . import inventory
+    hosts = store.known_hosts() if hosts is None else hosts
+    if d.target_kind == "machine" and d.target_value and d.target_value.lower() not in {h.lower() for h in hosts}:
+        hosts = hosts + [d.target_value]
+    out = [h for h in hosts if targets(store, d, h)]
+    if d.conditions.strip():
+        try:
+            conds = inventory.parse_conditions(d.conditions)
+        except ValueError:
+            return []
+        snaps = inventory.all_snapshots(store)
+        keep = []
+        for h in out:
+            ok, _why = inventory.conditions_pass(snaps.get(h.lower()), conds)
+            if ok:
+                keep.append(h)
+            elif ok is None and unknown is not None:
+                unknown.append(h)
+        out = keep
+    return out
+
+
+TRUE_WORDS = ("true", "$true", "1", "yes")
+
+
+def filter_passes(ep, d: Deployment, cache: dict | None = None) -> tuple[bool, str]:
+    """Runs the deployment's filter script on the PC: (applies, why). It applies when the script exits 0 and its
+    last line says True. Same script, same answer within one check (cache)."""
+    if not d.filter_script.strip():
+        return True, ""
+    key = (d.filter_language, d.filter_script)
+    if cache is not None and key in cache:
+        return cache[key]
+    r = ep.run_script(script=d.filter_script, language=d.filter_language or "powershell", timeout=300)
+    lines = [ln.strip() for ln in (r.get("out") or "").splitlines() if ln.strip()]
+    last = lines[-1].lower() if lines else ""
+    if r["code"] != 0:
+        res = (False, f"the filter script failed (exit {r['code']}): {(r.get('err') or '').strip()[:120]}")
+    else:
+        res = (last in TRUE_WORDS, "" if last in TRUE_WORDS else f"the filter script said {last or 'nothing'}")
+    if cache is not None:
+        cache[key] = res
+    return res
+
+
+def applicable(store: Store, hostname: str, onboarding: bool, only=None, check=None) -> list[Deployment]:
     """What applies to this PC, most specific first wins per item. ``only``: deployment ids; the run is limited to
-    their items (a more specific deployment of the same item still decides what happens to it)."""
+    their items (a more specific deployment of the same item still decides what happens to it). ``check(d)``: the
+    PC's answer to a deployment's filter script (True applies); without it filter scripts aren't run."""
     res = []
     for d in store.deployments:
         if not d.enabled or (d.onboarding_only and not onboarding):
             continue
-        if targets(store, d, hostname):
+        if targets(store, d, hostname) and (check is None or not (d.filter_script.strip() or d.conditions.strip())
+                                            or check(d)):
             res.extend(expand_bundle(d))
-    # most specific deployment wins per item: machine > client > all
-    rank = {"machine": 0, "client": 1, "all": 2}
+    # most specific deployment wins per item: one PC > a client > every PC; narrowed by tags or a filter beats
+    # the same target without
+    rank = {"machine": 0, "client": 2, "all": 4}
+
+    def score(d):
+        src = store.get("deployments", source_id(d.id)) or d
+        return rank.get(d.target_kind, 6) - (1 if (src.tags or src.filter_script.strip()) else 0)
     best = {}
-    for d in sorted(res, key=lambda d: rank.get(d.target_kind, 3)):
+    for d in sorted(res, key=score):
         best.setdefault((d.item_type, d.item_id), d)
     if only is not None:
         wanted = set(only)
@@ -496,14 +835,18 @@ def applicable(store: Store, hostname: str, onboarding: bool, only=None) -> list
         order.append(d)
     for d in best.values():
         visit(d)
-    return order
+    # removals go first, each before the packages it needs (they are removed after it)
+    pos = dependency_order(store)
+    gone = [d for d in order if d.item_type == "software" and d.desired == "uninstalled"]
+    gone.sort(key=lambda d: -pos.get(d.item_id, -1))
+    return gone + [d for d in order if d not in gone]
 
 
-def _upload(ep, store: Store, pkg: Package, prog: Progress | None) -> str:
-    src = store.installer_path(pkg)
+def _upload(ep, src: str, pkg: Package, prog: Progress | None) -> str:
+    name = os.path.basename(src)
     remote_dir = ep.deploy_dir()
     sep = "\\" if "\\" in remote_dir else "/"
-    dest = f"{remote_dir}{sep}{pkg.id}{sep}{pkg.installer}"
+    dest = f"{remote_dir}{sep}{pkg.id}{sep}{name}"
     size = os.path.getsize(src)
     with open(src, "rb") as f:
         off = 0
@@ -513,7 +856,7 @@ def _upload(ep, store: Store, pkg: Package, prog: Progress | None) -> str:
             ep.put_file(path=dest, offset=off, total=size, blob=data)
             off += len(data)
             if prog:
-                prog.set_detail(f"Uploading {pkg.installer}: {off * 100 // max(1, size)}%")
+                prog.set_detail(f"Uploading {name}: {off * 100 // max(1, size)}%")
             if size == 0:
                 break
     return dest
@@ -529,50 +872,151 @@ def _registry_uninstall(entry: dict | None) -> str:
     return cmd
 
 
-def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None) -> list[dict]:
+def resolve(desired: str, installed: bool, current: str | None, want: str, allow_downgrade=False) -> str:
+    """What a software deployment needs on one PC: install, upgrade, reinstall (an allowed downgrade), refused (a
+    downgrade that isn't allowed), uninstall or none."""
+    if desired == "ignore":
+        return "none"
+    if desired == "uninstalled":
+        return "uninstall" if installed else "none"
+    if not installed:
+        return "install"
+    if desired in ("latest", "version") and want and vtuple(current) < vtuple(want):
+        return "upgrade"
+    if desired == "version" and want and vtuple(current) > vtuple(want):
+        return "reinstall" if allow_downgrade else "refused"
+    return "none"
+
+
+def plan(ep, store: Store, hostname: str, inv: list[dict], onboarding=False, only=None,
+         filtered: list | None = None, snap: dict | None = None) -> list[dict]:
     """Detection stage: what each applicable deployment needs on this machine (read-only)."""
     actions = []
-    for d in applicable(store, hostname, onboarding, only):
+    cache: dict = {}
+    skipped = []
+
+    def check(d):
+        if d.conditions.strip():
+            from . import inventory
+            try:
+                ok, why = inventory.conditions_pass(snap if snap is not None else inventory.load(store, hostname),
+                                                    d.conditions)
+            except ValueError as e:
+                ok, why = False, f"its conditions can't be read: {e}"
+            if not ok:
+                skipped.append({"deployment": d.id, "why": why})
+                return False
+        ok, why = filter_passes(ep, d, cache)
+        if not ok:
+            skipped.append({"deployment": d.id, "why": why})
+        return ok
+    deps = applicable(store, hostname, onboarding, only, check)
+    # a package that something staying on the PC needs isn't removed (judged over everything aimed at the PC)
+    needs = needed_by(store, deps if only is None else applicable(store, hostname, onboarding, check=check))
+    if filtered is not None:
+        filtered.extend({x["deployment"]: x for x in skipped}.values())
+    for d in deps:
         if d.item_type == "software":
             pkg = store.get("packages", d.item_id)
-            if pkg is None or d.desired == "ignore":
+            if pkg is None:
+                continue
+            if d.desired == "ignore":
+                # shown so it's clear a wider deployment is switched off here; nothing is checked or changed
+                actions.append({"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
+                                "desired": "ignore", "want": "", "current": "not checked", "action": "none",
+                                "entry": None, "result": "ignored on this PC"})
                 continue
             installed, ver, entry = detect(ep, pkg, inv)
-            want = d.version if d.desired == "version" else pkg.version
-            note = ""
-            if d.desired == "uninstalled":
-                act = "uninstall" if installed else "none"
-            elif not installed:
-                act = "install"
-            elif d.desired in ("latest", "version") and want and vtuple(ver) < vtuple(want):
-                act = "upgrade"
-            elif d.desired == "version" and want and vtuple(ver) > vtuple(want):
-                act = "reinstall"  # downgrade
-            else:
-                act = "none"
+            found, note = None, ""
+            if pkg.version_source and d.desired != "uninstalled":
+                from . import versions
+                try:
+                    found = versions.latest(store, pkg)
+                    found.pop("cached", None)
+                except (versions.SourceError, ValueError) as e:
+                    note = f"couldn't check the newest version ({e})"
+            newest = found["version"] if found else pkg.version
+            want = d.version if d.desired == "version" else newest
+            act = resolve(d.desired, installed, ver, want, d.allow_downgrade)
+            if act == "refused":
+                note = f"{ver} is newer than {want}; downgrades are off for this deployment"
+            if act == "uninstall" and needs.get(pkg.id):
+                act, note = "audit", f"kept, because {', '.join(needs[pkg.id][:3])} needs it"
             # the library holds one installer per package, so a pin to any other version can't be installed
-            if d.desired == "version" and act != "none" and want and pkg.version \
-                    and vtuple(pkg.version) != vtuple(want):
-                act, note = "audit", f"the library has {pkg.version}, this deployment pins {want}"
+            # (winget installs any version it knows)
+            have = {vtuple(x) for x in (pkg.version, found and found.get("url") and found["version"]) if x}
+            if d.desired == "version" and act not in ("none", "refused") and want and have \
+                    and vtuple(want) not in have and pkg.kind != "winget":
+                act, note = "audit", f"the library has {pkg.version or found['version']}, this deployment pins {want}"
             a = {"type": "software", "deployment": d.id, "item": pkg.id, "name": pkg.name,
                  "desired": d.desired + (f" {want}" if d.desired in ("latest", "version") and want else ""),
                  "want": want if d.desired in ("latest", "version") else "",
                  "current": ver or "not installed", "action": act, "entry": entry}
+            if found:
+                a["source"] = found
+            from .licences import for_host
+            lic = for_host(store, pkg.id, hostname)
+            if lic is not None:
+                a["licence"] = lic.id
             if note:
                 a["result"] = note
             actions.append(a)
         else:
             task = store.get("tasks", d.item_id)
-            if task is None or d.desired == "ignore":
+            if task is None:
                 continue
-            r = ep.run_script(script=task.test, language=task.language, params={**task.params, **d.params},
-                              timeout=600)
+            if d.desired == "ignore":
+                actions.append({"type": "task", "deployment": d.id, "item": task.id, "name": task.name,
+                                "desired": "ignore", "current": "not checked", "action": "none",
+                                "result": "ignored on this PC"})
+                continue
+            ctx = task_context(store, hostname)
+            base = {"type": "task", "deployment": d.id, "item": task.id, "name": task.name, "desired": d.desired,
+                    "context": ctx}
+            try:
+                values = task_values(store, task, d)
+                script = task_script(task, "test", values, ctx)
+            except ValueError as e:
+                actions.append(dict(base, current="not checked", action="audit", result=f"can't run: {e}"))
+                continue
+            # the check step only ever runs Test
+            r = ep.run_script(script=script, language=task.language, timeout=600)
             ok = r["code"] == 0
             act = "none" if ok else ("set" if d.desired == "enforce" else "audit")
-            actions.append({"type": "task", "deployment": d.id, "item": task.id, "name": task.name,
-                            "desired": d.desired, "current": "compliant" if ok else "not compliant",
-                            "action": act, "test_output": (r["out"] + r["err"])[-500:]})
+            actions.append(dict(base, current="compliant" if ok else "not compliant", action=act,
+                                test_output=mask_output(r["out"] + r["err"], values)[-500:]))
     return actions
+
+
+def task_context(store: Store, hostname: str) -> dict:
+    """Variables every task script gets besides its own parameters."""
+    return {"SectorSmithComputer": hostname,
+            "SectorSmithClient": ", ".join(c.name for c in store.clients_of(hostname))}
+
+
+def task_values(store: Store, task: Task, dep: Deployment | None) -> dict:
+    """The task's parameter values for a deployment, checked, with secrets decrypted. Raises ValueError."""
+    from . import taskparams as TP
+    values = TP.values_for(task.parameters, task.params, dep.params if dep is not None else {})
+    return TP.reveal(store.root, values)
+
+
+def task_script(task: Task, which: str, values: dict, context: dict | None = None) -> str:
+    """Test, Get or Set with the parameters set at the top as quoted literals."""
+    from . import taskparams as TP
+    return TP.render({"test": task.test, "set": task.set, "get": task.get}[which], values, task.language, context)
+
+
+def mask_output(text: str, values: dict) -> str:
+    from . import taskparams as TP
+    return TP.mask(text or "", TP.secret_values(values))
+
+
+def idle_status(a: dict) -> str:
+    """Status of an action that wasn't run: ignored, compliant, or non-compliant (audit, refused downgrade)."""
+    if a.get("desired") == "ignore":
+        return "ignored"
+    return "compliant" if a["action"] == "none" else "non-compliant"
 
 
 def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
@@ -580,10 +1024,13 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     t0 = time.time()
     a = dict(a)
     log_lines = []
+    dep = store.get("deployments", source_id(a.get("deployment", "")))
+    policy = dep.reboot_policy if dep is not None else "never"
+    secrets: list = []   # decrypted task secrets, masked in the saved log
 
-    def run(cmd):
+    def run(cmd, env=None):
         for attempt in range(BUSY_TRIES):
-            r = ep.run_command(cmd=cmd, timeout=3600)
+            r = ep.run_command(cmd=cmd, timeout=3600, env=env) if env else ep.run_command(cmd=cmd, timeout=3600)
             log_lines.append(f"$ {cmd}\nexit {r['code']}\n{r['out']}{r['err']}")
             if r["code"] != BUSY_CODE or attempt == BUSY_TRIES - 1:
                 return r
@@ -614,23 +1061,55 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
                     return a
                 if prog:
                     prog.set_detail(f"Removing {pkg.name}")
-                run(cmd)
+                if policy == "suppress":
+                    cmd = suppress_reboot(cmd)
+                r = run(cmd)
+                if r["code"] in (pkg.reboot_codes or []):
+                    a["reboot"] = True
             if a["action"] in ("install", "upgrade", "reinstall"):
-                remote = _upload(ep, store, pkg, prog) if pkg.installer else ""
-                try:
+                found = a.get("source") or {}
+                local = store.installer_path(pkg)
+                inst = pkg
+                if found.get("version"):
+                    inst = dataclasses.replace(pkg, version=found["version"])
+                if a["desired"].startswith("version") and a.get("want"):
+                    inst = dataclasses.replace(pkg, version=a["want"])
+                if pkg.kind != "winget" and found.get("url") and \
+                        (not local or vtuple(found["version"]) != vtuple(pkg.version) or not os.path.exists(local)):
+                    from . import versions
                     if prog:
-                        prog.set_detail(f"Installing {pkg.name} {pkg.version}")
-                    r = run(expand(pkg.install, pkg, installer=remote))
+                        prog.set_detail(f"Downloading {pkg.name} {found['version']}")
+                    local = versions.get_installer(store, pkg, found)
+                    log_lines.append(f"downloaded {found['url']}" + (" (SHA256 checked)" if found.get("sha256")
+                                                                     else " (no SHA256 to check)"))
+                cmd_t = pkg.install
+                if pkg.kind == "winget" and a["desired"].startswith("version") and a.get("want") \
+                        and "--version" not in cmd_t:
+                    cmd_t += " --version {version}"
+                remote = _upload(ep, local, pkg, prog) if local else ""
+                lic_file = ""
+                try:
+                    env = _licence(ep, store, pkg, a, secrets, log_lines)
+                    lic_file = env.get("SECTORSMITH_LICENCE_FILE", "")
+                    if prog:
+                        prog.set_detail(f"Installing {pkg.name} {inst.version}")
+                    cmd = expand(cmd_t, inst, installer=remote)
+                    cmd = cmd.replace("{licence_key}", env.get("SECTORSMITH_LICENCE_KEY", "")).replace(
+                        "{licence_file}", lic_file)
+                    r = run(suppress_reboot(cmd) if policy == "suppress" else cmd, env)
                 finally:
-                    if remote:
-                        try:
-                            ep.remove_path(path=remote[:-len(pkg.installer) - 1])
-                        except Exception as e:  # noqa: BLE001
-                            log.warning("Couldn't remove the uploaded installer %s: %s", remote, e)
-                if r["code"] not in pkg.success_codes:
+                    lic_dir = lic_file[:max(lic_file.rfind("\\"), lic_file.rfind("/"))] if lic_file else ""
+                    for path in (remote[:-len(os.path.basename(local)) - 1] if remote else "", lic_dir):
+                        if path:
+                            try:
+                                ep.remove_path(path=path)
+                            except Exception as e:  # noqa: BLE001
+                                log.warning("Couldn't remove %s from the PC: %s", path, e)
+                outcome = exit_outcome(pkg, r["code"])
+                if outcome == "failed":
                     a.update(status="failed", result=f"Installer exit code {r['code']}")
                     return a
-                if r["code"] in (3010, 1641):
+                if outcome == "reboot":
                     a["reboot"] = True
             inv = ep.installed_software()
             installed, ver, _ = detect(ep, pkg, inv)
@@ -640,8 +1119,8 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             elif a["desired"].startswith("version") and a.get("want"):
                 ok = installed and vtuple(ver) == vtuple(a["want"])
             else:
-                ok = installed and (not pkg.version or a["desired"].startswith("installed")
-                                    or vtuple(ver) >= vtuple(pkg.version))
+                want = a.get("want") or pkg.version
+                ok = installed and (not want or a["desired"].startswith("installed") or vtuple(ver) >= vtuple(want))
             a.update(status="compliant" if ok else "failed",
                      result=("removed" if want_absent else f"now {ver}") if ok else
                      f"still {'installed' if installed else 'missing'} after {a['action']} ({ver or '-'})")
@@ -650,15 +1129,26 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
             if task is None:
                 a.update(status="failed", result="the task was deleted before it could run")
                 return a
-            dep = store.get("deployments", a["deployment"])
-            params = {**task.params, **(dep.params if dep else {})}
+            values = task_values(store, task, dep)
+            secrets.extend(str(v) for v in values.values() if v.__class__.__name__ == "Revealed")
+            ctx = a.get("context") or {}
             if a["action"] == "set":
-                r = ep.run_script(script=task.set, language=task.language, params=params, timeout=1800)
+                r = ep.run_script(script=task_script(task, "set", values, ctx), language=task.language,
+                                  timeout=1800)
                 log_lines.append(f"[set] exit {r['code']}\n{r['out']}{r['err']}")
-                t = ep.run_script(script=task.test, language=task.language, params=params, timeout=600)
+                if r["code"] in (3010, 1641):
+                    a["reboot"] = True
+                t = ep.run_script(script=task_script(task, "test", values, ctx), language=task.language,
+                                  timeout=600)
                 log_lines.append(f"[test] exit {t['code']}\n{t['out']}{t['err']}")
                 a.update(status="compliant" if t["code"] == 0 else "failed",
                          result="fixed" if t["code"] == 0 else "still not compliant after set")
+                if task.get.strip():
+                    g = ep.run_script(script=task_script(task, "get", values, ctx), language=task.language,
+                                      timeout=600)
+                    log_lines.append(f"[get] exit {g['code']}\n{g['out']}{g['err']}")
+                    if g["code"] == 0 and g["out"].strip():
+                        a["value"] = mask_output(g["out"].strip(), values)[-300:]
             else:
                 a.update(status="non-compliant", result="audit only, not changed")
     except Cancelled as c:
@@ -668,9 +1158,32 @@ def execute(ep, store: Store, a: dict, prog: Progress | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         a.update(status="failed", result=str(e))
     finally:
-        a["log"] = "\n".join(log_lines)[-8000:]
+        text = "\n".join(log_lines)
+        for sec in sorted(set(x for x in secrets if x), key=len, reverse=True):
+            text = text.replace(sec, "********")
+        a["log"] = text[-8000:]
         a["seconds"] = round(time.time() - t0, 1)
     return a
+
+
+def _licence(ep, store: Store, pkg: Package, a: dict, secrets: list, log_lines: list) -> dict:
+    """The licence for this install as environment variables (the file copied to the PC first). {} for none."""
+    lic = store.get("licences", a.get("licence") or "")
+    if lic is None:
+        return {}
+    from . import licences
+    if lic.kind == "key":
+        key = licences.key_of(store, lic)
+        secrets.append(str(key))
+        log_lines.append(f"licence: {licences.masked(lic)}")
+        return {licences.ENV_KEY: str(key)}
+    data = licences.file_of(store, lic)
+    remote_dir = ep.deploy_dir()
+    sep = "\\" if "\\" in remote_dir else "/"
+    dest = f"{remote_dir}{sep}lic-{lic.id}{sep}{lic.file_name or 'licence.lic'}"
+    ep.put_file(path=dest, offset=0, total=len(data), blob=data)
+    log_lines.append(f"licence: {licences.masked(lic)}, copied to the PC for the install")
+    return {licences.ENV_FILE: dest}
 
 
 def run_session(ep, store: Store, prog: Progress, mode: str = "full", onboarding: bool = False,
@@ -691,13 +1204,20 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
     if only is not None:
         sess["only"] = list(only)
     prog.reset(1, f"Detecting on {host}…")
+    before = pending_reboot(ep)
+    if before is not None:
+        sess["pending_reboot"] = before.get("reasons") or []
     inv = ep.installed_software()
-    actions = plan(ep, store, host, inv, onboarding, only)
+    from . import inventory
+    snap = inventory.take(ep, store, software=inv, host=host)
+    filtered: list = []
+    actions = plan(ep, store, host, inv, onboarding, only, filtered, snap)
+    if filtered:
+        sess["filtered"] = filtered
     sess["detected"] = [dict(a, entry=None) for a in actions]
-    todo = [a for a in actions if a["action"] not in ("none", "audit")]
+    todo = [a for a in actions if a["action"] not in IDLE]
     if mode == "detect" or not todo:
-        sess["actions"] = [dict(a, status="compliant" if a["action"] == "none" else
-                                ("non-compliant" if a["action"] == "audit" else "pending"), entry=None)
+        sess["actions"] = [dict(a, status=idle_status(a) if a["action"] in IDLE else "pending", entry=None)
                            for a in actions]
     else:
         prog.reset(len(todo), f"Maintaining {host}: {len(todo)} change(s)")
@@ -708,23 +1228,66 @@ def _run_session(ep, store, prog, mode, onboarding, only=None, trigger="manual")
                 prog.set_label(f"{a['action'].capitalize()}: {a['name']}")
                 r = execute(ep, store, a, prog)
                 done[a["deployment"]] = r
+                _audit_action(store, sess, r)
                 prog.update(i + 1)
         except Cancelled as c:
             if c.info.get("action"):
                 part = c.info.pop("action")
                 done[part["deployment"]] = part
+                _audit_action(store, sess, part)
             sess["actions"] = [dict(done.get(a["deployment"]) or
                                     (dict(a, status="cancelled", result="not run: cancelled")
-                                     if a["action"] not in ("none", "audit") else
-                                     dict(a, status="compliant" if a["action"] == "none" else "non-compliant")),
+                                     if a["action"] not in IDLE else dict(a, status=idle_status(a))),
                                     entry=None) for a in actions]
             _finish(store, sess, cancelled=True)
             c.info["session"] = sess
             raise
-        sess["actions"] = [dict(done.get(a["deployment"]) or
-                                dict(a, status="compliant" if a["action"] == "none" else "non-compliant"),
-                                entry=None) for a in actions]
+        sess["actions"] = [dict(done.get(a["deployment"]) or dict(a, status=idle_status(a)), entry=None)
+                           for a in actions]
+        _restart(ep, store, sess, info)
     return _finish(store, sess)
+
+
+def _restart(ep, store, sess, info):
+    """After the changes: does the PC need a restart, and does a deployment that ran say to restart it?"""
+    after = pending_reboot(ep)
+    reasons = list((after or {}).get("reasons") or [])
+    if any(a.get("reboot") for a in sess["actions"]):
+        reasons.insert(0, "An installer or fix asked for a restart")
+    sess["pending_reboot"] = reasons
+    if not reasons:
+        return
+    ran = [a for a in sess["actions"] if a.get("status") in ("compliant", "failed") and a["action"] not in IDLE]
+    deps = [store.get("deployments", source_id(a["deployment"])) for a in ran]
+    if not any(d is not None and d.reboot_policy == "end" for d in deps):
+        return
+    if is_this_pc(ep):
+        sess["restart"] = "skipped: this is the PC SectorSmith runs on, restart it yourself"
+        return
+    cmd = restart_command(info.get("os", ""))
+    try:
+        r = ep.run_command(cmd=cmd, timeout=60)
+        ok = r["code"] == 0
+        sess["restart"] = (f"restarting in {REBOOT_DELAY // 60} minutes" if ok else
+                           f"couldn't start the restart (exit {r['code']}): {(r['err'] or r['out']).strip()[:200]}")
+    except Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        sess["restart"] = f"couldn't start the restart: {e}"
+    log.info("Deploy session %s on %s: restart %s", sess["id"], sess["machine"], sess["restart"])
+
+
+DONE_WORDS = {"install": "installed", "upgrade": "updated", "reinstall": "rolled back", "uninstall": "removed",
+              "set": "fixed"}
+
+
+def _audit_action(store, sess, a):
+    from . import audit
+    st = a.get("status", "")
+    what = DONE_WORDS.get(a["action"], a["action"]) if st == "compliant" else \
+        f"{'stopped' if st == 'cancelled' else 'failed'}: {a['action']}"
+    audit.record(store, what, "session", sess["id"], f"{a['name']} on {sess['machine']}",
+                 (a.get("result") or "")[:300])
 
 
 def _finish(store, sess, cancelled=False):
@@ -732,11 +1295,17 @@ def _finish(store, sess, cancelled=False):
     st = [a["status"] for a in sess["actions"]]
     sess["summary"] = {"compliant": st.count("compliant"), "failed": st.count("failed"),
                        "pending": st.count("pending"), "non_compliant": st.count("non-compliant"),
-                       "cancelled": st.count("cancelled"),
-                       "reboot": any(a.get("reboot") for a in sess["actions"])}
+                       "cancelled": st.count("cancelled"), "ignored": st.count("ignored"),
+                       "reboot": any(a.get("reboot") for a in sess["actions"]) or bool(sess.get("pending_reboot"))}
     if cancelled:
         sess["cancelled"] = True
     sess["path"] = store.save_session(sess)
+    from . import audit
+    sm = sess["summary"]
+    audit.record(store, ("check" if sess["mode"] == "detect" else "maintenance") + (" stopped" if cancelled else ""),
+                 "session", sess["id"], sess["machine"],
+                 f"{sess.get('trigger', 'manual')}: {sm['compliant']} OK, {sm['failed']} failed, {sm['pending']} to "
+                 f"change, {sm['non_compliant']} not OK" + (", restart needed" if sm["reboot"] else ""))
     log.info("Deploy session %s on %s%s: %s", sess["id"], sess["machine"], " (cancelled)" if cancelled else "",
              sess["summary"])
     return sess

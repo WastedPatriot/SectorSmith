@@ -186,7 +186,8 @@ GUIDES = {
                                          "Firefox, Outlook signatures, Sticky Notes and Office templates. Sizes "
                                          "are shown before you start."),
             ("Bring the apps", "The old PC's apps are listed. Ones in your Deploy library or on winget install "
-                               "silently on the new PC; the rest are listed for you to install."),
+                               "silently on the new PC; the rest are listed for you to install. Switch on Also "
+                               "install this client's baseline to give the new PC its client's standard apps."),
             ("Run it, then run it again", "The first run copies everything. Later runs copy only new or changed "
                                            "files, so you can pre-stage the day before and do a quick final sync."),
         ],
@@ -221,25 +222,41 @@ GUIDES = {
     "deploy": {
         "title": "Deploy software", "icon": "deploy", "tone": "violet", "task": "DeployScreen",
         "intro": "Keep your linked PCs in line: install and update apps, remove ones that shouldn't be there, and "
-                 "run upkeep tasks. Deploy is a preview, so try new packages on one PC first.",
+                 "run upkeep tasks. Everything lives under Manage. Deploy is a preview, so try new packages on one "
+                 "PC first.",
         "steps": [
-            ("Add a package", "Drop an MSI or EXE on the Library tab. SectorSmith reads it and suggests the silent "
-                              "install switches and how to tell it's installed. Check them, change anything, save. "
-                              "winget IDs and plain scripts work too."),
-            ("Say where it goes", "On Deployments, pick a package or task, then every PC, a client (a named group "
-                                  "of PCs) or one PC, and what you want: kept up to date, a set version, or removed."),
-            ("Add upkeep tasks", "A task is a check script (exit 0 means the PC is fine) and a fix script that "
-                                 "runs when the check fails. Use Check only to report without changing anything."),
-            ("Run maintenance", "Pick linked PCs. SectorSmith first checks what each one needs and shows you. "
-                                "Nothing changes until you type the confirmation, then it installs, fixes and "
-                                "checks again."),
-            ("Look back at sessions", "Every run is saved on the Sessions tab with what was found, what changed "
-                                      "and the installer output."),
+            ("Add a package", "Drop an MSI or EXE on Packages, or add one from the Catalogue. SectorSmith suggests "
+                              "the silent switches and how to tell it's installed. Newest from can follow winget, a "
+                              "GitHub release, a vendor page or a script, checked once a day with the download's "
+                              "SHA256. Needs lists packages that go on first, and restart codes say which exit codes "
+                              "mean a restart."),
+            ("Deploy it", "On Deployments pick every PC, a client or one PC, then the wanted state: Latest, "
+                          "Specific version (older ones update; newer ones are reported, not rolled back unless you "
+                          "allow it), Any version, Uninstalled or Ignore. Tags, inventory conditions such as "
+                          "ram_gb >= 8, and a filter script narrow it down, and Applies to counts the PCs. Restarts "
+                          "can be never, at the end if needed, or suppressed."),
+            ("Add upkeep tasks", "A task has Test (exit 0 means the PC is fine), Set (fixes it) and Get (prints the "
+                                 "current state), with typed settings each deployment fills in. Secrets are stored "
+                                 "encrypted. The Task library has ready ones: computer name, time zone, power plan, "
+                                 "BitLocker, local admin, Windows Update, bloatware, Defender and more."),
+            ("Know your PCs", "Inventory keeps a snapshot of each PC (Windows build, model, serial, CPU, RAM, disks, "
+                              "BitLocker, last restart, software), taken when a PC links and on every run. Search "
+                              "it, and tag PCs for deployments. Licences holds each client's keys and files, handed "
+                              "to installers as {licence_key} and {licence_file}, always masked."),
+            ("Run maintenance", "Pick linked PCs. The check runs only tests and detection, and shows for each item: "
+                                "install, update, downgrade refused, remove or nothing, plus pending restarts. "
+                                "Nothing changes until you type the confirmation. The PC SectorSmith runs on is "
+                                "never restarted for you."),
+            ("Look back", "Sessions has every run with what was found, what changed and the output. The Audit log "
+                          "records who changed what in the library and every action a session took, and exports "
+                          "to CSV."),
         ],
         "tips": [("Export scripts writes Install.ps1, Uninstall.ps1 and Detect.ps1 (plus the installer) to a "
                   "folder, ready for your RMM or for running by hand."),
                  ("Installer type not recognised? The /S switch is only a guess. Check the vendor's docs and test "
                   "on one PC."),
+                 ("Secrets and licences use Windows DPAPI for your account, so they can't be read on another PC or "
+                  "by another user. Enter them again there."),
                  ("The library lives in %LOCALAPPDATA%\\SectorSmith\\deploy. Copy that folder to take it to "
                   "another PC.")],
     },

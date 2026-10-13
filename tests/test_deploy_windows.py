@@ -291,7 +291,9 @@ try:
     check(core.detect(here, mpkg, here.installed_software())[:2] == (True, "1.2.3"),
           "this PC's own endpoint sees the same")
     check(not os.path.exists(os.path.join(remote.deploy_dir(), mpkg.id)), "uploaded installer removed afterwards")
-    check(s1["summary"]["failed"] == 0 and not s1["summary"]["reboot"], f"session summary {s1['summary']}")
+    # the summary's restart flag also counts a restart Windows was already waiting for, so look at the actions
+    check(s1["summary"]["failed"] == 0 and not any(a.get("reboot") for a in s1["actions"]),
+          f"session summary {s1['summary']}")
 
     # 8 (after)
     want = {"name": "1.2.3", "product code": "1.2.3", "script": "2.0"}
@@ -347,6 +349,93 @@ try:
     check(res["apps"] and res["apps"][0]["status"] == "compliant" and arp(PC2) == (NAME, "1.3.0")
           and app_file() == f"{NAME} 1.3.0", "migration installed the app through the agent")
     check(res["session"] and os.path.exists(res["session"]), "migration install saved as a Deploy session")
+
+    # 10. exit codes with the real MSI: REBOOT=Force with /norestart makes msiexec exit 3010
+    check(core.is_this_pc(remote), "the agent is on this PC, so nothing below may restart it")
+    msiexec("/x", PC2)
+    rpkg = store.add_from_installer(msi2)
+    rpkg.name = "Restart test"
+    rpkg.install += " REBOOT=Force"
+    rpkg.success_codes, rpkg.reboot_codes = [0], []
+    rpkg.detection = {"method": "msi_product_code", "value": ""}
+    store.upsert("packages", rpkg)
+    for d in list(store.deployments):
+        store.delete("deployments", d.id)
+    store.upsert("deployments", Deployment("software", rpkg.id, "installed", target_kind="machine",
+                                           target_value=host, reboot_policy="end"))
+    s5 = full(store)
+    a5 = by(s5)["Restart test"]
+    check(a5["status"] == "failed" and "3010" in a5["result"],
+          f"3010 not in the package's success or restart codes: reported as a failure ({a5.get('result')})")
+    msiexec("/x", PC2)
+    rpkg.reboot_codes = [3010, 1641]
+    store.upsert("packages", rpkg)
+    s6 = full(store)
+    a6 = by(s6)["Restart test"]
+    check(a6["status"] == "compliant" and a6.get("reboot") and s6["summary"]["reboot"],
+          f"3010 as a restart code: installed, restart needed ({a6.get('result')})")
+    check(s6.get("restart", "").startswith("skipped"), f"restart policy At the end never restarts this PC "
+                                                       f"({s6.get('restart')})")
+    msiexec("/x", PC2)
+
+    # 11. pending restart, read the same way Windows Update tools do
+    def key_exists(path):
+        try:
+            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY).Close()
+            return True
+        except OSError:
+            return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            renames = [x for x in winreg.QueryValueEx(k, "PendingFileRenameOperations")[0] if x.strip()]
+    except OSError:
+        renames = []
+    expect = key_exists(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") \
+        or key_exists(r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") \
+        or bool(renames)
+    pr = remote.pending_reboot()
+    print("   pending restart:", pr)
+    check(pr["pending"] == expect, "pending restart read from CBS, Windows Update and PendingFileRenameOperations")
+
+    # 12. inventory snapshot from the agent
+    facts = remote.inventory()
+    print("   inventory:", {k: facts.get(k) for k in ("os", "build", "model", "ram_gb", "bitlocker")})
+    check("Windows" in (facts.get("os") or "") and facts.get("build") and facts.get("ram_gb", 0) > 0
+          and facts.get("volumes") and facts.get("last_boot"), "inventory: Windows, build, memory, disks, last boot")
+
+    # 13. a task with typed parameters: Test, Set and Get on HKLM\SOFTWARE\SectorSmithTest, values passed safely
+    from sectorsmith.deploy.core import Task
+    path = f"HKLM:\\{TEST_KEY}"
+    task = store.upsert("tasks", Task(
+        name="Registry task", parameters=[{"name": "Text", "type": "text"}, {"name": "Count", "type": "number"},
+                                          {"name": "On", "type": "bool"}],
+        test=f"$k = Get-ItemProperty -LiteralPath '{path}' -ErrorAction SilentlyContinue\n"
+             "if ($k.TaskText -eq $Text -and $k.TaskCount -eq $Count -and $k.TaskOn -eq [int]$On) { exit 0 }\nexit 1\n",
+        set=f"New-Item -Path '{path}' -Force | Out-Null\n"
+            f"New-ItemProperty -LiteralPath '{path}' -Name TaskText -Value $Text -PropertyType String -Force | Out-Null\n"
+            f"New-ItemProperty -LiteralPath '{path}' -Name TaskCount -Value $Count -PropertyType DWord -Force | Out-Null\n"
+            f"New-ItemProperty -LiteralPath '{path}' -Name TaskOn -Value ([int]$On) -PropertyType DWord -Force | Out-Null\n",
+        get=f"(Get-ItemProperty -LiteralPath '{path}').TaskText\n"))
+    tricky = "it's \"quoted\" $(Get-Date) `n; exit 9"
+    for d in list(store.deployments):
+        store.delete("deployments", d.id)
+    store.upsert("deployments", Deployment("task", task.id, "enforce", target_kind="machine", target_value=host,
+                                           params={"Text": tricky, "Count": 5, "On": True}))
+    s7 = core.run_session(remote, store, Progress(1), mode="detect")
+    check(by(s7)["Registry task"]["action"] == "set", "check step: Test says the task is needed")
+    s8 = full(store)
+    a8 = by(s8)["Registry task"]
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TEST_KEY, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            got = (winreg.QueryValueEx(k, "TaskText")[0], winreg.QueryValueEx(k, "TaskCount")[0],
+                   winreg.QueryValueEx(k, "TaskOn")[0])
+    except OSError:
+        got = None
+    check(a8["status"] == "compliant" and got == (tricky, 5, 1) and a8.get("value") == tricky,
+          f"Set wrote the values exactly (quotes, $() and backticks stay text), Test passes, Get reads it back {got}")
+    s9 = core.run_session(remote, store, Progress(1), mode="detect")
+    check(by(s9)["Registry task"]["action"] == "none", "check again: compliant")
 except Exception as e:  # noqa: BLE001
     traceback.print_exc()
     check(False, f"test stopped early: {e}")

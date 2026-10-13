@@ -10,12 +10,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from ..deploy import catalogue, core, schedule
+from ..deploy import catalogue, core, schedule, taskparams, tasklib, versions
 from ..util import Cancelled, Progress, cancel_scope, get_logger
 from . import theme
-from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, SOFTWARE_STATES, \
-    STATUS_LABEL, TASK_STATES, ClientEditor, DeploymentWizard, PackageBuilder, RunWizard, SessionView, TaskEditor, \
-    _plural, _short, _took, attempt, export_scripts
+from .deploy_screens import ACTION_LABEL, DETECTION, INSTALLER_EXTS, KIND_LABEL, LANGUAGES, REBOOT_LABEL, \
+    SOFTWARE_STATES, STATUS_LABEL, TASK_STATES, ClientEditor, DeploymentWizard, PackageBuilder, RunWizard, \
+    SessionView, TaskEditor, _plural, _short, _took, attempt, export_scripts
 from .manage_common import HIDDEN, EntryText, ManagePage, RowTable, client_hidden, client_text, host_text
 from .screens import Screen
 from .widgets import AutoScroll, Card, DataTable, DropZone, Popover, StatusPill, caption, link_button, segmented, \
@@ -36,6 +36,14 @@ def _ago(ts):
     if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday - 1:
         return time.strftime("Yesterday %H:%M", t)
     return time.strftime("%d %b %H:%M", t)
+
+
+def _version_text(store, p):
+    """The library version, or what the version source said last time."""
+    if p.version_source:
+        found = versions.cached(store, p)
+        return found["version"] if found else "Newest"
+    return p.version or "Newest"
 
 
 def _detection_text(p):
@@ -71,10 +79,14 @@ def dep_title(store, d):
 def dep_target(app, store, d):
     if d.target_kind == "client":
         c = store.get("clients", d.target_value)
-        return "Client: " + (client_text(app, c.name) if c else "missing")
-    if d.target_kind == "machine":
-        return "PC: " + host_text(app, store, d.target_value)
-    return "Every PC"
+        text = "Client: " + (client_text(app, c.name) if c else "missing")
+    elif d.target_kind == "machine":
+        text = "PC: " + host_text(app, store, d.target_value)
+    else:
+        text = "Every PC"
+    if d.tags:
+        text += " tagged " + ", ".join(d.tags)
+    return text + (" (filtered)" if d.filter_script.strip() or d.conditions.strip() else "")
 
 
 def dep_state(d):
@@ -222,8 +234,8 @@ class PackagesScreen(ManagePage):
         sel = None
         for p in rows:
             n = len(self.store.used_by(p.id))
-            iid = self.table.add((p.name, p.version or "Newest", KIND_LABEL.get(p.kind, p.kind), _detection_text(p),
-                                  n or "-"), data=p)
+            iid = self.table.add((p.name, _version_text(self.store, p), KIND_LABEL.get(p.kind, p.kind),
+                                  _detection_text(p), n or "-"), data=p)
             if select is not None and p.id == select:
                 sel = iid
         self.table.done()
@@ -247,8 +259,22 @@ class PackagesScreen(ManagePage):
             ("see the script" if det.get("method") == "script" else (det.get("value") or p.name))
         fields = [("Version", p.version or "Newest"), ("Kind", KIND_LABEL.get(p.kind, p.kind)),
                   ("Publisher", p.publisher or "-"), ("Source", source), ("Detect by", f"{how}: {_short(what, 60)}")]
+        if p.version_source:
+            found = versions.cached(self.store, p)
+            fields.insert(1, ("Newest from", versions.describe(p.version_source)
+                              + (f", {found['version']} when last asked" if found else ", not asked yet")))
         if p.category:
             fields.append(("Category", p.category))
+        lics = [x for x in self.store.licences if x.package_id == p.id]
+        if lics:
+            fields.append(("Licences", _plural(len(lics), "client") if all(x.client_id for x in lics) else
+                           f"{_plural(len(lics), 'licence')}, one for every client"))
+        needs = [x.name for x in (self.store.get("packages", i) for i in p.prerequisites) if x is not None]
+        if needs:
+            fields.append(("Needs", ", ".join(needs)))
+        needed = [x.name for x in self.store.packages if p.id in x.prerequisites]
+        if needed:
+            fields.append(("Needed by", ", ".join(needed)))
         sections = [("Install", _short(p.install, 240), True)]
         if used:
             sections.append(("Used by", "\n".join(f"{dep_title(self.store, d)}  ·  {dep_target(self.app, self.store, d)}"
@@ -519,10 +545,23 @@ class DeploymentsScreen(ManagePage):
         fields = [("Wants", dep_state(d)), ("Target", dep_target(self.app, self.store, d)),
                   ("New PCs only", "Yes" if d.onboarding_only else "No"),
                   ("Schedule", schedule.describe(d) or "When you run maintenance"),
+                  ("Restarts", REBOOT_LABEL.get(d.reboot_policy, d.reboot_policy)),
+                  ("Applies to", _plural(len(core.applies_to(self.store, d)), "known PC")
+                   + (", if its filter says so" if d.filter_script.strip() else "")),
                   ("Next run", schedule.next_text(d)), ("Last result", last)]
         sections = []
         if d.item_type == "bundle":
             sections.append(("Packages", "\n".join(dep_items(self.store, d)) or "None left", False))
+        if d.conditions.strip():
+            sections.append(("Only where", d.conditions, True))
+        if d.filter_script.strip():
+            sections.append(("Filter script", _short(d.filter_script, 300), True))
+        task = self.store.get("tasks", d.item_id) if d.item_type == "task" else None
+        if task is not None and task.parameters:
+            by = {p["name"]: p for p in task.parameters}
+            sections.append(("Settings", "\n".join(
+                f"{by[n].get('label') or n}: {taskparams.shown(by[n], d.params.get(n, by[n].get('default')))}"
+                for n in by), False))
         actions = [("Run now...", lambda: self.app.go(RunWizard, only=[d.id]), "primary")]
         if d.baseline:
             c = self.store.get("clients", d.target_value)
@@ -694,6 +733,9 @@ class ClientsScreen(ManagePage):
         names = [p.name for p in (self.store.get("packages", i) for i in (base.items if base else [])) if p]
         pcs = "Hidden while presenting" if hidden else (", ".join(c.machines) or "None yet")
         fields = [("PCs", pcs), ("Baseline", _plural(len(names), "package") if base else "Not set")]
+        lics = [x for x in self.store.licences if x.client_id == c.id]
+        if lics:
+            fields.append(("Licences", _plural(len(lics), "package")))
         if base:
             fields.append(("Wants", SOFTWARE_STATES.get(base.desired, base.desired)))
         sections = [("Baseline packages", "\n".join(names), False)] if names else []
@@ -836,6 +878,7 @@ class TasksScreen(ManagePage):
         if self.store is None:
             return
         self.header_action("New task", lambda: app.go(TaskEditor), primary=True, width=120)
+        self.header_action("Task library", lambda: app.go(TaskLibraryScreen), width=130)
         inner = self.page("Tasks", search="Search tasks",
                           panel_empty=("No task selected", "Select a task to see its check and fix scripts.",
                                        "task"))
@@ -868,13 +911,21 @@ class TasksScreen(ManagePage):
 
     def _show(self, t):
         used = [d for d in self.store.deployments if d.item_type == "task" and d.item_id == t.id]
-        sections = [("Check", _short(t.test, 400), True)]
+        sections = [("Test", _short(t.test, 400), True)]
         if t.set:
-            sections.append(("Fix", _short(t.set, 400), True))
+            sections.append(("Set", _short(t.set, 400), True))
+        if t.get:
+            sections.append(("Get", _short(t.get, 300), True))
+        fields = [("Language", LANGUAGES.get(t.language, t.language))]
+        if t.parameters:
+            fields.append(("Parameters", ", ".join(f"{p['name']} ({taskparams.TYPES[p['type']].lower()})"
+                                                   for p in t.parameters)))
+        if t.library_id:
+            fields.append(("From", "The built-in task library"))
         self.panel.show("task", "success", t.name, t.description,
                         pills=[(f"In {_plural(len(used), 'deployment')}", "success") if used else
                                ("Not deployed", "neutral")],
-                        fields=[("Language", LANGUAGES.get(t.language, t.language))], sections=sections,
+                        fields=fields, sections=sections,
                         actions=[("Deploy...", lambda: self.app.go(DeploymentWizard, item=("task", t.id)), "primary"),
                                  ("Edit", lambda: self.app.go(TaskEditor, task=t), "secondary"),
                                  ("Remove", lambda: self._remove(t), "danger")])
@@ -886,6 +937,73 @@ class TasksScreen(ManagePage):
         if ok:
             self.app.toast(f"Removed {t.name}")
             self.fill()
+
+
+class TaskLibraryScreen(ManagePage):
+    """Built-in upkeep tasks (tasklib.py) to add to your own Tasks and deploy with your values."""
+
+    def __init__(self, master, app):
+        super().__init__(master, app, "Task library", "Common upkeep, ready to use: each has a Test, a Get and a "
+                                                      "Set, and settings you fill in per deployment.")
+        if self.store is None:
+            return
+        self.header_action("Tasks", lambda: app.go(TasksScreen), width=110)
+        inner = self.page("Built-in tasks", search="Search tasks",
+                          panel_empty=("Pick a task", "Select one to see what it checks, what it changes and its "
+                                                      "settings.", "task"))
+        self.table = DataTable(inner, [("name", "Task", 280), ("cat", "Area", 110), ("params", "Settings", 90, "e"),
+                                       ("have", "Added", 80)], height=9, on_select=self._show, on_open=self._add)
+        self.table.pack(fill="both", expand=True)
+        self.search_var.trace_add("write", lambda *_: self.fill())
+        self.fill()
+
+    def _have(self, entry):
+        return next((t for t in self.store.tasks if t.library_id == entry["library_id"]), None)
+
+    def fill(self, select=None):
+        self.table.clear()
+        q = self.search_var.get().lower().split()
+        sel = None
+        for e in tasklib.LIBRARY:
+            if not all(w in f"{e['name']} {e['description']} {e['category']}".lower() for w in q):
+                continue
+            iid = self.table.add((e["name"], e["category"], len(e["parameters"]) or "-",
+                                  "Added" if self._have(e) else ""), data=e)
+            if select == e["library_id"]:
+                sel = iid
+        self.table.done()
+        self.card_count.configure(text=_plural(len(tasklib.LIBRARY), "task"))
+        if sel:
+            self.table.tree.selection_set(sel)
+            self._show(self.table.rows[sel])
+
+    def _show(self, e):
+        have = self._have(e)
+        def line(p):
+            d = p.get("default")
+            text = f"{p.get('label') or p['name']}: {taskparams.TYPES[p.get('type', 'text')].lower()}"
+            if d not in (None, ""):
+                text += f", default {taskparams.shown(p, d).lower() if isinstance(d, bool) else d}"
+            return text
+        params = [line(p) for p in e["parameters"]]
+        sections = [("What it does", e["description"], False)]
+        if params:
+            sections.append(("Settings", "\n".join(params), False))
+        sections.append(("Test", _short(e["test"], 300), True))
+        if have is not None:
+            actions = [("Deploy...", lambda: self.app.go(DeploymentWizard, item=("task", have.id)), "primary"),
+                       ("Open in Tasks", lambda: self.app.go(TasksScreen, select=have.id), "secondary")]
+        else:
+            actions = [("Add to my tasks", lambda: self._add(e), "primary")]
+        self.panel.show("task", "success", e["name"], e["category"], pills=[("Added", "success")] if have else [],
+                        fields=[("Language", "PowerShell"), ("Restarts", "Set exits 3010 when one is needed")],
+                        sections=sections, actions=actions)
+
+    def _add(self, e):
+        ok, t = attempt(self.app, f"add {e['name']}", lambda: tasklib.add(self.store, e["library_id"]))
+        if ok:
+            self.app.toast(f"{t.name} is in your tasks. Deploy it to set its values.")
+            self.fill(select=e["library_id"])
 
 
 # ---------------------------------------------------------------------------- sessions
@@ -943,6 +1061,8 @@ class SessionsScreen(ManagePage):
         fields = [("When", _ago(s.get("started"))), ("Mode", mode),
                   ("Started by", TRIGGERS.get(s.get("trigger") or "manual", "You")),
                   ("Client", client_text(self.app, s.get("client") or "") or "-"), ("Took", took)]
+        if s.get("restart") or (s.get("summary") or {}).get("reboot"):
+            fields.append(("Restart", s.get("restart") or "needed, not done"))
         lines = [f"{a.get('name', '?')}: {STATUS_LABEL.get(a.get('status'), a.get('status', ''))}"
                  + (f" ({ACTION_LABEL.get(a.get('action'), a.get('action'))})"
                     if a.get("action") not in (None, "none") else "") for a in s.get("actions", [])[:12]]

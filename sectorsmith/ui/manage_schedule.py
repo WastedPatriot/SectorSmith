@@ -6,7 +6,7 @@ import os
 import threading
 import time
 
-from ..deploy import schedule
+from ..deploy import core, schedule
 from ..util import Cancelled, Progress, app_dir, cancel_scope, get_logger
 
 log = get_logger()
@@ -39,6 +39,8 @@ class Scheduler:
         new = [m for m in ms if id(m) not in self.known]
         self.known = {id(m) for m in ms}
         if new:
+            from .manage_inventory import snapshot_on_connect
+            snapshot_on_connect(self.app, [m for m in new if not m.is_local])
             self.check("connect", new)
 
     def _store(self):
@@ -101,7 +103,7 @@ class Scheduler:
     def _finished(self, results, cancelled, record):
         self.prog = None
         acts = [a for _h, ss, _e in results for s in ss or [] for a in s.get("actions", [])
-                if a.get("action") not in ("none", "audit")]
+                if a.get("action") not in core.IDLE]
         failed = [a for a in acts if a.get("status") == "failed"]
         errors = [h for h, _ss, e in results if e]
         record["ended"] = time.time()

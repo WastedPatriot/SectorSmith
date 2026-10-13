@@ -12,12 +12,13 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ..deploy import analyze, core, schedule
+from ..deploy import analyze, core, schedule, taskparams, versions
 from ..util import Cancelled, get_logger, human_time
 from . import theme
 from .link_screens import MachinePicker
 from .screens import Screen
-from .widgets import DataTable, DropZone, IconBadge, OptionCard, Pill, bind_all, caption, ghost_button, segmented
+from .widgets import AutoScroll, DataTable, DropZone, IconBadge, OptionCard, Pill, bind_all, caption, \
+    ghost_button, segmented
 
 log = get_logger()
 P = theme.PALETTE
@@ -26,26 +27,35 @@ BADGE = "PREVIEW"
 PAGES = ["Library", "Deployments", "Clients", "Tasks", "Sessions"]
 INSTALLER_EXTS = (".msi", ".exe", ".msix", ".msixbundle", ".appx", ".appxbundle")
 
-SOFTWARE_STATES = {"latest": "Keep up to date", "installed": "Installed", "version": "Set version",
-                   "uninstalled": "Removed", "ignore": "Leave alone"}
+SOFTWARE_STATES = dict(core.STATES)
 STATE_HELP = {
-    "latest": "Installs it where it's missing and updates older versions to the one in the library.",
+    "latest": "Installs it where it's missing and updates older versions to the newest: the library's version, "
+              "or what its version source says today.",
     "installed": "Installs it where it's missing. Any version already there is left alone.",
-    "version": "Installs exactly this version, updating or rolling back if needed.",
+    "version": "Installs exactly this version and updates older ones. A newer version already there is reported, "
+               "not rolled back, unless you allow it below.",
     "uninstalled": "Removes it wherever it's found.",
     "ignore": "Does nothing. Handy for switching a client or PC off a wider deployment.",
     "enforce": "Runs the check, and the fix if the check fails, then checks again.",
     "audit": "Runs the check and reports. Nothing is changed.",
 }
 TASK_STATES = {"enforce": "Check and fix", "audit": "Check only"}
+REBOOT_LABEL = {"never": "Never", "end": "At the end if needed", "suppress": "Suppress"}
+REBOOT_HELP = {"never": "SectorSmith never restarts the PC. Sessions say when one is needed.",
+               "end": "When something asked for a restart, the PC restarts after the run with a two minute "
+                      "warning. Never the PC SectorSmith runs on.",
+               "suppress": "MSI installers are told not to restart by themselves. The PC isn't restarted; sessions "
+                           "still say when it needs one."}
+FIXED_VERSION = "Fixed: the version above"
+SOURCE_LABEL = {"": FIXED_VERSION, **versions.KINDS}
 DETECTION = {"registry": "Name in Add/Remove Programs", "msi_product_code": "MSI product code",
              "file": "A file exists", "script": "Detection script"}
 LANGUAGES = {"powershell": "PowerShell", "shell": "Shell (sh)"}
 KIND_LABEL = {"msi": "MSI", "exe": "EXE", "msix": "MSIX", "winget": "winget", "script": "Script"}
 ACTION_LABEL = {"none": "Nothing to do", "install": "Install", "upgrade": "Update", "reinstall": "Roll back",
-                "uninstall": "Remove", "set": "Fix", "audit": "Report only"}
+                "uninstall": "Remove", "set": "Fix", "audit": "Report only", "refused": "Downgrade refused"}
 STATUS_LABEL = {"compliant": "OK", "failed": "Failed", "pending": "Needs a change", "non-compliant": "Not OK",
-                "cancelled": "Stopped"}
+                "cancelled": "Stopped", "ignored": "Ignored"}
 WINGET_INSTALL = core.WINGET_INSTALL
 WINGET_UNINSTALL = core.WINGET_UNINSTALL
 
@@ -426,13 +436,16 @@ class PackageBuilder(Screen):
         cols.grid_columnconfigure(0, weight=11, uniform="d")
         cols.grid_columnconfigure(1, weight=9, uniform="d")
         cols.grid_rowconfigure(0, weight=1)
-        form = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
-        form.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        card = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        form = AutoScroll(card)
+        form.pack(fill="both", expand=True, padx=2, pady=(2, 10))
         form.grid_columnconfigure(1, weight=1)
         self.form = form
         self.v = {k: tk.StringVar(value=str(s.get(k) or "")) for k in
                   ("name", "version", "publisher", "install", "uninstall", "winget_id", "product_code")}
         self.v["codes"] = tk.StringVar(value=", ".join(str(c) for c in s.get("success_codes") or [0]))
+        self.v["reboot_codes"] = tk.StringVar(value=", ".join(str(c) for c in s.get("reboot_codes", [3010, 1641])))
         self._row = 0
         self._field("Name", "name", placeholder="As it shows in Add/Remove Programs")
         self._field("Version", "version", placeholder="e.g. 24.08")
@@ -459,7 +472,10 @@ class PackageBuilder(Screen):
         self.det_script = det.get("value", "") if det.get("method") == "script" else ""
         self.lang = s.get("language") or "powershell"
         self._field("Success codes", "codes", hint="Installer exit codes that count as success.")
+        self._field("Restart codes", "reboot_codes", hint="Exit codes that mean it worked but the PC needs a restart.")
         self._det_changed()
+        self._source_rows(s.get("version_source") or {})
+        self._needs_row(s.get("prerequisites") or [])
 
         side = ctk.CTkFrame(cols, fg_color="transparent")
         side.grid(row=0, column=1, sticky="nsew")
@@ -550,8 +566,144 @@ class PackageBuilder(Screen):
             hint = ("Its version is read from the file." if method == "file" else
                     "Matches part of the name. Start with re: for a regular expression.")
         ctk.CTkLabel(self.det_box, text=hint, font=theme.font_style("small"), text_color=P["muted"],
-                     anchor="w").grid(row=2, column=1, sticky="w", padx=(0, 18))
+                     anchor="w", justify="left", wraplength=380).grid(row=2, column=1, sticky="w", padx=(0, 18))
         self._preview_soon()
+
+    # -- other packages this one needs ---------------------------------------
+    def _needs_row(self, ids):
+        self.needs = [i for i in ids if self.store.get("packages", i) is not None]
+        self._label("Needs")
+        self.needs_box = ctk.CTkFrame(self.form, fg_color="transparent")
+        self.needs_box.grid(row=self._row, column=1, sticky="ew", padx=(0, 18), pady=(6, 0))
+        self._row += 1
+        ctk.CTkLabel(self.form, text="Installed before this one, and removed after it.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w").grid(
+            row=self._row, column=1, sticky="w", padx=(0, 18), pady=(0, 12))
+        self._row += 1
+        self._needs_draw()
+
+    def _needs_draw(self):
+        for w in self.needs_box.winfo_children():
+            w.destroy()
+        for pid in self.needs:
+            chip = ctk.CTkFrame(self.needs_box, fg_color=P["accent_soft"], corner_radius=8)
+            chip.pack(side="left", padx=(0, 6), pady=2)
+            ctk.CTkLabel(chip, text=self.store.get("packages", pid).name, font=theme.font_style("small"),
+                         text_color=P["accent"]).pack(side="left", padx=(8, 2))
+            small_button(chip, "x", lambda pid=pid: self._needs_remove(pid), "accent", width=22).pack(side="left")
+        me = self.pkg.id if self.pkg is not None else None
+        others = sorted((p for p in self.store.packages if p.id not in self.needs and p.id != me),
+                        key=lambda p: p.name.lower())
+        if others:
+            names = [p.name for p in others]
+            self.needs_menu = ctk.CTkOptionMenu(self.needs_box, values=names, width=150, height=28,
+                                                font=theme.font_style("small"),
+                                                command=lambda n: self._needs_add(others[names.index(n)].id))
+            self.needs_menu.set("Add a package...")
+            self.needs_menu.pack(side="left", pady=2)
+        elif not self.needs:
+            ctk.CTkLabel(self.needs_box, text="Nothing else in the library yet", font=theme.font_style("small"),
+                         text_color=P["muted"]).pack(side="left")
+
+    def _needs_add(self, pid):
+        self.needs.append(pid)
+        self._needs_draw()
+
+    def _needs_remove(self, pid):
+        self.needs = [x for x in self.needs if x != pid]
+        self._needs_draw()
+
+    # -- where the newest version comes from (versions.py) --------------------
+    def _source_rows(self, src):
+        self._label("Newest from")
+        self.vs = {k: tk.StringVar(value=src.get(k, "")) for k in ("id", "repo", "asset", "url", "regex")}
+        self.vs_script = src.get("script", "")
+        self.vs_text = None
+        self.vs_kind = ctk.CTkOptionMenu(self.form, values=list(SOURCE_LABEL.values()), height=32, width=260,
+                                         font=theme.font_style("body"), command=lambda _v: self._source_changed())
+        self.vs_kind.set(SOURCE_LABEL.get(src.get("kind", ""), FIXED_VERSION))
+        self.vs_kind.grid(row=self._row, column=1, sticky="w", padx=(0, 18), pady=4)
+        self._row += 1
+        self.vs_box = ctk.CTkFrame(self.form, fg_color="transparent")
+        self.vs_box.grid(row=self._row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        self.vs_box.grid_columnconfigure(1, weight=1)
+        self._row += 1
+        self._source_changed()
+
+    def _source_changed(self):
+        if self.vs_text is not None and self.vs_text.winfo_exists():
+            self.vs_script = self.vs_text.get("1.0", "end-1c")
+        for w in self.vs_box.winfo_children():
+            w.destroy()
+        self.vs_text = None
+        kind = _key(SOURCE_LABEL, self.vs_kind.get())
+        if kind == "winget" and not self.vs["id"].get():
+            self.vs["id"].set(self.v["winget_id"].get())
+        rows = {"winget": [("winget ID", "id", "e.g. 7zip.7zip")],
+                "github": [("Repository", "repo", "owner/name"), ("Asset pattern", "asset", r"e.g. x64\.msi$")],
+                "page": [("Page", "url", "https://vendor.example/download"),
+                         ("Pattern", "regex", r"e.g. setup-(?P<version>[\d.]+)\.exe")]}.get(kind, [])
+        r = 0
+        for label, key, ph in rows:
+            ctk.CTkLabel(self.vs_box, text=label, font=theme.font_style("body_strong"), text_color=P["text"],
+                         anchor="w", width=110).grid(row=r, column=0, sticky="w", padx=(18, 10), pady=(4, 0))
+            ctk.CTkEntry(self.vs_box, textvariable=self.vs[key], height=32, placeholder_text=ph,
+                         font=theme.mono(12)).grid(row=r, column=1, sticky="ew", padx=(0, 18), pady=(4, 0))
+            r += 1
+        if kind == "script":
+            self.vs_text = ctk.CTkTextbox(self.vs_box, height=74, font=theme.mono(11),
+                                          border_color=P["control_border"])
+            self.vs_text.insert("1.0", self.vs_script)
+            self.vs_text.grid(row=r, column=1, sticky="ew", padx=(0, 18), pady=(4, 0))
+            r += 1
+        hint = {"": "Latest means the version above, from the library's installer.",
+                "winget": "Runs winget show on this PC each day for the version, link and SHA256.",
+                "github": "Reads the repository's latest release: its tag is the version, the matching file "
+                          "the installer.",
+                "page": "Named groups version, and optionally url and sha256, pick out the parts.",
+                "script": "Runs here once a day. Print the version, then the https download link (or JSON)."}[kind]
+        ctk.CTkLabel(self.vs_box, text=hint, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                     justify="left", wraplength=380).grid(row=r, column=1, sticky="w", padx=(0, 18))
+        if kind:
+            row = ctk.CTkFrame(self.vs_box, fg_color="transparent")
+            row.grid(row=r + 1, column=1, sticky="w", padx=(0, 18), pady=(6, 0))
+            self.vs_check = soft_button(row, "Check now", self._source_check, width=110)
+            self.vs_check.pack(side="left")
+            self.vs_result = ctk.CTkLabel(self.vs_box, text="", font=theme.font_style("small"),
+                                          text_color=P["muted"], anchor="w", justify="left", wraplength=380)
+            self.vs_result.grid(row=r + 2, column=1, sticky="w", padx=(0, 18), pady=(4, 0))
+
+    def _version_source(self, strict=True):
+        kind = _key(SOURCE_LABEL, self.vs_kind.get())
+        if self.vs_text is not None and self.vs_text.winfo_exists():
+            self.vs_script = self.vs_text.get("1.0", "end-1c")
+        src = {"kind": kind, **{k: v.get() for k, v in self.vs.items()}, "script": self.vs_script}
+        try:
+            return versions.validate(src)
+        except ValueError:
+            if strict:
+                raise
+            return {}
+
+    def _source_check(self):
+        try:
+            src = self._version_source()
+        except ValueError as e:
+            self.vs_result.configure(text=str(e), text_color=P["danger"])
+            return
+        store, lbl = self.store, self.vs_result
+        lbl.configure(text="Asking...", text_color=P["muted"])
+
+        def done(found):
+            if lbl.winfo_exists():
+                bits = [f"Newest: {found['version']}", "download link found" if found.get("url") else "no link",
+                        "SHA256 known" if found.get("sha256") else "no SHA256"]
+                lbl.configure(text=" · ".join(bits), text_color=P["success"])
+
+        def failed(e):
+            if lbl.winfo_exists():
+                lbl.configure(text=_short(f"Didn't work: {e}", 70), text_color=P["danger"])
+        self.app.background(lambda: versions.resolve(src, store.fetcher, store.runner), done, failed)
 
     def _detection(self):
         method = _key(DETECTION, self.det_method.get())
@@ -571,7 +723,14 @@ class PackageBuilder(Screen):
             if strict:
                 raise ValueError("Success codes should be numbers, like 0, 3010.") from None
             f["success_codes"] = [0]
+        try:
+            f["reboot_codes"] = [int(x) for x in re.split(r"[,\s]+", f["reboot_codes"]) if x]
+        except ValueError:
+            if strict:
+                raise ValueError("Restart codes should be numbers, like 3010, 1641.") from None
+            f["reboot_codes"] = [3010, 1641]
         f["detection"] = self._detection()
+        f["version_source"] = self._version_source(strict)
         if strict:
             if not f["name"]:
                 raise ValueError("Give the package a name.")
@@ -583,13 +742,20 @@ class PackageBuilder(Screen):
                 raise ValueError("Say how to detect it: add the file path or detection script.")
             if f["detection"]["method"] == "msi_product_code" and not f["product_code"]:
                 raise ValueError("Add the MSI product code, or pick another way to detect it.")
+            if self.pkg is not None:
+                loop = core.dependency_loop(self.store, dataclasses.replace(self.pkg, prerequisites=self.needs))
+                if loop:
+                    raise ValueError("That makes a loop: " + " needs ".join(loop) + ". Take one of them off Needs.")
+            if f["version_source"].get("kind") == "winget" and self.kind == "winget" and not f["winget_id"]:
+                f["winget_id"] = f["version_source"]["id"]
         return f
 
     def _apply(self, pkg, f):
         for k in ("name", "version", "publisher", "install", "uninstall", "winget_id", "product_code",
-                  "success_codes", "detection"):
+                  "success_codes", "reboot_codes", "detection", "version_source"):
             setattr(pkg, k, f[k])
         pkg.language = self.lang
+        pkg.prerequisites = list(getattr(self, "needs", pkg.prerequisites))
         return pkg
 
     def _preview_soon(self):
@@ -847,6 +1013,9 @@ class DeploymentWizard(Screen):
         if obj is not None and getattr(obj, "version", ""):
             self.version.insert(0, obj.version)
         self.version.pack(side="left", padx=10)
+        self.downgrade = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(vrow, text="Allow rolling back a newer version", variable=self.downgrade,
+                        font=theme.font_style("small")).pack(side="left", padx=(6, 0))
         opts = ctk.CTkFrame(left, fg_color="transparent")
         opts.pack(fill="x", pady=(16, 0))
         self.name = ctk.CTkEntry(opts, width=300, height=34, placeholder_text="Name for this group, e.g. Office apps")
@@ -856,12 +1025,29 @@ class DeploymentWizard(Screen):
         self.onboarding = tk.BooleanVar(value=False)
         ctk.CTkSwitch(opts, text="Only on new PCs (onboarding runs)", variable=self.onboarding,
                       font=theme.font_style("body")).pack(anchor="w")
-        right = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
-        right.grid(row=0, column=1, sticky="new")
+        self.values_form = None
+        if kind == "task" and obj is not None and obj.parameters:
+            caption(opts, "Settings for this deployment").pack(anchor="w", pady=(16, 4))
+            self.values_form = ValuesForm(opts, obj)
+            self.values_form.pack(anchor="w")
+        caption(opts, "Restarts").pack(anchor="w", pady=(16, 4))
+        reboot_help = ctk.CTkLabel(opts, text="", font=theme.font_style("small"), text_color=P["muted"],
+                                   anchor="w", justify="left", wraplength=520)
+        self.reboot_seg = segmented(opts, list(REBOOT_LABEL.values()), height=30,
+                                    command=lambda v: reboot_help.configure(text=REBOOT_HELP[_key(REBOOT_LABEL, v)]))
+        self.reboot_seg.set(REBOOT_LABEL["never"])
+        self.reboot_seg.pack(anchor="w")
+        reboot_help.configure(text=REBOOT_HELP["never"])
+        reboot_help.pack(anchor="w", pady=(4, 0))
+        side = ctk.CTkFrame(cols, fg_color="transparent")
+        side.grid(row=0, column=1, sticky="new")
+        right = ctk.CTkFrame(side, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        right.pack(fill="x")
         from .manage_screens import ScheduleEditor
         self.schedule_editor = ScheduleEditor(right, None, None, compact=True)
         caption(right, "When it runs").pack(anchor="w", padx=18, pady=(16, 4))
         self.schedule_editor.pack(fill="x", padx=18, pady=(0, 16))
+        self._narrow(side)
 
         def changed(label):
             key = _key(states, label)
@@ -876,6 +1062,59 @@ class DeploymentWizard(Screen):
         changed(first)
         self.state_seg = seg
         self.buttons(primary=("Save deployment", self._save), secondary=("Back", self._where))
+
+    def _narrow(self, side):
+        """Tags and a filter script narrow the target down; shows how many known PCs it takes in."""
+        box = ctk.CTkFrame(side, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        box.pack(fill="x", pady=(12, 0))
+        caption(box, "Only some of those PCs").pack(anchor="w", padx=18, pady=(16, 4))
+        known = self.store.all_tags()
+        self.tags = ctk.CTkEntry(box, height=32, font=theme.font_style("body"),
+                                 placeholder_text="Tags, e.g. Laptops, Kiosk")
+        self.tags.pack(fill="x", padx=18)
+        ctk.CTkLabel(box, text=("PCs with any of these tags. Known: " + ", ".join(known[:8])) if known else
+                     "PCs with any of these tags. Tag PCs on the Inventory page.", font=theme.font_style("small"),
+                     text_color=P["muted"], anchor="w", justify="left", wraplength=340).pack(anchor="w", padx=18)
+        ctk.CTkLabel(box, text="Only where the inventory says (optional)", font=theme.font_style("small"),
+                     text_color=P["text_2"], anchor="w").pack(anchor="w", padx=18, pady=(10, 2))
+        self.conditions = ctk.CTkEntry(box, height=32, font=theme.mono(12),
+                                       placeholder_text="e.g. ram_gb >= 8; os contains Windows 11")
+        self.conditions.pack(fill="x", padx=18)
+        ctk.CTkLabel(box, text="Judged from each PC's snapshot. Fields: os, build, model, serial, ram_gb, free_gb, "
+                               "bitlocker, software (contains).", font=theme.font_style("small"),
+                     text_color=P["muted"], anchor="w", justify="left", wraplength=340).pack(anchor="w", padx=18)
+        ctk.CTkLabel(box, text="Filter script (PowerShell, optional)", font=theme.font_style("small"),
+                     text_color=P["text_2"], anchor="w").pack(anchor="w", padx=18, pady=(10, 2))
+        self.filter_box = ctk.CTkTextbox(box, height=64, font=theme.mono(11), border_color=P["control_border"])
+        self.filter_box.pack(fill="x", padx=18)
+        ctk.CTkLabel(box, text="Runs on each PC during the check. It applies where the last line printed is True.",
+                     font=theme.font_style("small"), text_color=P["muted"], anchor="w", justify="left",
+                     wraplength=340).pack(anchor="w", padx=18)
+        self.applies_lbl = ctk.CTkLabel(box, text="", font=theme.font_style("body_strong"), text_color=P["text"],
+                                        anchor="w", justify="left", wraplength=340)
+        self.applies_lbl.pack(anchor="w", padx=18, pady=(8, 16))
+        self.tags.bind("<KeyRelease>", lambda _e: self._applies(), add="+")
+        self.conditions.bind("<KeyRelease>", lambda _e: self._applies(), add="+")
+        self.filter_box.bind("<KeyRelease>", lambda _e: self._applies(), add="+")
+        self._applies()
+
+    def _applies(self):
+        from ..deploy import inventory
+        d = core.Deployment("software", "", target_kind=self.target[0], target_value=self.target[1],
+                            tags=core.clean_tags(self.tags.get()), conditions=self.conditions.get().strip())
+        try:
+            inventory.parse_conditions(d.conditions)
+        except ValueError as e:
+            self.applies_lbl.configure(text=_short(str(e), 90), text_color=P["warn"])
+            return
+        unknown: list = []
+        n, total = len(core.applies_to(self.store, d, unknown=unknown)), len(self.store.known_hosts())
+        text = f"Applies to {_plural(n, 'known PC')}" + (f" of {total}" if total else "")
+        if unknown:
+            text += f", {len(unknown)} without a snapshot"
+        if self.filter_box.get("1.0", "end-1c").strip():
+            text += ", if the filter says so"
+        self.applies_lbl.configure(text=text, text_color=P["text"])
 
     def _target_text(self):
         kind, value = self.target
@@ -894,12 +1133,19 @@ class DeploymentWizard(Screen):
             self.app.toast("Type the version to keep, for example 24.08.", "warn")
             return
         try:
+            from ..deploy import inventory
+            inventory.parse_conditions(self.conditions.get())
             sched = self.schedule_editor.value()
-        except ValueError as e:
+            params = self.values_form.value(self.store.root) if self.values_form is not None else {}
+        except Exception as e:  # noqa: BLE001  (a bad value, or DPAPI refusing a secret)
             self.app.toast(str(e), "warn")
             return
-        common = dict(desired=desired, version=version, target_kind=self.target[0], target_value=self.target[1],
-                      onboarding_only=bool(self.onboarding.get()), schedule=sched)
+        common = dict(params=params, desired=desired, version=version, target_kind=self.target[0],
+                      target_value=self.target[1], onboarding_only=bool(self.onboarding.get()), schedule=sched,
+                      allow_downgrade=desired == "version" and bool(self.downgrade.get()),
+                      reboot_policy=_key(REBOOT_LABEL, self.reboot_seg.get()),
+                      tags=core.clean_tags(self.tags.get()), conditions=self.conditions.get().strip(),
+                      filter_script=self.filter_box.get("1.0", "end-1c").strip())
         if len(self.picked) > 1:
             d = core.Deployment(item_type="bundle", item_id="", items=[i for _k, i in self.picked],
                                 name=self.name.get().strip(), **common)
@@ -1003,20 +1249,151 @@ class ClientEditor(Screen):
 
 
 # ---------------------------------------------------------------------------
+class ParamEditor(ctk.CTkFrame):
+    """A task's typed parameters: name, type, default and (for a choice) its options."""
+
+    def __init__(self, master, params):
+        super().__init__(master, fg_color="transparent")
+        self.rows = []
+        self.list = ctk.CTkFrame(self, fg_color="transparent")
+        self.list.pack(fill="x")
+        for p in params:
+            self.add(p)
+        soft_button(self, "+ Add parameter", lambda: self.add({}), width=150).pack(anchor="w", pady=(6, 0))
+
+    def add(self, p):
+        # two lines per parameter: name, type and remove; then its default and (for a choice) the options
+        row = ctk.CTkFrame(self.list, fg_color=P["surface_2"], corner_radius=8)
+        row.pack(fill="x", pady=3, padx=(0, 8))
+        name = ctk.CTkEntry(row, width=150, height=30, font=theme.mono(12), placeholder_text="Name")
+        kind = ctk.CTkOptionMenu(row, values=list(taskparams.TYPES.values()), width=110, height=30,
+                                 font=theme.font_style("small"))
+        kind.set(taskparams.TYPES.get(p.get("type", "text")))
+        default = ctk.CTkEntry(row, width=150, height=30, font=theme.font_style("body"), placeholder_text="Default")
+        choices = ctk.CTkEntry(row, width=150, height=30, font=theme.font_style("body"),
+                               placeholder_text="Options: a, b, c")
+        d = p.get("default", "")
+        d = ("yes" if d else "no") if isinstance(d, bool) else str(d if d is not None else "")
+        for w, text in ((name, p.get("name", "")), (default, d), (choices, ", ".join(p.get("choices") or []))):
+            if text:
+                w.insert(0, text)
+        name.grid(row=0, column=0, padx=(8, 6), pady=(8, 3), sticky="w")
+        kind.grid(row=0, column=1, padx=(0, 6), pady=(8, 3), sticky="w")
+        default.grid(row=1, column=0, padx=(8, 6), pady=(3, 8), sticky="w")
+        choices.grid(row=1, column=1, columnspan=2, padx=(0, 6), pady=(3, 8), sticky="w")
+        entry = {"frame": row, "name": name, "type": kind, "default": default, "choices": choices,
+                 "label": p.get("label", ""), "help": p.get("help", ""), "required": p.get("required", False)}
+        small_button(row, "x", lambda: self._remove(entry), "danger", width=28).grid(row=0, column=2, pady=(8, 3))
+        self.rows.append(entry)
+
+    def _remove(self, entry):
+        entry["frame"].destroy()
+        self.rows.remove(entry)
+
+    def value(self):
+        """The parameter list, checked. Raises ValueError."""
+        out = []
+        for r in self.rows:
+            name = r["name"].get().strip()
+            if not name:
+                continue
+            out.append({"name": name, "type": _key(taskparams.TYPES, r["type"].get()), "label": r["label"] or name,
+                        "help": r["help"], "required": r["required"], "default": r["default"].get().strip(),
+                        "choices": [c.strip() for c in r["choices"].get().split(",") if c.strip()]})
+        return taskparams.tidy_parameters(out)
+
+
+class ValuesForm(ctk.CTkFrame):
+    """A deployment's values for a task's typed parameters. Secrets are typed here and stored encrypted (DPAPI);
+    where DPAPI isn't available the secret boxes are switched off."""
+
+    def __init__(self, master, task, values=None):
+        super().__init__(master, fg_color="transparent")
+        self.task, self.given = task, dict(values or {})
+        self.widgets = {}
+        from ..integrations import dpapi
+        self.can_secret = dpapi.available()
+        for i, p in enumerate(task.parameters):
+            ctk.CTkLabel(self, text=p.get("label") or p["name"], font=theme.font_style("body_strong"),
+                         text_color=P["text"], anchor="w", width=150).grid(row=i * 2, column=0, sticky="w",
+                                                                         pady=(6, 0))
+            cur = self.given.get(p["name"], p.get("default", ""))
+            kind = p["type"]
+            if kind == "bool":
+                var = tk.BooleanVar(value=bool(cur))
+                w = ctk.CTkSwitch(self, text="", variable=var, width=46)
+                w.var = var
+            elif kind == "choice":
+                w = ctk.CTkOptionMenu(self, values=p["choices"], width=220, height=32, font=theme.font_style("body"))
+                w.set(cur if cur in p["choices"] else p["choices"][0])
+            else:
+                w = ctk.CTkEntry(self, width=260, height=32, font=theme.font_style("body"),
+                                 show="•" if kind == "secret" else "",
+                                 placeholder_text=("Stored encrypted. Leave empty to keep it" if cur else
+                                                   "Stored encrypted") if kind == "secret" else "")
+                if kind == "secret" and not self.can_secret:
+                    w.configure(state="disabled", placeholder_text="Needs Windows (DPAPI)")
+                elif kind != "secret" and cur not in ("", None):
+                    w.insert(0, str(cur))
+            w.grid(row=i * 2, column=1, sticky="w", pady=(6, 0))
+            hint = p.get("help") or ""
+            if kind == "secret" and not self.can_secret:
+                hint = "Secrets are only stored with Windows DPAPI, so this can't be set on this computer."
+            if hint:
+                ctk.CTkLabel(self, text=hint, font=theme.font_style("small"), text_color=P["muted"], anchor="w",
+                             justify="left", wraplength=420).grid(row=i * 2 + 1, column=1, sticky="w")
+            self.widgets[p["name"]] = (p, w)
+        if not task.parameters:
+            ctk.CTkLabel(self, text="This task has no settings.", font=theme.font_style("body"),
+                         text_color=P["muted"]).grid(row=0, column=0, sticky="w")
+
+    def value(self, root):
+        """The values to save on the deployment, checked, with new secrets encrypted into the library at root.
+        Raises ValueError (or dpapi.SecretsUnavailable)."""
+        out = {}
+        for name, (p, w) in self.widgets.items():
+            if p["type"] == "bool":
+                out[name] = bool(w.var.get())
+            elif p["type"] == "choice":
+                out[name] = w.get()
+            elif p["type"] == "secret":
+                text = w.get() if self.can_secret else ""
+                old = self.given.get(name)
+                if text:
+                    out[name] = taskparams.save_secret(root, text, ref=old["secret"] if isinstance(old, dict)
+                                                       else None)
+                elif isinstance(old, dict):
+                    out[name] = old
+            else:
+                text = w.get().strip()
+                if text:
+                    out[name] = taskparams.coerce(p, text)
+        taskparams.values_for(self.task.parameters, self.task.params, out)  # required ones present
+        return out
+
+
 class TaskEditor(Screen):
     guide_topic = "deploy"
 
     def __init__(self, master, app, task=None):
         super().__init__(master, app, "Edit task" if task else "New upkeep task",
-                         "A check script says whether the PC is fine (exit code 0). The fix script runs when it "
-                         "isn't.", badge=BADGE)
+                         "Test says whether the PC is fine (exit code 0), Set fixes it, Get prints the current "
+                         "state. Parameters become variables in all three.", badge=BADGE)
         self.task = task
         body = self.new_body()
         self.store = open_store(self, body)
         if self.store is None:
             return
-        card = _form_card(body, expand=True)
-        card.grid_rowconfigure((3, 4), weight=1)
+        cols = ctk.CTkFrame(body, fg_color="transparent")
+        cols.pack(fill="both", expand=True)
+        cols.grid_columnconfigure(0, weight=3, uniform="t")
+        cols.grid_columnconfigure(1, weight=2, uniform="t")
+        cols.grid_rowconfigure(0, weight=1)
+        outer = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        outer.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        card = AutoScroll(outer)
+        card.pack(fill="both", expand=True, padx=2, pady=(2, 8))
+        card.grid_columnconfigure(1, weight=1)
         _form_label(card, 0, "Name", top=True)
         self.name = ctk.CTkEntry(card, height=34, placeholder_text="e.g. Print Spooler running")
         self.name.grid(row=0, column=1, sticky="ew", padx=(0, 20), pady=(20, 6))
@@ -1027,20 +1404,35 @@ class TaskEditor(Screen):
         self.lang = segmented(card, list(LANGUAGES.values()), height=30)
         self.lang.set(LANGUAGES.get(task.language if task else "powershell", LANGUAGES["powershell"]))
         self.lang.grid(row=2, column=1, sticky="w", padx=(0, 20), pady=6)
-        _form_label(card, 3, "Check", "nw")
+        _form_label(card, 3, "Test", "nw")
         self.test = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
         self.test.grid(row=3, column=1, sticky="nsew", padx=(0, 20), pady=6)
-        _form_label(card, 4, "Fix", "nw")
+        _form_label(card, 4, "Set", "nw")
         self.fix = ctk.CTkTextbox(card, height=110, font=theme.mono(12), border_color=P["control_border"])
         self.fix.grid(row=4, column=1, sticky="nsew", padx=(0, 20), pady=6)
-        ctk.CTkLabel(card, text="Both scripts run as administrator on the PC. Exit with 0 from Check when "
-                                "everything is fine.", font=theme.font_style("small"), text_color=P["muted"],
-                     anchor="w").grid(row=5, column=1, sticky="w", padx=(0, 20), pady=(0, 16))
+        _form_label(card, 5, "Get", "nw")
+        self.get_box = ctk.CTkTextbox(card, height=60, font=theme.mono(12), border_color=P["control_border"])
+        self.get_box.grid(row=5, column=1, sticky="nsew", padx=(0, 20), pady=6)
+        ctk.CTkLabel(card, text="All three run as administrator on the PC. The check step runs Test only; Get runs "
+                                "after a fix to record the new state.", font=theme.font_style("small"),
+                     text_color=P["muted"], anchor="w", justify="left", wraplength=420).grid(
+            row=6, column=1, sticky="w", padx=(0, 20), pady=(0, 16))
+        side = ctk.CTkFrame(cols, corner_radius=12, fg_color=P["surface"], border_width=1, border_color=P["border"])
+        side.grid(row=0, column=1, sticky="nsew")
+        caption(side, "Parameters").pack(anchor="w", padx=18, pady=(16, 4))
+        ctk.CTkLabel(side, text="Each deployment of the task gives its own values. Secrets are stored encrypted "
+                                "and shown masked.", font=theme.font_style("small"), text_color=P["muted"],
+                     anchor="w", justify="left", wraplength=360).pack(anchor="w", padx=18)
+        scroll = AutoScroll(side)
+        scroll.pack(fill="both", expand=True, padx=(18, 6), pady=(8, 12))
+        self.params = ParamEditor(scroll, task.parameters if task else [])
+        self.params.pack(fill="x")
         if task:
             self.name.insert(0, task.name)
             self.desc.insert(0, task.description)
             self.test.insert("1.0", task.test)
             self.fix.insert("1.0", task.set)
+            self.get_box.insert("1.0", task.get)
         self.buttons(primary=("Save task", self._save),
                      secondary=("Back", lambda: go_manage(self.app, "Tasks")))
 
@@ -1050,10 +1442,16 @@ class TaskEditor(Screen):
             self.app.toast("Give the task a name.", "warn")
             return
         if not test:
-            self.app.toast("Add a check script. It should exit with 0 when the PC is fine.", "warn")
+            self.app.toast("Add a Test script. It should exit with 0 when the PC is fine.", "warn")
+            return
+        try:
+            params = self.params.value()
+        except ValueError as e:
+            self.app.toast(str(e), "warn")
             return
         t = self.task or core.Task(name=name)
         t.name, t.test, t.set = name, test, self.fix.get("1.0", "end-1c").strip()
+        t.get, t.parameters = self.get_box.get("1.0", "end-1c").strip(), params
         t.description, t.language = self.desc.get().strip(), _key(LANGUAGES, self.lang.get())
         ok, _ = attempt(self.app, "save the task", lambda: self.store.upsert("tasks", t))
         if ok:
@@ -1202,7 +1600,7 @@ class RunWizard(Screen):
                     continue
                 sm = sess["summary"]
                 if mode == "detect":
-                    todo = sum(1 for a in sess["actions"] if a["action"] not in ("none", "audit"))
+                    todo = sum(1 for a in sess["actions"] if a["action"] not in core.IDLE)
                     self._set_live(m, f"{_plural(todo, 'change')} needed" if todo else "All good",
                                    "warn" if todo else "success")
                 else:
@@ -1227,7 +1625,7 @@ class RunWizard(Screen):
                              secondary=("Back", self._pcs)))
 
     def _changes(self, sess):
-        return [a for a in sess.get("actions", []) if a.get("action") not in ("none", "audit")]
+        return [a for a in sess.get("actions", []) if a.get("action") not in core.IDLE]
 
     def _checked(self, results):
         self.results = results
@@ -1254,6 +1652,10 @@ class RunWizard(Screen):
             if not s.get("actions") and not s.get("error"):
                 add_action_row(table, (s["machine"], "No deployments for this PC", "", "", ""))
         self.table, self.tree = table, table.tree
+        waiting = [(s["machine"], s["pending_reboot"]) for _m, s in results if s.get("pending_reboot")]
+        for host, why in waiting[:3]:
+            self.note(body, f"{host} is waiting for a restart: {why[0]}. Installs may fail until it restarts.",
+                      "warn").pack(anchor="w", pady=(8, 0))
         if n:
             self.buttons(primary=("Apply changes", self._confirm), secondary=("Back", self._pcs))
         else:
@@ -1294,7 +1696,7 @@ class RunWizard(Screen):
         lines = []
         acts = sess.get("actions", [])
         ran = [a for a in acts if a.get("status") in ("compliant", "failed")
-               and a.get("action") not in ("none", "audit")]
+               and a.get("action") not in core.IDLE]
         part = [a for a in acts if a.get("status") == "cancelled" and "part-way" in a.get("result", "")]
         left = [a for a in acts if a.get("status") == "cancelled" and a not in part]
         if sess:
@@ -1311,10 +1713,9 @@ class RunWizard(Screen):
                              primary=("Back to Sessions", lambda: go_manage(self.app, "Sessions")))
 
     def _done(self, results):
-        acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in ("none", "audit")]
+        acts = [a for _m, s in results for a in s.get("actions", []) if a.get("action") not in core.IDLE]
         failed = [a for a in acts if a.get("status") == "failed"]
         errors = [s for _m, s in results if s.get("error")]
-        reboot = any(s.get("summary", {}).get("reboot") for _m, s in results)
         ok = not failed and not errors
         body = self.step(3, "All done" if ok else "Done, with problems", "")
         self.app.mascot.set_mood("happy" if ok else "sad", "done" if ok else "error")
@@ -1323,8 +1724,11 @@ class RunWizard(Screen):
             lines.append(f"{len(failed)} failed. Select a row on the Sessions page to see the installer output.")
         if errors:
             lines.append(f"Couldn't reach {_plural(len(errors), 'PC')}.")
-        if reboot:
-            lines.append("Some installers asked for a restart.")
+        for _m, s in results:
+            if s.get("restart"):
+                lines.append(f"{s['machine']}: {s['restart']}.")
+            elif s.get("summary", {}).get("reboot"):
+                lines.append(f"{s['machine']} needs a restart.")
         self.result_card(body, "check" if ok else "warn", "success" if ok else "warn",
                          f"Maintenance finished on {_plural(len(results), 'PC')}", lines)
         table = action_tree(body, [("pc", "PC", 150), ("item", "Item", 200), ("plan", "Plan", 120),
@@ -1363,6 +1767,9 @@ class SessionView(Screen):
                                     if x), badge=BADGE)
         self.s = s
         body = self.new_body()
+        if s.get("restart") or s.get("pending_reboot"):
+            why = s.get("restart") or "needs a restart: " + "; ".join(s["pending_reboot"][:2])
+            self.note(body, f"Restart: {why}", "warn").pack(anchor="w", pady=(0, 8))
         table = action_tree(body, [("item", "Item", 200), ("want", "Wanted", 140), ("found", "Found", 130),
                                    ("plan", "Plan", 110), ("status", "Status", 110), ("result", "Result", 200)],
                             height=7)

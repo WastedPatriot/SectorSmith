@@ -76,6 +76,8 @@ class Plan:
     store: object = None                          # Deploy library (packages for 'library' rows)
     apps_first: bool = True                       # install apps before copying, so copied settings win
     install_apps: bool = True                     # False: only list them (e.g. copying to a drive)
+    baseline_client: str = ""                     # also give the new PC this client's baseline (core.onboard)
+    domain_notes: list = field(default_factory=list)  # integrations: ADUser.migration_notes() for the report
 
 
 def measure(src_ep, root: str, items: list[Item]) -> dict:
@@ -108,17 +110,39 @@ def run(plan: Plan, prog: Progress) -> dict:
 
 def _install_apps(plan: Plan, prog: Progress, state: dict):
     from . import apps
-    if not plan.apps or not plan.install_apps:
+    if plan.apps and plan.install_apps:
+        r = apps.install(plan.dst, plan.apps, plan.store, prog)
+        state["apps"] = r["apps"]
+        state["apps_session"] = r["session"]
+    _baseline(plan, prog, state)
+
+
+def _baseline(plan: Plan, prog: Progress, state: dict):
+    """The client's baseline on the new PC, as an onboarding session. Problems are reported, not raised."""
+    if not plan.baseline_client or plan.store is None or "baseline" in state:
         return
-    r = apps.install(plan.dst, plan.apps, plan.store, prog)
-    state["apps"] = r["apps"]
-    state["apps_session"] = r["session"]
+    from ..deploy import core
+    c = plan.store.get("clients", plan.baseline_client)
+    prog.set_label(f"Installing {c.name if c else 'the client'}'s baseline on {plan.dst.label}…")
+    try:
+        sess = core.onboard(plan.dst, plan.store, plan.baseline_client, prog)
+    except Cancelled:
+        state["baseline"] = {"client": c.name if c else "", "error": "stopped by Cancel"}
+        raise
+    except Exception as e:  # noqa: BLE001  (the files still get copied)
+        log.warning("Baseline on %s failed: %s", plan.dst.label, e)
+        state["baseline"] = {"client": c.name if c else "", "error": str(e)}
+        return
+    state["baseline"] = {"client": c.name if c else "", "session": sess.get("path"), "summary": sess["summary"],
+                         "actions": [{"name": a["name"], "status": a["status"], "result": a.get("result", "")}
+                                     for a in sess["actions"]]}
 
 
 def _result(plan: Plan, st: dict) -> dict:
     res = {"copied": st["copied"], "bytes": st["bytes"], "skipped_unchanged": st["skipped_unchanged"],
            "failed": st["failed"], "scan_errors": st["scan_errors"], "seconds": round(time.time() - st["t0"], 1),
-           "apps": st["apps"], "manual_apps": [a["name"] for a in plan.apps if a["source"] == "manual"]}
+           "apps": st["apps"], "manual_apps": [a["name"] for a in plan.apps if a["source"] == "manual"],
+           "baseline": st.get("baseline"), "domain_notes": list(plan.domain_notes)}
     res["hints"] = explain_failures(st["failed"], plan.src.label)
     return res
 
@@ -250,6 +274,21 @@ APPS_IN_USE = [("/microsoft/edge/", "Microsoft Edge"), ("/google/chrome/", "Goog
                ("/microsoft/teams/", "Teams"), ("/onenote/", "OneNote")]
 
 
+def baseline_lines(b: dict | None) -> list[str]:
+    """The baseline part of the report and the result screen."""
+    if not b:
+        return []
+    if b.get("error"):
+        return [f"{b.get('client') or 'Client'} baseline: not installed ({b['error']})", ""]
+    acts = b.get("actions") or []
+    ok = [a for a in acts if a["status"] == "compliant"]
+    out = [f"{b.get('client') or 'Client'} baseline: {len(ok)} of {len(acts)} packages in place"]
+    out += [f"  {a['name']}: {a['status']}" + (f" ({a['result']})" if a.get("result") else "") for a in acts]
+    if (b.get("summary") or {}).get("reboot"):
+        out.append("  The new PC needs a restart.")
+    return out + [""]
+
+
 def explain_failures(failed: list[str], src_label: str) -> list[str]:
     """Plain-English hints for the usual causes, so the report says what to do next."""
     apps, denied = set(), 0
@@ -301,6 +340,10 @@ def write_report(plan: Plan, res: dict) -> str:
     if plan.apps:
         from .apps import app_list_text
         lines += app_list_text(plan.apps, res.get("apps")).splitlines() + [""]
+    lines += baseline_lines(res.get("baseline"))
+    if res.get("domain_notes"):
+        lines += ["Domain account (things on the server, not in the profile)", ""] + \
+            [f"  {n}" for n in res["domain_notes"]] + [""]
     lines += [f"  TIP: {h}" for h in res.get("hints", [])] + ([""] if res.get("hints") else []) \
         + [f"  FAILED {f}" for f in res["failed"]]
     path.write_text("\n".join(lines), encoding="utf-8")

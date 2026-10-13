@@ -2,6 +2,7 @@
 presentation mode and drag-and-drop."""
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import subprocess
@@ -63,6 +64,9 @@ class ModeVar:
         return self.value
 
 
+GC_EVERY_MS = 500
+
+
 class MainWindow(*_Base):
     def __init__(self):
         theme.enable_dpi_awareness()  # before Tk starts; CustomTkinter then scales each monitor itself
@@ -77,6 +81,11 @@ class MainWindow(*_Base):
         self._install_error_hooks()
         ctk.set_default_color_theme("blue")
         theme.apply_ctk_defaults()
+        # Tk fonts and images must be freed on this thread: a garbage collection that a worker thread happens to
+        # trigger would call into Tk from there and hang it. So automatic collection is off and the UI loop
+        # collects instead (_collect_garbage).
+        gc.disable()
+        self.after(GC_EVERY_MS, self._collect_garbage)
         self.title(APP_NAME)
         self.geometry("1360x860")
         self.minsize(1120, 720)
@@ -367,11 +376,27 @@ class MainWindow(*_Base):
         if self._may_leave():
             self.go(ConnectScreen)
 
+    def _collect_garbage(self):
+        """Collection on the UI thread, by the same rules Python uses when it's switched on."""
+        try:
+            t0, t1, t2 = gc.get_threshold()
+            c0, c1, c2 = gc.get_count()
+            if c2 > t2:
+                gc.collect(2)
+            elif c1 > t1:
+                gc.collect(1)
+            elif c0 > t0:
+                gc.collect(0)
+        finally:
+            self.after(GC_EVERY_MS, self._collect_garbage)
+
     def deploy_store(self):
         """The Deploy library, loaded on first use. Raises if its files can't be read."""
         if self._deploy_store is None:
             from ..deploy.core import Store
+            from .shell import technician
             self._deploy_store = Store()
+            self._deploy_store.actor = technician  # the audit log names the technician
         return self._deploy_store
 
     def background(self, fn, done, error=None):

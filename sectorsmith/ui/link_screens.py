@@ -688,6 +688,7 @@ class MigrateWizard(Screen):
             self.note(opts, "Installs run silently on the new PC with SectorSmith Deploy, then get checked. winget "
                             "apps need winget there (Windows 10 1809+ or 11).", "muted").pack(anchor="w",
                                                                                               pady=(4, 0))
+        self._baseline_option(opts, can_install)
         self.buttons(primary=("Start moving", self._go), secondary=("Back", self._what))
         src, sroot, dst, offline_src, want_dst = self.src, self.src_root, self.dst, self.src_offline, can_install
         app = self.app
@@ -724,6 +725,42 @@ class MigrateWizard(Screen):
             self.app_rows, self.app_store = [], None
             self.apps_ready = True
         self.app.background(load, show, failed)
+
+    def _baseline_option(self, parent, can_install):
+        """'Also install this client's baseline': the new PC joins a client and gets its baseline (core.onboard)."""
+        self.baseline_on = tk.BooleanVar(value=False)
+        self.baseline_clients = []
+        try:
+            store = self.app.deploy_store()
+        except Exception:  # noqa: BLE001  (no Deploy library: nothing to offer)
+            return
+        from .manage_common import client_hidden
+        self.baseline_clients = [c for c in sorted(store.clients, key=lambda c: c.name.lower())
+                                 if store.baseline_for(c.id) and not client_hidden(self.app, c)]
+        if not self.baseline_clients or not can_install:
+            return
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(anchor="w", pady=(8, 0))
+        names = [c.name for c in self.baseline_clients]
+        dst_host = self.dst.info_cache.get("hostname", "") if not self.dst.is_local else ""
+        try:
+            dst_host = dst_host or self.dst.info()["hostname"]
+        except Exception:  # noqa: BLE001
+            pass
+        mine = store.client_of(dst_host) if dst_host else None
+        pick = mine.name if mine is not None and mine.name in names else \
+            (self.app.context.get("client") if self.app.context.get("client") in names else names[0])
+        self.baseline_on.set(mine is not None and mine.name in names)
+        ctk.CTkSwitch(row, text="Also install this client's baseline:", variable=self.baseline_on,
+                      progress_color=P["accent"], font=theme.font(12)).pack(side="left")
+        self.baseline_menu = ctk.CTkOptionMenu(row, values=names, width=200, height=28, font=theme.font(12))
+        self.baseline_menu.set(pick)
+        self.baseline_menu.pack(side="left", padx=(8, 0))
+
+    def _baseline_client(self):
+        if not getattr(self, "baseline_on", None) or not self.baseline_on.get() or not self.baseline_clients:
+            return ""
+        return next((c.id for c in self.baseline_clients if c.name == self.baseline_menu.get()), "")
 
     def _draw_apps(self, lst):
         rows = self.app_rows
@@ -771,10 +808,16 @@ class MigrateWizard(Screen):
         for r in self.app_rows:
             v = self.app_vars.get(id(r))
             rows.append(r if v is None or v.get() else dict(r, source="skipped", note="not chosen"))
+        base = self._baseline_client() if self.dst_kind != "offline" else ""
+        store = self.app_store
+        if base and store is None:
+            store = self.app.deploy_store()
+        notes = self.domain_user.migration_notes() if getattr(self, "domain_user", None) is not None else []
         plan = migrate.Plan(self.src, self.src_root, self.dst, self.dst_root, self.chosen_items,
-                            self.only_changed_v if not again else True, apps=rows, store=self.app_store,
+                            self.only_changed_v if not again else True, apps=rows, store=store,
                             apps_first=self.apps_first.get(),
-                            install_apps=self.install_apps.get() and self.dst_kind != "offline")
+                            install_apps=self.install_apps.get() and self.dst_kind != "offline",
+                            baseline_client=base if not again else "", domain_notes=notes)
         self._plan = plan
         _, panel = self.progress("Moving…", f"{self.src.label} → {self.dst.label}")
         self._draw_steps(4)
@@ -792,6 +835,11 @@ class MigrateWizard(Screen):
         manual = res.get("manual_apps") or []
         if manual:
             lines.append("Install yourself: " + ", ".join(manual[:8]) + (" and more" if len(manual) > 8 else ""))
+        base = migrate.baseline_lines(res.get("baseline"))
+        if base:
+            lines.append(base[0])
+        for n in (res.get("domain_notes") or [])[:3]:
+            lines.append(n)
         return lines
 
     def _done(self, res):

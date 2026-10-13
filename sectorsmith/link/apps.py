@@ -172,7 +172,11 @@ class MigrationStore(core.Store):
         self.base = base
         # only this migration's packages and deployments, not the whole library the base just loaded
         self.data.clear()
-        self.data.update(packages=packages, tasks=[], clients=[], deployments=deployments)
+        # the client and its licences come along, so a licensed app is installed with the client's key
+        self.data.update(packages=packages, tasks=[], clients=list(base.clients), deployments=deployments,
+                         machines=[], licences=list(base.licences))
+        for k in self.KINDS:
+            self.data.setdefault(k, [])
 
     def save(self, kind=None):
         pass

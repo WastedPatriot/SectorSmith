@@ -47,8 +47,9 @@ with open(bogus, "wb") as f:
 from tkinter import filedialog, messagebox  # noqa: E402
 
 from sectorsmith.deploy import schedule as sch  # noqa: E402
-from sectorsmith.ui import deploy_screens as D, main as M, manage_schedule as MSch, manage_screens as MS, nav, \
-    theme  # noqa: E402
+from sectorsmith.deploy.versions import KINDS as versions_kinds  # noqa: E402
+from sectorsmith.ui import deploy_screens as D, main as M, manage_audit as MA, manage_inventory as MI, \
+    manage_licences as ML, manage_schedule as MSch, manage_screens as MS, nav, theme  # noqa: E402
 from sectorsmith.ui.guide import save_settings  # noqa: E402
 from sectorsmith.util import Cancelled, check_cancel  # noqa: E402
 
@@ -169,7 +170,8 @@ def store():
 
 
 PAGES = [("library", MS.PackagesScreen), ("catalogue", MS.CatalogueScreen), ("deployments", MS.DeploymentsScreen),
-         ("clients", MS.ClientsScreen), ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen)]
+         ("clients", MS.ClientsScreen), ("inventory", MI.InventoryScreen), ("licences", ML.LicencesScreen),
+         ("tasks", MS.TasksScreen), ("sessions", MS.SessionsScreen), ("audit", MA.AuditScreen)]
 host = socket.gethostname()
 pump(1)
 shot("home_light")
@@ -181,7 +183,7 @@ for key, cls in PAGES:
     pump(.5)
     assert type(app.screen) is cls, (key, type(app.screen))
     assert app.rail.items["manage"].selected and nav.locate(cls) == ("manage", key)
-    if key != "catalogue":
+    if key not in ("catalogue", "inventory"):
         assert not app.screen.table.rows, key
 shot("sessions_empty")
 
@@ -258,6 +260,57 @@ assert scr.title_lbl.cget("text") == "Package saved", scr.title_lbl.cget("text")
 handy = next(p for p in store().packages if p.name == "Handy tool")
 assert handy.kind == "script" and handy.detection == {"method": "file", "value": tool}
 
+# --- a package whose newest version comes from a GitHub release (fake fetcher, never the network) ------------------
+fetched = []
+
+
+def fake_fetch(url, **kw):
+    fetched.append(url)
+    return json.dumps({"tag_name": "v5.1.0", "assets": [{"name": "tool-5.1.0-x64.msi", "digest": "sha256:" + "ab" * 32,
+                                                        "browser_download_url": "https://example.invalid/t.msi"}]}
+                      ).encode()
+
+
+store().fetcher = fake_fetch
+app.go(D.PackageBuilder, mode="script")
+pump(.5)
+scr = app.screen
+scr.v["name"].set("Dynamic tool")
+scr.v["install"].set('msiexec /i "{installer}" /qn')
+scr.det_method.set(D.DETECTION["registry"])
+scr._det_changed()
+scr.vs_kind.set(versions_kinds["github"])
+scr._source_changed()
+scr.vs["repo"].set("not a repo")
+press("Save package")
+assert scr.title_lbl.cget("text") != "Package saved", "a bad repository is refused"
+scr.vs["repo"].set("example/tool")
+scr.vs["asset"].set(r"x64\.msi$")
+scr.vs_check.invoke()
+until(lambda: "Newest: 5.1.0" in scr.vs_result.cget("text"))
+assert "SHA256 known" in scr.vs_result.cget("text") and fetched == [
+    "https://api.github.com/repos/example/tool/releases/latest"]
+scr.needs_menu.set("Handy tool")
+scr.needs_menu._command("Handy tool")
+pump(.2)
+shot("builder_version_source")
+press("Save package")
+assert scr.title_lbl.cget("text") == "Package saved"
+dyn = next(p for p in store().packages if p.name == "Dynamic tool")
+assert dyn.version_source == {"kind": "github", "repo": "example/tool", "asset": r"x64\.msi$"}, dyn.version_source
+assert dyn.prerequisites == [handy.id]
+# Handy tool needing Dynamic tool would be a loop: refused with a reason, nothing saved
+app.go(D.PackageBuilder, package=handy)
+pump(.5)
+scr = app.screen
+scr.needs_menu._command("Dynamic tool")
+warned = []
+orig_toast = app.toast
+app.toast = lambda t, tone="success": (warned.append(t), orig_toast(t, tone))
+press("Save package")
+app.toast = orig_toast
+assert any("loop" in t for t in warned) and store().get("packages", handy.id).prerequisites == [], warned
+
 # --- the catalogue: curated list, live winget search (fake), cancel, add to library ---------------------------
 MS.CatalogueScreen.runner = fake_winget
 MS.CatalogueScreen.debounce_ms = 50
@@ -319,10 +372,127 @@ scr.desc.insert(0, "Makes sure the flag file is there")
 scr.lang.set(D.LANGUAGES["shell"])
 scr.test.insert("1.0", f'test -f "{flag}"')
 scr.fix.insert("1.0", f'sleep 3; touch "{flag}"')  # slow enough to catch the live status
+scr.get_box.insert("1.0", f'ls "{flag}"')
+scr.params.add({"name": "bad name"})
+press("Save task")
+assert not store().tasks, "a parameter name with a space is refused"
+scr.params.rows[-1]["name"].delete(0, "end")
+scr.params.rows[-1]["name"].insert(0, "Greeting")
+scr.params.rows[-1]["default"].insert(0, "hi")
+scr.params.add({"name": "Tries", "type": "number", "default": 3})
+pump(.3)
 shot("task_editor")
 press("Save task")
 task = store().tasks[0]
-assert task.language == "shell"
+assert task.language == "shell" and task.get and [p["name"] for p in task.parameters] == ["Greeting", "Tries"]
+assert task.parameters[1]["default"] == 3
+
+# --- inventory: tag this PC, then a deployment aimed at that tag shows who it applies to ------------------------
+app.open_target("manage", "inventory")
+pump(.5)
+scr = app.screen
+iid = next(i for i, h in scr.table.rows.items() if h.lower() == host.lower())
+scr.table.tree.selection_set(iid)
+pump(.3)
+press("Take a snapshot", scr.panel)
+until(lambda: host.lower() in app.screen.snaps)
+scr = app.screen
+assert any("Fake App" in e["name"] for e in scr.snaps[host.lower()]["software"])
+scr.tag_entry.insert(0, "Reception, laptops, Reception")
+press("Save tags", scr.panel)
+assert store().tags_of(host) == ["Reception", "laptops"], store().tags_of(host)
+assert "Reception, laptops" in json.dumps(table_text(app.screen))
+scr = app.screen
+scr.search_var.set("fake app")
+pump(.2)
+assert len(scr.table.rows) == 1, "search finds the PC by its installed software"
+scr.search_var.set("no-such-thing-anywhere")
+pump(.2)
+assert not scr.table.rows
+scr.search_var.set("")
+scr.fill(host)
+pump(.3)
+shot("inventory_light")
+app.go(D.DeploymentWizard, item=("software", handy.id))
+pump(.5)
+scr = app.screen
+press("Next")
+press("Next")
+scr.tags.insert(0, "reception")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 1 known PC"), scr.applies_lbl.cget("text")
+scr.tags.delete(0, "end")
+scr.tags.insert(0, "Nobody")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 0 known PCs"), scr.applies_lbl.cget("text")
+scr.tags.delete(0, "end")
+scr.conditions.insert(0, "ram_gb >= 0.1; software contains fake")
+scr._applies()
+assert scr.applies_lbl.cget("text").startswith("Applies to 1 known PC"), scr.applies_lbl.cget("text")
+scr.conditions.insert("end", "; colour = red")
+scr._applies()
+assert "isn't something" in scr.applies_lbl.cget("text"), scr.applies_lbl.cget("text")
+shot("deployment_narrow")
+
+# --- licences: refused without DPAPI; with a stand-in for it, saved encrypted and shown masked ----------------------
+from sectorsmith.integrations import dpapi  # noqa: E402
+
+app.go(ML.LicenceEditor)
+pump(.5)
+scr = app.screen
+if not dpapi.available():
+    assert scr.save_btn.cget("state") == "disabled", "no DPAPI here: licences can't be saved"
+real_dpapi = (dpapi.available, dpapi.protect, dpapi.unprotect)
+dpapi.available = lambda: True
+dpapi.protect = dpapi.unprotect = lambda b: bytes(x ^ 0x33 for x in b)
+app.go(ML.LicenceEditor)
+pump(.5)
+scr = app.screen
+scr.client.set("Front office")
+scr.package.set("Handy tool")
+scr.key.insert(0, "AAAAA-BBBBB-CCCCC-9Z8Y")
+scr.notes.insert(0, "25 seats")
+shot("licence_editor")
+press("Save licence")
+assert isinstance(app.screen, ML.LicencesScreen)
+lic = store().licences[0]
+assert lic.client_id == store().client_of(host).id and lic.package_id == handy.id and lic.hint == "9Z8Y"
+assert "Key ending 9Z8Y" in json.dumps(table_text(app.screen)) and "AAAAA" not in json.dumps(table_text(app.screen))
+app.screen.table.tree.selection_set(next(iter(app.screen.table.rows)))
+pump(.3)
+shot("licences_light")
+dpapi.available, dpapi.protect, dpapi.unprotect = real_dpapi
+store().delete("licences", lic.id)
+
+# --- the built-in task library: add one, deploy it with its own settings --------------------------------------
+app.go(MS.TaskLibraryScreen)
+pump(.5)
+scr = app.screen
+assert len(scr.table.rows) >= 8
+iid = next(i for i, e in scr.table.rows.items() if e["library_id"] == "local-admin")
+scr.table.tree.selection_set(iid)
+pump(.3)
+press("Add to my tasks", scr.panel)
+admin = next(t for t in store().tasks if t.library_id == "local-admin")
+assert [p["type"] for p in admin.parameters] == ["text", "choice", "secret"]
+shot("task_library_light")
+press("Deploy...", scr.panel)
+scr = app.screen
+press("Next")
+press("Next")
+vf = scr.values_form
+assert vf is not None and set(vf.widgets) == {"Account", "State", "Password"}
+vf.widgets["State"][1].set("Enabled")
+if not vf.can_secret:
+    assert vf.widgets["Password"][1].cget("state") == "disabled", "no DPAPI here: the secret box is off"
+shot("deployment_task_values")
+press("Save deployment")
+dadmin = next(d for d in store().deployments if d.item_id == admin.id)
+assert dadmin.params == {"Account": "Administrator", "State": "Enabled"}, dadmin.params
+app.screen.table.select(dadmin)
+pump(.3)
+shot("deployment_task_panel")
+store().delete("deployments", dadmin.id)
 
 # --- deployments: script package to the client, task to this PC, Fake App installed, a two-package bundle ---
 app.go(D.DeploymentWizard, item=("software", handy.id))
@@ -348,14 +518,23 @@ pump(.3)
 assert scr.machine_entry.get() == host
 shot("deployment_where")
 press("Next")
+scr.values_form.widgets["Greeting"][1].delete(0, "end")
+scr.values_form.widgets["Greeting"][1].insert(0, "hello there")
+scr.values_form.widgets["Tries"][1].insert(0, "x")
 press("Save deployment")
+assert not [d for d in store().deployments if d.item_id == task.id], "a number that isn't one is refused"
+scr.values_form.widgets["Tries"][1].delete(0, "end")
+scr.values_form.widgets["Tries"][1].insert(0, "4")
+press("Save deployment")
+assert next(d for d in store().deployments if d.item_id == task.id).params == {"Greeting": "hello there",
+                                                                               "Tries": 4}
 
 app.go(D.DeploymentWizard, item=("software", pkg.id))
 pump(.5)
 scr = app.screen
 press("Next")
 press("Next")
-scr.state_seg.set("Installed")
+scr.state_seg.set("Any version")
 press("Save deployment")
 
 seven = next(p for p in store().packages if p.name == "7-Zip")
@@ -374,10 +553,12 @@ scr.schedule_editor._kind_changed()
 scr.schedule_editor.day.set("Friday")
 scr.schedule_editor.time.delete(0, "end")
 scr.schedule_editor.time.insert(0, "7:30")
+scr.reboot_seg.set(D.REBOOT_LABEL["end"])
 shot("deployment_bundle_how")
 press("Save deployment")
 bundle = next(d for d in store().deployments if d.item_type == "bundle")
 assert bundle.items == [seven.id, added.id] and bundle.name == "Archivers" and bundle.onboarding_only
+assert bundle.reboot_policy == "end" and seven.reboot_codes == [3010, 1641]
 assert bundle.schedule["kind"] == "weekly" and bundle.schedule["time"] == "07:30" and bundle.schedule["day"] == 4
 assert {(d.target_kind, d.desired) for d in store().deployments} == {
     ("client", "latest"), ("machine", "enforce"), ("all", "installed"), ("all", "latest")}
@@ -421,14 +602,14 @@ assert not store().get("deployments", tdep.id).schedule
 app.open_target("manage", "library")
 pump(.5)
 scr = app.screen
-assert len(scr.table.rows) == 5, table_text(scr)
+assert len(scr.table.rows) == 6, table_text(scr)
 scr.search_var.set("zip")
 pump(.2)
 assert sorted(r[0] for r in table_text(scr)) == ["7-Zip", "7-Zip ZS"]
 scr.search_var.set("")
 scr.filter.set("Scripts")
 scr.fill()
-assert sorted(r[0] for r in table_text(scr)) == ["Greenshot", "Handy tool"], "Chocolatey and script packages"
+assert sorted(r[0] for r in table_text(scr)) == ["Dynamic tool", "Greenshot", "Handy tool"], "Chocolatey and script packages"
 scr.filter.set("All")
 scr.fill(pkg.id)
 used = {r[0]: r[4] for r in table_text(scr)}
@@ -515,6 +696,27 @@ scr.tree.selection_set(first)
 pump(.4)
 assert scr.out.get("1.0", "end").strip() != ""
 shot("session_view_dark")
+
+# --- audit log: library changes and session actions, filter, search, export --------------------------------------
+app.open_target("manage", "audit")
+pump(.5)
+scr = app.screen
+text = json.dumps(table_text(scr))
+assert "added package" in text and "added deployment" in text and "maintenance" in text, text[:400]
+scr.filter.set("Sessions")
+scr.fill()
+assert all("added" not in r[2] for r in table_text(scr))
+scr.search_var.set("Spooler")
+pump(.2)
+assert table_text(scr) and all("Spooler" in r[3] for r in table_text(scr)), table_text(scr)
+scr.table.tree.selection_set(next(iter(scr.table.rows)))
+pump(.3)
+shot("audit_dark")
+csv_out = os.path.join(W, "audit.csv")
+filedialog.asksaveasfilename = lambda **k: csv_out
+press("Export CSV...", scr.actions)
+with open(csv_out, encoding="utf-8-sig") as fh:
+    assert fh.readline().startswith("When,Who,Action") and len(fh.readlines()) == len(scr.table.rows)
 
 # --- Deployments page shows the latest result of each deployment --------------------------------------------
 app.open_target("manage", "deployments")
@@ -605,6 +807,31 @@ app.set_presentation(False)
 app.open_target("manage", "clients")
 pump(.4)
 assert table_text(app.screen)[0][0] == "Front office"
+
+# --- the new Manage pages, full, in both themes (named for docs/images/redesign) ------------------------------
+dpapi.available = lambda: True
+dpapi.protect = dpapi.unprotect = lambda b: bytes(x ^ 0x33 for x in b)
+from sectorsmith.deploy import licences as lic_mod  # noqa: E402
+from sectorsmith.deploy.core import Licence  # noqa: E402
+lic_mod.save(store(), Licence(package_id=handy.id, client_id=store().client_of(host).id), key="QWERT-YUIOP-7Q2X")
+lic_mod.save(store(), Licence(package_id=pkg.id, kind="file", notes="Site licence"), file_path=setup)
+for mode in ("dark", "light"):
+    theme.set_mode(mode)
+    app.mode.set(mode.capitalize())
+    for key, pick in (("inventory", lambda t: next(i for i, h in t.rows.items() if h.lower() == host.lower())),
+                      ("licences", lambda t: next(iter(t.rows))), ("audit", lambda t: next(iter(t.rows)))):
+        app.open_target("manage", key)
+        pump(.5)
+        app.screen.table.tree.selection_set(pick(app.screen.table))
+        pump(.4)
+        shot(f"manage_{key}_{mode}")
+    app.go(MS.TaskLibraryScreen)
+    pump(.5)
+    scr = app.screen
+    scr.table.tree.selection_set(next(i for i, e in scr.table.rows.items() if e["library_id"] == "windows-update"))
+    pump(.4)
+    shot(f"manage_task_library_{mode}")
+dpapi.available, dpapi.protect, dpapi.unprotect = real_dpapi
 
 theme.set_mode("light")
 app.mode.set("Light")

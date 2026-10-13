@@ -19,6 +19,9 @@ shutil.rmtree(new, ignore_errors=True)
 os.makedirs(os.path.join(new, "alice"))
 os.makedirs(os.path.join(new, "bob"))
 os.environ["SECTORSMITH_PROFILES_ROOT"] = old
+# settings and the Deploy library live under <workdir>, not in the real app folder
+shutil.rmtree(os.path.join(W, "appdata"), ignore_errors=True)
+os.environ["LOCALAPPDATA"] = os.path.join(W, "appdata")
 target = os.path.join(W, "ui_remote_target.img")
 with open(target, "wb") as f:
     f.truncate(256 * 1024 * 1024)
@@ -80,6 +83,13 @@ def press(text):
     raise AssertionError(f"{text}: {[w.cget('text') for w in app.screen.footer.winfo_children()]}")
 
 
+def _labels(w):
+    for c in w.winfo_children():
+        if c.__class__.__name__ == "CTkLabel":
+            yield c
+        yield from _labels(c)
+
+
 def until(cond, t=30):
     end = time.time() + t
     while time.time() < end and not cond():
@@ -103,7 +113,17 @@ pump(1.5)
 shot("connect_linked")
 remote = app.machines()[1]
 
-# --- Move a user --------------------------------------------------------------
+# --- Move a user, and give the new PC its client's baseline ----------------------------------------------------
+from sectorsmith.deploy.core import Client, Package  # noqa: E402
+marker = os.path.join(W, "baseline_installed.txt")
+if os.path.exists(marker):
+    os.remove(marker)
+st = app.deploy_store()
+bpkg = st.upsert("packages", Package(name="Carol baseline app", kind="script", version="1.0", language="shell",
+                                     install=f'echo 1.0 > "{marker}"',
+                                     detection={"method": "script", "value": f'[ -f "{marker}" ] && cat "{marker}"'}))
+carol = st.upsert("clients", Client(name="Carol Ltd"))
+st.set_baseline(carol.id, [bpkg.id])
 app.go(L.MigrateWizard)
 pump(.6)
 scr = app.screen
@@ -131,9 +151,15 @@ until(lambda: scr.apps_ready)
 pump(.5)
 shot("migrate_apps")
 assert scr.install_apps.get(), "a linked PC's profile folder can get apps installed"
+assert scr.baseline_menu.get() == "Carol Ltd" and not scr.baseline_on.get(), "baseline offered, off by default"
+scr.baseline_on.set(True)
+pump(.2)
+shot("migrate_apps_baseline")
 press("Start moving")
 wait()
 shot("migrate_done")
+assert os.path.exists(marker), "the client's baseline was installed on the new PC"
+assert any("Carol Ltd baseline: 1 of 1" in w.cget("text") for w in _labels(scr.body)), "the result says so"
 assert os.path.exists(os.path.join(new, "carol", "Desktop", "big video.mp4")), os.listdir(os.path.join(new, "carol"))
 assert scr.title_lbl.cget("text") == "Move complete", scr.title_lbl.cget("text")
 
