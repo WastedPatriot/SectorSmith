@@ -1290,8 +1290,11 @@ class CloneJob:
                                     "Start the clone again from the beginning.")
             self.notes.append("Resumed from the interrupted clone's snapshot.")
         else:
+            # Windows and lettered volumes are in use; Recovery and other unmounted volumes are read live (VSS
+            # often can't snapshot them: they're too small to hold their own shadow storage)
             vols = [{"offset": p.src_start * plan.sector_size, "length": p.src_sectors * plan.sector_size,
-                     "role": p.role, "letters": p.letters} for p in plan.parts if p.action == "used"]
+                     "role": p.role, "letters": p.letters} for p in plan.parts
+                    if p.action == "used" and (p.role == "windows" or p.letters)]
 
             def on_id(info):
                 self.journal.data["snapshot"] = info
