@@ -693,24 +693,37 @@ def preflight(src: Device, dst: Device | None, layer: SystemLayer, take_offline:
 
 
 def estimate_used(src: Device, lay: SrcLayout, vols) -> dict | None:
-    """Used bytes and extent of the Windows partition from a live read of its NTFS bitmap (a snapshot confirms it
+    """Used bytes and extent of the Windows partition from a live read of its NTFS bitmap (the snapshot confirms it
     later). None when the volume can't be read raw (BitLocker) or isn't NTFS."""
     win = next((p for p in lay.parts if p.role == "windows"), None)
     if win is None or win.fs != "NTFS":
         return None
-    ss = lay.sector_size
-    r = usedmap.partition_used(src, win.start_lba, win.sectors, "NTFS")
-    if r is None:
+    try:
+        return ntfs_usage(src, win.start_lba * lay.sector_size)
+    except Exception as e:  # noqa: BLE001  unknown here; confirmed from the snapshot before writing
+        log.info("sysclone: live usage of C: not readable: %s", e)
         return None
-    base = win.start_lba * ss
-    return _used_stats(r, base, win.sectors * ss, ss)
 
 
-def _used_stats(ranges, base, size, ss) -> dict:
-    tail = base + size - ss    # the NTFS backup boot sector sits in the last sector
-    inner = [(o, n) for o, n in ranges if o < tail]
-    extent = max((min(o + n, tail) for o, n in inner), default=base) - base
-    return {"extent": extent, "bytes": sum(min(o + n, tail) - o for o, n in inner)}
+def ntfs_usage(dev: Device, base: int) -> dict:
+    """From the NTFS $Bitmap: {"extent": bytes from the volume start to the end of the last used cluster,
+    "bytes": bytes in used clusters}."""
+    from .ntfs import NTFSVolume
+    vol = NTFSVolume(dev, base)
+    rec = vol.read_record(6)
+    if rec is None or (not rec.runs and rec.resident is None):
+        raise SysCloneError("The NTFS $Bitmap can't be read.")
+    clusters = vol.total_sectors * vol.bps // vol.cluster
+    if rec.resident is not None:
+        bm = rec.resident
+    else:
+        buf = bytearray()
+        for lcn, n in rec.runs:
+            buf += bytes(n * vol.cluster) if lcn is None else dev.read(base + lcn * vol.cluster, n * vol.cluster)
+        bm = bytes(buf[:(clusters + 7) // 8])
+    bits = int.from_bytes(bm, "little") & ((1 << clusters) - 1)
+    return {"extent": bits.bit_length() * vol.cluster, "bytes": bits.bit_count() * vol.cluster,
+            "cluster": vol.cluster, "clusters": clusters}
 
 
 # ---------------------------------------------------------------------------------------------- tables
@@ -1073,11 +1086,34 @@ def _ident(dev: Device) -> dict:
             "sector_size": dev.sector_size, "name": dev.name}
 
 
-def interrupted(folder=None, max_age_hours=STALE_HOURS) -> list[Journal]:
-    """Clones that stopped without finishing (crash, power cut) and can still be resumed."""
+def interrupted(folder=None, max_age_hours=STALE_HOURS, idle=90) -> list[Journal]:
+    """Clones that stopped without finishing (crash, power cut) and can still be resumed. A running clone writes a
+    heartbeat at least every 30 seconds, so one quiet for ``idle`` seconds is not running any more."""
     now = time.time()
     return [j for j in Journal.all(folder) if j.data.get("state") == "running"
-            and now - j.data.get("heartbeat", 0) > 90 and now - j.data.get("created", 0) < max_age_hours * 3600]
+            and now - j.data.get("heartbeat", 0) >= idle and now - j.data.get("created", 0) < max_age_hours * 3600]
+
+
+def read_marker(dev: Device) -> str | None:
+    """The clone id in an unfinished-clone marker, or None."""
+    try:
+        b = dev.read(MARK_OFFSET, 128)
+    except OSError:
+        return None
+    if not b.startswith(MARK_MAGIC):
+        return None
+    return b[len(MARK_MAGIC):].split(b"\r", 1)[0].strip().decode("ascii", "replace")
+
+
+def resume_target_ok(j: Journal, dst: Device) -> bool:
+    """The drive is the one this interrupted clone was writing: same size and serial, and still carrying the clone's
+    own unfinished marker (so nothing else has been written to it since)."""
+    want = j.data.get("dst") or {}
+    if dst.size != want.get("size") or dst.sector_size != want.get("sector_size"):
+        return False
+    if (want.get("serial") or "") != (dst.serial or ""):
+        return False
+    return read_marker(dst) == j.id
 
 
 def cleanup_stale(layer: SystemLayer | None = None, folder=None, max_age_hours=STALE_HOURS) -> list[str]:
@@ -1122,13 +1158,15 @@ class CloneJob:
 
     def __init__(self, src: Device, dst: Device, plan: Plan, layer: SystemLayer, prog: Progress,
                  journal: Journal | None = None, journal_dir=None, bitlocker_on_boot: bool = False,
-                 take_offline: bool = True, max_bad: int = MAX_BAD_SECTORS, report_dir=None, on_event=None):
+                 take_offline: bool = True, max_bad: int = MAX_BAD_SECTORS, report_dir=None, on_event=None,
+                 journal_every: int = JOURNAL_EVERY):
         self.src, self.dst, self.plan, self.layer, self.prog = src, dst, plan, layer, prog
         self.journal = journal
         self.resuming = journal is not None
         self.journal_dir = journal_dir
         self.bitlocker_on_boot = bitlocker_on_boot
         self.max_bad = max_bad
+        self.journal_every = journal_every
         self.report_dir = report_dir
         self.on_event = on_event or (lambda *_a: None)
         self.snap: Snapshot | None = None
@@ -1284,7 +1322,13 @@ class CloneJob:
         copy_bytes = sum(n for _s, _d, n in self.chunks)
         self.dst.open(writable=True)
         self.touched = True
-        mark_unusable(self.dst, self.journal.id)
+        if not (self.resuming and read_marker(self.dst) == self.journal.id):
+            if self.resuming:  # the marker is gone, so is any trust in what was copied before
+                self.journal.remove()
+                self.journal.data["ranges"] = self.chunks
+                self.resuming = False
+                self.journal.save()
+            mark_unusable(self.dst, self.journal.id)
         self._phase("copy", 2 * copy_bytes, f"{human_size(copy_bytes)} to copy, then the same to verify")
         hashes = self._copy(copy_bytes)
         self.journal.data["phase"] = "verify"
@@ -1348,7 +1392,7 @@ class CloneJob:
             if ranges is None:
                 ranges = [(sbase, ssize)]
             if p.resize == "shrink":
-                used = _used_stats(ranges, sbase, ssize, ss)
+                used = ntfs_usage(src, sbase)
                 if used["extent"] + ss > dsize:
                     raise SysCloneError(f"Since the check, files on C: have grown past the "
                                         f"{human_size(dsize)} that fits on the target.",
@@ -1516,7 +1560,7 @@ class CloneJob:
                 done += n
                 pending.append((i, h.hex()))
                 self.prog.update(done)
-                if len(pending) >= JOURNAL_EVERY or time.time() - last_cp > 5:
+                if len(pending) >= self.journal_every or time.time() - last_cp > 5:
                     self.dst.flush()
                     self.journal.add_done(pending)
                     pending = []
@@ -1575,6 +1619,10 @@ class CloneJob:
                 self.notes.append(f"Windows partition shrunk to {human_size(p.sectors * ss)}.")
             if p.action != "zero":
                 fix_hidden_sectors(dst, p, ss)
+            if p.resize == "grow" and p.fs == "NTFS":
+                # until Windows extends it, the volume ends before the partition: keep a boot sector copy in the
+                # partition's last sector too, where other NTFS tools look for the backup
+                dst.write((p.start + p.sectors - 1) * ss, dst.read(p.start * ss, ss))
         write_table(dst, plan)
 
     def _structure(self):

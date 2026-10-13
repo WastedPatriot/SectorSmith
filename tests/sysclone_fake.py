@@ -58,9 +58,11 @@ def _data(name, size):
     return bytes(out[:size])
 
 
-def _mk_ntfs(path, size, ss, hidden, label, files, tail_file=None):
+def _mk_ntfs(path, size, ss, hidden, label, files, packed=None):
+    """packed: build the volume at this size and grow it afterwards, so every file sits near the start (like a
+    volume Windows has defragmented), which lets a clone shrink it."""
     with open(path, "wb") as f:
-        f.truncate(size)
+        f.truncate(packed or size)
     run("mkntfs", "-F", "-Q", "-s", str(ss), "-c", "4096", "-p", str(hidden), "-L", label, path)
     mnt = tempfile.mkdtemp(prefix="ssmnt_")
     try:
@@ -78,6 +80,11 @@ def _mk_ntfs(path, size, ss, hidden, label, files, tail_file=None):
             run(*SUDO, "umount", mnt)
     finally:
         os.rmdir(mnt)
+    if packed:
+        with open(path, "r+b") as f:
+            f.truncate(size)
+        run("ntfsresize", "-f", "-P", "-s", str(size), path)
+        run("ntfsfix", "-d", path)   # ntfsresize leaves the volume marked for chkdsk
 
 
 def _mk_fat(path, size, ss, hidden, label, files):
@@ -111,7 +118,7 @@ def _place(disk, part_img, offset):
 
 
 def build_system_disk(path, scheme="GPT", ss=512, disk_mib=320, win_mib=200, esp_mib=40, rec_mib=40,
-                      win_files=None):
+                      win_files=None, packed_mib=None):
     """A Windows-like system disk image. GPT: ESP (FAT32), MSR, Windows (NTFS), Recovery (NTFS) at the end.
     MBR: System Reserved (NTFS, active), Windows (NTFS), Recovery (type 0x27). Returns a dict with the layout."""
     win_files = WIN_FILES if win_files is None else win_files
@@ -157,7 +164,7 @@ def build_system_disk(path, scheme="GPT", ss=512, disk_mib=320, win_mib=200, esp
             _mk_fat(tmp, size, ss, p.start, "SYSTEM", {"EFI/Microsoft/Boot/bootmgfw.efi": 1500 * 1024,
                                                        "EFI/Boot/bootx64.efi": 1500 * 1024})
         elif p.role == "windows":
-            _mk_ntfs(tmp, size, ss, p.start, "Windows", win_files)
+            _mk_ntfs(tmp, size, ss, p.start, "Windows", win_files, packed_mib and packed_mib * MiB)
         elif p.role == "recovery":
             _mk_ntfs(tmp, size, ss, p.start, "Recovery", {"Recovery/WindowsRE/Winre.wim": 9 * MiB})
         elif p.role == "sysres":
