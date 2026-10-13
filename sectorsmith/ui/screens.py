@@ -12,7 +12,7 @@ import customtkinter as ctk
 
 from .. import carver, ntfs, partitions, partscan, surface, wipe
 from ..report import wipe_certificate
-from ..util import get_logger, human_size, human_time, is_admin
+from ..util import app_dir, get_logger, human_size, human_time, is_admin
 from .shell import TICKETS
 from . import theme
 from .shell import branding, machine_status, technician
@@ -1161,9 +1161,25 @@ class WipeWizard(Screen, _PickMixin, _StrengthMixin):
                     ticket=rec.get("ticket") or self.app.context.get("ticket") or "",
                     technician=rec.get("technician") or technician(), machine=machine)
 
-    def _cert(self):
+    def finish_away(self, res) -> str:
+        """The wipe ended after this screen was left: save its certificate to app_dir()/certificates."""
+        self.res = res
+        self.res["end"] = time.time()
+        self.app._inventory = None
+        folder = app_dir() / "certificates"
+        folder.mkdir(parents=True, exist_ok=True)
+        p = str(folder / self._cert_name(time.strftime("%Y-%m-%d %H%M%S")))
+        wipe_certificate(p, self.certificate_info(), branding())
+        log.info("Wipe finished off-screen, certificate saved to %s", p)
+        return p
+
+    def _cert_name(self, stamp=None) -> str:
         dev = self.target["dev"]
-        name = f"Wipe certificate - {dev.model or dev.name} - {time.strftime('%Y-%m-%d')}.html".replace("/", "-")
+        name = f"Wipe certificate - {dev.model or dev.name} - {stamp or time.strftime('%Y-%m-%d')}.html"
+        return "".join("-" if c in '/\\:*?"<>|' else c for c in name)
+
+    def _cert(self):
+        name = self._cert_name()
         p = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name,
                                          filetypes=[("Web page (print to PDF)", "*.html")])
         if not p:
@@ -1597,6 +1613,29 @@ class CloneWizard(Screen, _PickMixin):
                 lines.append("The snapshot of the running disk was removed.")
             lines.append("The source drive wasn't changed.")
             self.cancelled_state("Copy stopped", lines, step=3)
+        def away(res):  # the copy ended after this screen was left: keep a summary the Jobs page can open
+            self.app._inventory = None
+            folder = app_dir() / "reports"
+            folder.mkdir(parents=True, exist_ok=True)
+            p = str(folder / f"Copy summary - {time.strftime('%Y-%m-%d %H%M%S')}.txt")
+            to = self.dest_target["dev"].describe() if self.kind == "disk" else self.dest
+            lines = [f"SectorSmith copy summary, {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                     f"From: {src['dev'].describe()}", f"To: {to}",
+                     f"Copied: {human_size(res.get('copied_bytes', res.get('bytes', 0)))} of "
+                     f"{human_size(res.get('bytes', 0))}",
+                     f"Unreadable sectors: {res.get('bad_sectors', 0)}"]
+            if res.get("bad_lbas"):
+                lines.append("First unreadable sectors (LBA): " + ", ".join(str(x) for x in res["bad_lbas"][:50]))
+            if res.get("snapshot"):
+                lines.append(f"Copied from a snapshot of {', '.join(res['snapshot'])}")
+            if res.get("grown"):
+                lines.append(res["grown"])
+            if res.get("sha256"):
+                lines.append(f"SHA-256: {res['sha256']}")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            return p
+        self.finish_away = away
         self.app.run_job("Copy", lambda prog: surface.image_copy(sdev, dst, prog, start_lba=start, sectors=count,
                                                                  fmt=fmt, snapshot=snap, smart=smart), done, panel,
                          on_cancel=stopped)

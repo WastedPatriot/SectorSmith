@@ -21,7 +21,7 @@ log = get_logger()
 CAP = 5000
 FILE = "jobs.jsonl"
 FIELDS = ("id", "task", "title", "client", "ticket", "technician", "machine", "detail", "started", "ended",
-          "result", "report")
+          "result", "report", "summary")
 RESULTS = ("Done", "Cancelled", "Failed", "Interrupted")
 SEARCHED = ("task", "title", "client", "ticket", "technician", "machine", "detail", "result", "report")
 CSV_COLUMNS = (("Started", "started"), ("Ended", "ended"), ("Task", "task"), ("Target", "detail"),
@@ -53,11 +53,13 @@ class JobStore:
         self._write(rec)
         return rec
 
-    def finish(self, rec: dict, result: str, ended: float | None = None, report=None) -> dict:
+    def finish(self, rec: dict, result: str, ended: float | None = None, report=None, summary=None) -> dict:
         rec["result"] = result
         rec["ended"] = ended or time.time()
         if report:
             rec["report"] = str(report)
+        if summary is not None:
+            rec["summary"] = summarise(summary)
         self.active.discard(rec.get("id"))
         self._write(rec)
         return rec
@@ -132,6 +134,8 @@ class JobStore:
             for k in FIELDS:
                 if rec[k] is None and k != "ended":
                     rec[k] = ""
+            if not isinstance(rec["summary"], dict):
+                rec["summary"] = {}
             out.append(rec)
         out.sort(key=lambda r: r["started"])
         return out
@@ -145,6 +149,27 @@ class JobStore:
             if r["result"] == "Running" and r["id"] not in self.active:
                 r["result"] = "Interrupted"
         return recs
+
+
+def summarise(value, items: int = 20) -> dict:
+    """The JSON-safe part of a job's result kept with the job: numbers, text and the start of any lists, so what a
+    job found (mismatches, bad sectors, failed files) survives after its screen is gone."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for k, v in value.items():
+        k = str(k)
+        if v is None or isinstance(v, (bool, int, float)):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v[:1000]
+        elif isinstance(v, (list, tuple)):
+            out[k] = [x if isinstance(x, (bool, int, float)) else str(x)[:300] for x in list(v)[:items]]
+            if len(v) > items:
+                out[k + "_count"] = len(v)
+        elif isinstance(v, dict) and k != "progress":
+            out[k] = {str(a): b for a, b in v.items() if b is None or isinstance(b, (bool, int, float, str))}
+    return out
 
 
 def _count_lines(path: Path) -> int:

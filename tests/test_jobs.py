@@ -50,6 +50,18 @@ check(recs[0]["result"] == "Done" and recs[0]["report"].endswith("cert.html") an
 st.attach(c, os.path.join(W, "clone.txt"))
 check(st.load()[2]["report"].endswith("clone.txt"), "report attached after the job ended")
 
+# the job's result is kept with it, JSON-safe and trimmed
+sj = J.JobStore(os.path.join(W, "summary.jsonl"))
+sj.start(task="Health check")
+g = sj.start(task="Erase and certify", title="Wipe", detail="Disk 4")
+sj.finish(g, "Done", summary={"bytes": 4096, "verify_ok": False, "verification": "3 of 32 still marked",
+                              "bad_lbas": list(range(50)), "dev": object(), "progress": {"pct": 100}})
+got = next(r for r in J.JobStore(sj.path).load() if r["id"] == g["id"])["summary"]
+check(got.get("verify_ok") is False and got.get("bytes") == 4096 and got.get("bad_lbas") == list(range(20))
+      and got.get("bad_lbas_count") == 50 and "progress" not in got and "dev" not in got,
+      f"result summary persisted with the job ({got})")
+check(J.JobStore(sj.path).load()[0]["summary"] == {}, "jobs without a summary read back with an empty one")
+
 # a job that never ended (SectorSmith closed mid-job) reads back as Interrupted in the next session
 d = st.start(task="Shred files", title="Shred", client="Acme Legal", ticket="", technician="Dom",
              machine="This PC", detail="3 files")

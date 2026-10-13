@@ -621,11 +621,14 @@ class MainWindow(*_Base):
             log.warning("job history not readable: %s", e)
             return []
 
-    def _finish_record(self, result, value=None):
-        """Write the job's end to the history. A result that names a report file (migration) is kept with it."""
+    def _finish_record(self, result, value=None, report=None):
+        """Write the job's end to the history with its result. A result that names a report file (migration) is
+        kept with it, as is a certificate or summary saved because the job's screen was gone."""
         if self.job_record is not None:
-            report = value.get("report") if isinstance(value, dict) else None
-            self.job_store.finish(self.job_record, result, report=report if isinstance(report, str) else None)
+            if not report and isinstance(value, dict) and isinstance(value.get("report"), str):
+                report = value["report"]
+            self.job_store.finish(self.job_record, result, report=report or None,
+                                  summary=value if isinstance(value, dict) else None)
             self.job_record = None
 
     def attach_job_file(self, path, job_id=None):
@@ -670,15 +673,26 @@ class MainWindow(*_Base):
         self.job = None
         self.job_panel = None
         self.mascot.progress = 0
-        self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"), value)
-        self.bar.update_jobs(None)
         scr = self._job_screen
         # the screen that started the job may be gone (Home, guide, Connect): don't draw on a dead widget
         here = scr is not None and scr is self.screen and scr.winfo_exists()
+        saved = None
+        if kind == "done" and not here and hasattr(scr, "finish_away"):
+            try:  # keep what the result screen would have offered: the certificate or a summary file
+                saved = scr.finish_away(value)
+            except Exception:  # noqa: BLE001
+                log.error("Job %s: saving its result after the screen closed failed: %s", title,
+                          traceback.format_exc())
+        if not saved and isinstance(value, dict) and isinstance(value.get("report"), str):
+            saved = value["report"]
+        self._finish_record({"done": "Done", "cancelled": "Cancelled"}.get(kind, "Failed"), value, report=saved)
+        self.bar.update_jobs(None)
         try:
             if kind == "done":
                 if here:
                     on_done(value)
+                elif saved:
+                    self.toast(f"{title} finished. Saved to {saved} (open it from Jobs).")
                 else:
                     self.toast(f"{title} finished")
             elif kind == "cancelled":

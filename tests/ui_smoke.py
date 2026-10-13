@@ -222,6 +222,33 @@ with open(answers["save"], encoding="utf-8") as fh:
 assert "Example IT Services Ltd" in cert and "NIST SP 800-88" in cert and "Software overwrite" in cert, "branded cert"
 assert "mossbit" not in cert.lower() and "<svg" in cert
 
+# leaving the Erase screen mid-wipe still saves the certificate and attaches it to the job
+_erase = S.wipe.erase_disk
+
+
+def _slow_erase(*a, **k):
+    time.sleep(1.0)
+    return _erase(*a, **k)
+
+
+S.wipe.erase_disk = _slow_erase
+app.go(S.WipeWizard)
+pump(0.6)
+pick(img, 1)
+press("Next")
+press("Next")
+type_confirm("ERASE PARTITION 1")
+press("Erase and certify")
+app.home()
+wait()
+S.wipe.erase_disk = _erase
+away = app.jobs[-1]
+assert away["title"] == "Wipe" and away["result"] == "Done" and os.path.basename(
+    os.path.dirname(away["report"])) == "certificates" and os.path.exists(away["report"]), away
+with open(away["report"], encoding="utf-8") as fh:
+    assert "Example IT Services Ltd" in fh.read(), "auto-saved certificate is the branded one"
+assert away["summary"].get("bytes"), away["summary"]
+
 # --- Erase a whole drive: the built-in erase card, frozen drive, fall back to overwrite ----------------
 from sectorsmith import wipe as WP  # noqa: E402
 app.go(S.WipeWizard)
@@ -526,7 +553,7 @@ js.table.tree.selection_set(iid)
 pump(0.2)
 assert js.report_btn.cget("state") == "normal"
 js.report_btn.invoke()
-assert opened and opened[-1].endswith("cert.html"), opened
+assert opened and opened[-1] == js.table.rows[iid]["report"] and os.path.exists(opened[-1]), opened
 answers["save"] = os.path.join(W, "jobs.csv")
 js._set("client", "Acme Legal")
 js._export()
