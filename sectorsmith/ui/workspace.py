@@ -54,6 +54,8 @@ class DrivesScreen(Screen):
              "accent"),
             ("clone", "Image and clone", "Smart copy to VHD, IMG or another drive", lambda: self._task(CloneWizard),
              "accent"),
+            ("pc", "Clone this PC", "Windows to a new drive, while it runs", lambda: app.open_target("drives", "sysclone"),
+             "accent"),
             ("netclone", "Network clone", "One disk to many PCs, in Machines",
              lambda: app.open_target("machines", "netclone"), "teal"),
         ])

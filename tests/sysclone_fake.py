@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -221,8 +222,11 @@ class FakeLayer(sysclone.SystemLayer):
 
     def __init__(self, work, admin=True, power=None, vss=(True, "Running"), flags=None, bitlocker=None,
                  usage=None, free=None, bad_lbas=(), extend_ok=True, bcd_wrong=False, windows_offset=None,
-                 letters=None):
+                 letters=None, system_path=None, delay=0.0):
         self.work = work
+        self.system_path = system_path   # the image that plays the disk Windows runs from
+        self.delay = delay               # seconds per snapshot read, so a UI test can watch the progress
+        self.snap_limit = None           # serve only this many bytes of each volume (a broken shadow copy)
         self.admin, self.pw, self.vss = admin, power or {"ac": True, "percent": 100}, vss
         self.flags, self.bitlocker = flags or {}, bitlocker or {}
         self.usage = usage or {"mounted": [], "busy": [], "pagefile": []}
@@ -252,6 +256,8 @@ class FakeLayer(sysclone.SystemLayer):
         return self.vss
 
     def system_disk(self, devices):
+        if self.system_path:
+            return next((d for d in devices if os.path.abspath(d.path) == os.path.abspath(self.system_path)), None)
         return devices[0] if devices else None
 
     def disk_flags(self, dev):
@@ -283,6 +289,13 @@ class FakeLayer(sysclone.SystemLayer):
     def _reader(self, path, offset, ss):
         r = open_image(path, ss)
         bad = {b * ss - offset for b in self.bad_lbas}
+        if self.delay:
+            plain, delay = r._raw_read, self.delay
+
+            def slow(off, n):
+                time.sleep(delay)
+                return plain(off, n)
+            r._raw_read = slow
         if bad:
             orig = r._raw_read
 
@@ -300,9 +313,16 @@ class FakeLayer(sysclone.SystemLayer):
         files, overlay = [], []
         for i, v in enumerate(volumes):
             p = os.path.join(self.work, f"snap_{sid[:8]}_{i}.bin")
+            # like a real shadow copy, it serves the file system's clusters, not the partition's tail
+            try:
+                vol = NTFSVolume(dev, v["offset"])
+                fs_len = min(v["length"], vol.total_sectors * vol.bps // vol.cluster * vol.cluster)
+            except Exception:  # noqa: BLE001
+                fs_len = v["length"]
+            fs_len = min(fs_len, self.snap_limit or fs_len)
             with open(dev.path, "rb") as s, open(p, "wb") as d:
                 s.seek(v["offset"])
-                left = v["length"]
+                left = fs_len
                 while left:
                     b = s.read(min(left, 8 * MiB))
                     d.write(b)

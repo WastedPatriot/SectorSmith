@@ -127,8 +127,11 @@ def create_snapshot_set(volume_names: list[str], on_set=None) -> tuple[str, list
         if not added:
             raise OSError(0, "no volume could be added to the snapshot set")
         a = ctypes.c_void_p()
-        _hr(_vcall(comp, 14, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(a)), "PrepareForBackup")
-        _wait_async(a, "PrepareForBackup")
+        hr = _vcall(comp, 14, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(a))
+        if hr >= 0:
+            _wait_async(a, "PrepareForBackup")
+        else:  # without writers there is nothing to prepare, and VSS may say so (VSS_E_BAD_STATE)
+            log.info("VSS PrepareForBackup returned 0x%08X, going on without writers", hr & 0xFFFFFFFF)
         a = ctypes.c_void_p()
         _hr(_vcall(comp, 38, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(a)), "DoSnapshotSet")
         _wait_async(a, "DoSnapshotSet")

@@ -418,6 +418,16 @@ check(status(res) == "failed" and failed_check(res) == "Every copied block match
 check("Failed" in open(res["report"], encoding="utf-8").read(), "failed clone still writes its report")
 F.cleanup(dst)
 
+# a shadow copy that serves less than the file system must never turn into silent zeros
+dst = F.blank(os.path.join(w, "dst_short.img"), 400)
+L = F.FakeLayer(w)
+L.snap_limit = 120 * MiB
+pf, res = clone(src, dst, L)
+check(status(res) != "passed" and res["bad_sectors"] > 0,
+      f"short reads from the snapshot are reported, not copied as silent zeros: {status(res)}, "
+      f"{res['bad_sectors']} sectors listed")
+F.cleanup(dst)
+
 # boot configuration pointing at the old drive, extend failing, snapshot lost
 dst = F.blank(os.path.join(w, "dst3.img"), 400)
 pf, res = clone(src, dst, F.FakeLayer(w, bcd_wrong=True))

@@ -146,6 +146,8 @@ class MainWindow(*_Base):
         self.after(120, self._poll)
         from .manage_schedule import start as start_schedules
         start_schedules(self)  # due deployment schedules run after start-up and when a linked PC connects
+        from ..sysclone import cleanup_stale
+        self.background(cleanup_stale, lambda _r: None, error=lambda _e: None)  # snapshots a crashed clone left
         self.protocol("WM_DELETE_WINDOW", self._quit)
         self.after(400, lambda: self.mascot.set_mood("idle", "hello"))
 

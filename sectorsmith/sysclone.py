@@ -957,36 +957,44 @@ def ntfs_shrink(dev: Device, base: int, new_bytes: int, hidden: int):
     dev.write(base + new_total * bps, bytes(bs))
 
 
-def fix_hidden_sectors(dev: Device, p: PartPlan, ss: int) -> list[str]:
-    """NTFS and FAT boot sectors record where their partition starts; BIOS boot code depends on it."""
+def fix_hidden_sectors(dev: Device, p: PartPlan, ss: int) -> int:
+    """NTFS and FAT boot sectors record where their partition starts (BIOS boot code depends on it). For NTFS the
+    backup boot sector is rewritten from the primary: it sits past the end of the file system, where a snapshot
+    can't reach it. Returns how many sectors were written."""
     base = p.start * ss
-    head = dev.read(base, ss)
+    head = bytearray(dev.read(base, ss))
     if head[510:512] != b"\x55\xaa":
-        return []
+        return 0
     fs = partitions.detect_fs(dev.read(base, 4096))[0]
-    places = []
+    end = (p.start + p.sectors) * ss
+    n = 0
     if fs == "NTFS":
         total = struct.unpack_from("<Q", head, 40)[0]
         bps = struct.unpack_from("<H", head, 11)[0] or ss
-        places = [base, base + total * bps]
-    elif fs == "FAT32":
+        struct.pack_into("<I", head, 0x1C, p.start & 0xFFFFFFFF)
+        for at in (base, base + total * bps):
+            if at + len(head) <= end:
+                dev.write(at, bytes(head))
+                n += 1
+        return n
+    places = [base]
+    if fs == "FAT32":
         bk = struct.unpack_from("<H", head, 50)[0]
         bps = struct.unpack_from("<H", head, 11)[0] or ss
-        places = [base] + ([base + bk * bps] if 0 < bk < 32 else [])
-    elif fs in ("FAT16", "FAT12"):
-        places = [base]
-    done = []
+        places += [base + bk * bps] if 0 < bk < 32 else []
+    elif fs not in ("FAT16", "FAT12"):
+        return 0
     for at in places:
-        if at + ss > (p.start + p.sectors) * ss:
+        if at + ss > end:
             continue
-        s = bytearray(dev.read(at, ss))
-        if s[510:512] != b"\x55\xaa":
+        sec = bytearray(dev.read(at, ss))
+        if sec[510:512] != b"\x55\xaa":
             continue
-        if struct.unpack_from("<I", s, 0x1C)[0] != p.start & 0xFFFFFFFF:
-            struct.pack_into("<I", s, 0x1C, p.start & 0xFFFFFFFF)
-            dev.write(at, bytes(s))
-            done.append(at)
-    return [f"{fs} boot sector start updated" for _ in done[:1]]
+        if struct.unpack_from("<I", sec, 0x1C)[0] != p.start & 0xFFFFFFFF:
+            struct.pack_into("<I", sec, 0x1C, p.start & 0xFFFFFFFF)
+            dev.write(at, bytes(sec))
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------------------------- journal
@@ -1177,6 +1185,7 @@ class CloneJob:
         self.copied = self.written = 0
         self.notes: list[str] = []
         self.chunks: list = []                      # (src_off or None, dst_off, length)
+        self.fs_end: dict = {}                      # snapshot start -> end of the file system's clusters
 
     # -- helpers -------------------------------------------------------------------------------------------
     def _check(self, name, status, detail=""):
@@ -1227,6 +1236,11 @@ class CloneJob:
         finally:
             if awake:
                 self.layer.keep_awake(False)
+            for d in (self.src, self.dst):
+                try:
+                    d.close()
+                except OSError:
+                    pass
         res["seconds"] = round(time.time() - t0, 1)
         return res
 
@@ -1304,6 +1318,12 @@ class CloneJob:
             self.journal.save()
         self.src._overlay = list(self.snap.overlay)
         self.notes += self.snap.notes
+        for o, _n, _r in self.snap.overlay:
+            try:
+                u = ntfs_usage(self.src, o)
+                self.fs_end[o] = o + u["clusters"] * u["cluster"]
+            except Exception as e:  # noqa: BLE001  not NTFS: every short read stays an error
+                log.info("sysclone: no file system size for the snapshot at %d: %s", o, e)
         self.prog.check()
         for p in plan.parts:
             mounted = p.letters or p.role == "windows"
@@ -1435,12 +1455,35 @@ class CloneJob:
         return usedmap.merge(usedmap.clip(ranges + extra, base, base + p.src_sectors * ss), gap=0)
 
     # -- copy ------------------------------------------------------------------------------------------------
+    def _src_read(self, off, n) -> bytes:
+        """Read from the snapshot where there is one, from the disk elsewhere. A short read is an error here, never
+        zeros: the only exception is the end of a partition past its file system (the NTFS backup boot sector and
+        slack), which a shadow copy doesn't serve and which is read from the disk instead."""
+        for o, ln, reader in self.src._overlay:
+            if o <= off < o + ln:
+                if off + n > o + ln:
+                    raise OSError(0, f"read at byte {off:,} crosses the end of a snapshot")
+                d = reader.read(off - o, n)
+                if len(d) == n:
+                    return d
+                got = off + len(d)
+                fs_end = self.fs_end.get(o)
+                if fs_end is not None and got >= fs_end:
+                    rest = self.src._read_direct(got, n - len(d))
+                    if len(rest) == n - len(d):
+                        return d + rest
+                raise OSError(0, f"short read from the snapshot at byte {got:,}")
+        d = self.src._read_direct(off, n)
+        if len(d) != n:
+            raise OSError(0, f"short read at byte {off + len(d):,}")
+        return d
+
     def _read_chunk(self, off, n) -> tuple[bytes, list]:
         """Read with retries and smaller blocks; unreadable sectors come back as zeros with their offsets."""
-        src, ss = self.src, self.plan.sector_size
+        src, ss = self, self.plan.sector_size
         for attempt in range(2):
             try:
-                d = src.read(off, n)
+                d = src._src_read(off, n)
                 if len(d) == n:
                     return d, []
             except OSError:
@@ -1454,7 +1497,7 @@ class CloneJob:
             got = None
             for _ in range(2):
                 try:
-                    d = src.read(off + b, m)
+                    d = src._src_read(off + b, m)
                     if len(d) == m:
                         got = d
                         break
@@ -1466,7 +1509,7 @@ class CloneJob:
                     sec = None
                     for _ in range(2):
                         try:
-                            d = src.read(off + b + s, ss)
+                            d = src._src_read(off + b + s, ss)
                             if len(d) == ss:
                                 sec = d
                                 break

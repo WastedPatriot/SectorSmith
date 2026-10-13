@@ -47,6 +47,8 @@ CATEGORIES = [
         (None, [Item("all", "All drives", "drive", "workspace:DrivesScreen", hint="disks inventory serial")]),
         ("Tasks", [Item("health", "Health check", "health", "screens:HealthWizard", hint="smart surface scan bad"),
                    Item("clone", "Image and clone", "clone", "screens:CloneWizard", hint="backup vhd img copy"),
+                   Item("sysclone", "Clone this PC", "pc", "sysclone_screens:SysCloneWizard",
+                        hint="new drive ssd nvme upgrade system disk windows boot", destructive=True),
                    Item("open", "Open disk image", "image", "app:open_image_dialog", hint="vhd img dd")]),
         ("Advanced", [Item("expert", "Expert tools", "terminal", "app:open_advanced", hint="advanced hex classic")]),
     ], working_on=True, shortcut="Ctrl+4"),

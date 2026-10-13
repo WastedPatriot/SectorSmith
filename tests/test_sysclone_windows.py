@@ -193,7 +193,7 @@ try:
     check(dp(f'create vdisk file="{SRC_VHD}" maximum=1200 type=expandable\nselect vdisk file="{SRC_VHD}"\n'
              'attach vdisk\nconvert gpt noerr\n'
              'create partition efi size=100\nformat quick fs=fat32 label=SYSTEM\n'
-             'create partition msr size=16 noerr\n'
+             'create partition msr size=16 noerr\n'   # convert gpt may already have made one
              f'create partition primary size=850\nformat quick fs=ntfs label=Windows\nassign letter={W}\n'
              'create partition primary\nformat quick fs=ntfs label=Recovery\n'
              'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"\ngpt attributes=0x8000000000000001\n'),
@@ -204,9 +204,13 @@ try:
     src_vols = [v["guid"] for v in windows_volume_map() if v["disk"] == n_src]
     root = f"{W}:\\"
     files = {}
-    for rel in ("Windows\\System32\\ntoskrnl.exe", "Windows\\System32\\hal.dll", "Windows\\System32\\winload.efi",
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    boot_files = ["Windows\\System32\\bootstr.dll", "Windows\\System32\\winresume.efi"] + [
+        "Windows\\System32\\" + loc + "\\bootstr.dll.mui" for loc in os.listdir(os.path.join(sysroot, "System32"))
+        if os.path.exists(os.path.join(sysroot, "System32", loc, "bootstr.dll.mui"))]
+    for rel in ["Windows\\System32\\ntoskrnl.exe", "Windows\\System32\\hal.dll", "Windows\\System32\\winload.efi",
                 "Windows\\System32\\drivers\\ntfs.sys", "Windows\\explorer.exe",
-                "Windows\\System32\\config\\BCD-Template"):
+                "Windows\\System32\\config\\BCD-Template"] + boot_files:
         os.makedirs(os.path.dirname(root + rel), exist_ok=True)
         try:
             shutil.copyfile(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), rel.split("\\", 1)[1]),
@@ -250,6 +254,7 @@ try:
         time.sleep(3)
         n = disk_of(vhd)
         dst = device(n)
+        src.close()
         print(f"   {label}: target is disk {n}, {dst.size >> 20} MiB")
         layer = WindowsLayer(windows_letter=W, bcdboot_source=None if own_boot else r"C:\Windows")
         min_free = 32 * MiB
@@ -285,7 +290,9 @@ try:
                 if line.strip() in src_vols]
         check(not left, f"{label}: no shadow copy left behind {left}")
         if not ok_status:
-            check(sysclone.is_marked_unusable(device(n)), f"{label}: a failed clone leaves the target marked unusable")
+            d = device(n)
+            check(sysclone.is_marked_unusable(d), f"{label}: a failed clone leaves the target marked unusable")
+            d.close()
             return res
         plan = pf.plan
         boot, win, undo = target_view(n, plan)
